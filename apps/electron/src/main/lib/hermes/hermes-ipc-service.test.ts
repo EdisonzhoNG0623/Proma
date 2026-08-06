@@ -2,7 +2,7 @@
  * Hermes IPC 服务 BDD 测试
  *
  * 覆盖：target CRUD、凭据保存/更新/删除、删除 target 联动清理凭据、能力探测缓存。
- * 注意：HermesIpcService 使用全局单例 store（~/.proma），测试需通过 env 隔离配置目录。
+ * 通过注入临时目录 store 实例隔离数据，不污染真实配置。
  */
 
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
@@ -10,38 +10,28 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HermesIpcService } from './hermes-ipc-service'
+import { HermesTargetStore } from './hermes-target-store'
+import { HermesCredentialStore } from './hermes-credential-store'
 
-// 使用临时配置目录隔离全局 store
-const dir = mkdtempSync(join(tmpdir(), 'proma-hermes-ipc-'))
-const originalConfigDir = process.env.PROMA_CONFIG_DIR
-process.env.PROMA_CONFIG_DIR = dir
+let dir: string
+let targetStore: HermesTargetStore
+let credentialStore: HermesCredentialStore
+let service: HermesIpcService
 
-// 重新加载目标 store 单例（HermesTargetStore 默认路径读取 PROMA_CONFIG_DIR）
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { hermesTargetStore } = require('./hermes-target-store') as typeof import('./hermes-target-store')
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { hermesCredentialStore } = require('./hermes-credential-store') as typeof import('./hermes-credential-store')
-
-// 注入 fake crypto 使 safeStorage 在测试环境可用
 const fakeCrypto = {
   isEncryptionAvailable: () => true,
   encryptString: (plain: string) => Buffer.from(`enc:${plain}`),
   decryptString: (buffer: Buffer) => buffer.toString('utf-8').replace(/^enc:/, ''),
 }
-;(hermesCredentialStore as unknown as { cryptoImpl: unknown }).cryptoImpl = fakeCrypto
-
-const service = new HermesIpcService()
 
 beforeAll(() => {
-  process.env.PROMA_CONFIG_DIR = dir
+  dir = mkdtempSync(join(tmpdir(), 'proma-hermes-ipc-'))
+  targetStore = new HermesTargetStore(join(dir, 'hermes-targets.json'))
+  credentialStore = new HermesCredentialStore(join(dir, 'hermes-credentials.json'), fakeCrypto)
+  service = new HermesIpcService({ targetStore, credentialStore })
 })
 
 afterAll(() => {
-  if (originalConfigDir === undefined) {
-    delete process.env.PROMA_CONFIG_DIR
-  } else {
-    process.env.PROMA_CONFIG_DIR = originalConfigDir
-  }
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -87,7 +77,7 @@ describe('HermesIpcService 凭据管理', () => {
     expect(target?.auth.dashboardCredentialRef).toBe(result.ref)
     expect(target?.auth.dashboardProvider).toBe('basic')
     // 明文不落盘
-    const raw = hermesCredentialStore.getCredential(result.ref)
+    const raw = credentialStore.getCredential(result.ref)
     expect(raw).toContain('p@ss') // fake crypto 可逆，真实环境为密文
   })
 
@@ -130,8 +120,8 @@ describe('HermesIpcService 凭据管理', () => {
     expect(result.removedCredentialRefs).toContain(pwRef)
     expect(result.removedCredentialRefs).toContain(apiRef)
     // 凭据已清理
-    expect(hermesCredentialStore.getCredential(pwRef)).toBeNull()
-    expect(hermesCredentialStore.getCredential(apiRef)).toBeNull()
+    expect(credentialStore.getCredential(pwRef)).toBeNull()
+    expect(credentialStore.getCredential(apiRef)).toBeNull()
   })
 
   test('Given 删除不存在的 target When delete Then 返回 ok=false', () => {

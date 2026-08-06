@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
+import { getHermesTargetsPath } from '../config-paths'
 import type {
   HermesTarget,
   HermesTargetCreateInput,
@@ -33,9 +34,9 @@ export const DEFAULT_HERMES_API_SERVER_PORT = 8642
 /** SSH 默认端口 */
 export const DEFAULT_SSH_PORT = 22
 
-/** 默认配置文件路径（可被构造函数覆盖以便测试） */
+/** 默认配置文件路径（与 Proma 配置目录一致，开发模式为 .proma-dev） */
 function defaultHermesTargetsPath(): string {
-  return join(homedir(), process.env.PROMA_CONFIG_DIR ?? '.proma', 'hermes-targets.json')
+  return getHermesTargetsPath()
 }
 
 /**
