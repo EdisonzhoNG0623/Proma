@@ -88,6 +88,29 @@ function normalizeAuthFlows(value: unknown): string[] {
   return []
 }
 
+/** 探测 Dashboard 是否支持密码登录（GET /api/auth/providers，best-effort） */
+async function probePasswordSupport(transport: HermesTransport): Promise<boolean> {
+  try {
+    const providers = await transport.requestJson('/api/auth/providers', {
+      timeoutMs: 6_000,
+    })
+    if (providers.status === 200 && providers.body && typeof providers.body === 'object') {
+      const list = (providers.body as { providers?: unknown }).providers
+      if (Array.isArray(list)) {
+        return list.some(
+          (item) =>
+            typeof item === 'object' &&
+            item !== null &&
+            (item as { supports_password?: unknown }).supports_password === true,
+        )
+      }
+    }
+  } catch {
+    // providers 探测失败不影响 dashboard 分类
+  }
+  return false
+}
+
 /**
  * 探测 Dashboard。
  *
@@ -130,30 +153,11 @@ export async function probeDashboard(
   // 非 JSON 响应已在 transport 层抛 protocol-incompatible
   if (status === 401) {
     // 认证开启：探测密码 provider 支持
-    let supportsPassword = false
-    try {
-      const providers = await transport.requestJson('/api/auth/providers', {
-        timeoutMs: 6_000,
-      })
-      if (providers.status === 200 && providers.body && typeof providers.body === 'object') {
-        const list = (providers.body as { providers?: unknown }).providers
-        if (Array.isArray(list)) {
-          supportsPassword = list.some(
-            (item) =>
-              typeof item === 'object' &&
-              item !== null &&
-              (item as { supports_password?: unknown }).supports_password === true,
-          )
-        }
-      }
-    } catch {
-      // providers 探测失败不影响 dashboard 分类
-    }
     return {
       available: true,
       authRequired: true,
       authFlows: [],
-      supportsPassword,
+      supportsPassword: await probePasswordSupport(transport),
       version: null,
       protocolIncompatible: false,
     }
@@ -171,11 +175,13 @@ export async function probeDashboard(
   }
 
   const data = body as DashboardStatusResponse
+  const authRequired = data.auth_required === true
   return {
     available: true,
-    authRequired: data.auth_required === true,
+    authRequired,
     authFlows: normalizeAuthFlows(data.auth_flows),
-    supportsPassword: false,
+    // auth_required 开启时同样探测密码 provider（200 + auth_required 场景）
+    supportsPassword: authRequired ? await probePasswordSupport(transport) : false,
     version: typeof data.version === 'string' ? data.version : null,
     protocolIncompatible: false,
   }

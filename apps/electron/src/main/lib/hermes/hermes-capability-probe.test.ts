@@ -71,6 +71,30 @@ describe('probeDashboard Dashboard 探测', () => {
     expect(result.authFlows).toEqual(['cookie'])
   })
 
+  test('Given /api/status 返回 200 且 auth_required true When 探测 Then 同样探测 providers 密码支持', async () => {
+    let providersCalled = false
+    const transport = fakeTransport((path) => {
+      if (path === '/api/status') {
+        return { status: 200, body: { version: '0.20.0', auth_required: true, auth_flows: ['cookie'] } }
+      }
+      if (path === '/api/auth/providers') {
+        providersCalled = true
+        return {
+          status: 200,
+          body: {
+            providers: [{ name: 'basic', display_name: 'Basic', supports_password: true }],
+          },
+        }
+      }
+      return { status: 404, body: {} }
+    })
+    const result = await probeDashboard(transport)
+    expect(result.available).toBe(true)
+    expect(result.authRequired).toBe(true)
+    expect(providersCalled).toBe(true)
+    expect(result.supportsPassword).toBe(true)
+  })
+
   test('Given /api/status 返回 401 When 探测 Then available 且探测 providers 密码支持', async () => {
     let providersCalled = false
     const transport = fakeTransport((path) => {
