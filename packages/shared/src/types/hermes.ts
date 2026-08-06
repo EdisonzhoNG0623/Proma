@@ -215,12 +215,22 @@ export const HERMES_IPC_CHANNELS = {
   CREATE_TARGET: 'hermes:create-target',
   /** 更新 target */
   UPDATE_TARGET: 'hermes:update-target',
-  /** 删除 target（同时清理关联凭据与 Cookie partition） */
+  /** 删除 target（同时清理关联凭据） */
   DELETE_TARGET: 'hermes:delete-target',
   /** 探测 target 能力 */
   PROBE_TARGET: 'hermes:probe-target',
   /** 测试连接（向导步骤：验证可达性与认证） */
   TEST_CONNECTION: 'hermes:test-connection',
+  /** 保存 Dashboard 账号密码凭据（加密存储，返回 ref） */
+  SET_DASHBOARD_PASSWORD: 'hermes:set-dashboard-password',
+  /** 保存 API Server key 凭据（加密存储，返回 ref） */
+  SET_API_SERVER_KEY: 'hermes:set-api-server-key',
+  /** 保存 SSH 密码凭据（加密存储，返回 ref） */
+  SET_SSH_PASSWORD: 'hermes:set-ssh-password',
+  /** 删除指定凭据 */
+  DELETE_CREDENTIAL: 'hermes:delete-credential',
+  /** 探测 target 的登录 provider 列表（supports_password） */
+  GET_AUTH_PROVIDERS: 'hermes:get-auth-providers',
 } as const
 
 /**
@@ -228,3 +238,52 @@ export const HERMES_IPC_CHANNELS = {
  */
 export type HermesIpcChannel =
   (typeof HERMES_IPC_CHANNELS)[keyof typeof HERMES_IPC_CHANNELS]
+
+// ===== Hermes IPC 输入输出类型（主进程 / preload / renderer 共用）=====
+
+/** Dashboard 登录 provider 信息 */
+export interface HermesAuthProviderInfo {
+  name: string
+  displayName: string
+  supportsPassword: boolean
+}
+
+/** 保存凭据输入（UI → IPC） */
+export interface HermesSetCredentialInput {
+  /** target id（更新 target 凭据引用时使用） */
+  targetId?: string
+  /** 凭据 ref（缺省自动生成） */
+  ref?: string
+  /** 凭据明文 */
+  secret: string
+}
+
+/** 保存 Dashboard 密码输入 */
+export interface HermesSetDashboardPasswordInput extends Omit<HermesSetCredentialInput, 'secret'> {
+  /** provider 名（如 basic） */
+  provider?: string
+  username: string
+  password: string
+}
+
+/** 保存凭据结果 */
+export interface HermesSetCredentialResult {
+  ref: string
+}
+
+/** 删除 target 结果（含已清理的凭据 ref） */
+export interface HermesDeleteTargetResult {
+  ok: boolean
+  targetId: string
+  removedCredentialRefs: string[]
+}
+
+/** 连接测试结果 */
+export interface HermesConnectionTestResult {
+  ok: boolean
+  serviceClass: HermesServiceClass | null
+  authRequired: boolean
+  supportsPassword: boolean
+  version: string | null
+  error: string | null
+}
