@@ -67,6 +67,15 @@ export function getChannelsPath(): string {
 }
 
 /**
+ * 获取 Hermes Remote 目标配置文件路径
+ *
+ * @returns ~/.proma/hermes-targets.json
+ */
+export function getHermesTargetsPath(): string {
+  return join(getConfigDir(), 'hermes-targets.json')
+}
+
+/**
  * 获取对话索引文件路径
  *
  * @returns ~/.proma/conversations.json

@@ -59,3 +59,6 @@ export * from './planning'
 
 // Agent 灵动岛相关类型
 export * from './agent-island'
+
+// Hermes Remote 相关类型
+export * from './hermes'
