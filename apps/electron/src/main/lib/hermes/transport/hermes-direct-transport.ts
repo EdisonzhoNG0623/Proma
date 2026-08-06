@@ -244,7 +244,7 @@ export class HermesDirectTransport implements HermesTransport {
     } catch (error) {
       throw mapFetchError(error, timeoutMs)
     } finally {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
     }
   }
 
@@ -252,7 +252,8 @@ export class HermesDirectTransport implements HermesTransport {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const url = joinPath(this.baseUrl, path)
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    // timeoutMs <= 0 表示长连接不设总超时（SSE 场景）；> 0 时设置超时中止
+    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null
 
     const externalAbort = (): void => controller.abort()
     options.signal?.addEventListener('abort', externalAbort, { once: true })
@@ -267,12 +268,12 @@ export class HermesDirectTransport implements HermesTransport {
         signal: controller.signal,
       })
     } catch (error) {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       options.signal?.removeEventListener('abort', externalAbort)
       throw mapFetchError(error, timeoutMs)
     }
     if (!response.ok) {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       options.signal?.removeEventListener('abort', externalAbort)
       throw new HermesError(
         `SSE 请求失败（HTTP ${response.status}）`,
@@ -281,7 +282,7 @@ export class HermesDirectTransport implements HermesTransport {
       )
     }
     if (!response.body) {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       options.signal?.removeEventListener('abort', externalAbort)
       throw new HermesError('远端未返回响应体', 'invalid-response')
     }
@@ -295,7 +296,7 @@ export class HermesDirectTransport implements HermesTransport {
     const finish = (): void => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       options.signal?.removeEventListener('abort', externalAbort)
       resolveDone()
     }
@@ -336,7 +337,10 @@ export class HermesDirectTransport implements HermesTransport {
     options: HermesRequestOptions = {},
   ): Promise<HermesWsOpenResult> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    let url = joinPath(this.baseUrl, path)
+    // 支持传入完整 ws/wss URL（如 buildTicketWsUrl 的输出）或相对路径
+    let url = /^wss?:\/\//i.test(path)
+      ? path
+      : joinPath(this.baseUrl, path)
     if (url.startsWith('https://')) {
       url = url.replace('https://', 'wss://')
     } else if (url.startsWith('http://')) {
@@ -350,7 +354,7 @@ export class HermesDirectTransport implements HermesTransport {
       ): void => {
         if (settled) return
         settled = true
-        clearTimeout(timer)
+        if (timer) clearTimeout(timer)
         options.signal?.removeEventListener('abort', onAbort)
         resolve(result)
       }
