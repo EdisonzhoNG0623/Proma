@@ -226,7 +226,21 @@ export class HermesDirectTransport implements HermesTransport {
           )
         }
       }
-      return { status: response.status, body }
+      const headers: Record<string, unknown> = {}
+      response.headers.forEach((value, key) => {
+        // 聚合同名头（如 set-cookie 多值）
+        if (key.toLowerCase() === 'set-cookie') {
+          const existing = headers[key]
+          if (existing === undefined) {
+            headers[key] = [value]
+          } else if (Array.isArray(existing)) {
+            existing.push(value)
+          }
+        } else {
+          headers[key] = value
+        }
+      })
+      return { status: response.status, body, headers }
     } catch (error) {
       throw mapFetchError(error, timeoutMs)
     } finally {
