@@ -57,3 +57,9 @@ pnpm-workspace.yaml
 
 # Proma 会话/工作区文档（不应入仓，见 CLAUDE.md 红线）
 .context/
+
+# Hermes 验收辅助（临时）
+hermes-dev.log
+hermes-mock.log
+hermes-mock-port.json
+start-hermes-mock.tmp.ts
