@@ -19,6 +19,7 @@ import {
   BookOpen,
   Wrench,
   Bot,
+  Server,
   GraduationCap,
   ArrowLeft,
   Keyboard,
@@ -62,6 +63,7 @@ import { AboutSettings } from "./AboutSettings";
 import { PromptSettings } from "./PromptSettings";
 import { ToolSettings } from "./ToolSettings";
 import { BotHubSettings } from "./BotHubSettings";
+import { HermesSettings } from "./HermesSettings";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { VoiceInputSettings } from "./VoiceInputSettings";
 import { MigrationSettings } from "./MigrationSettings";
@@ -93,6 +95,11 @@ const BOTS_TAB: TabItem = {
   id: "bots",
   label: "远程连接",
   icon: <Bot size={16} />,
+};
+const HERMES_TAB: TabItem = {
+  id: "hermes",
+  label: "Hermes 远程",
+  icon: <Server size={16} />,
 };
 const TUTORIAL_TAB: TabItem = {
   id: "tutorial",
@@ -138,6 +145,8 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
       return <AboutSettings />;
     case "bots":
       return <BotHubSettings />;
+    case "hermes":
+      return <HermesSettings />;
     case "shortcuts":
       return <ShortcutSettings />;
     case "voice-input":
@@ -271,6 +280,7 @@ export function SettingsPanel({
         TOOLS_TAB,
         VOICE_INPUT_TAB,
         BOTS_TAB,
+        HERMES_TAB,
         TUTORIAL_TAB,
         SHORTCUTS_TAB,
         ...TAIL_TABS,
@@ -281,6 +291,7 @@ export function SettingsPanel({
       TOOLS_TAB,
       VOICE_INPUT_TAB,
       BOTS_TAB,
+      HERMES_TAB,
       TUTORIAL_TAB,
       SHORTCUTS_TAB,
       ...TAIL_TABS,
