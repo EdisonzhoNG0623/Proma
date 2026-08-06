@@ -76,6 +76,15 @@ export function getHermesTargetsPath(): string {
 }
 
 /**
+ * 获取 Hermes Remote 凭据配置文件路径
+ *
+ * @returns ~/.proma/hermes-credentials.json
+ */
+export function getHermesCredentialsPath(): string {
+  return join(getConfigDir(), 'hermes-credentials.json')
+}
+
+/**
  * 获取对话索引文件路径
  *
  * @returns ~/.proma/conversations.json

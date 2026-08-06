@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
+import { getHermesCredentialsPath } from '../config-paths'
 import type { safeStorage } from 'electron'
 
 /** 配置文件版本 */
@@ -71,9 +72,9 @@ export function createElectronCredentialCrypto(
   }
 }
 
-/** 默认配置文件路径（可被构造函数覆盖以便测试） */
+/** 默认配置文件路径（与 Proma 配置目录一致，开发模式为 .proma-dev） */
 function defaultHermesCredentialsPath(): string {
-  return join(homedir(), process.env.PROMA_CONFIG_DIR ?? '.proma', 'hermes-credentials.json')
+  return getHermesCredentialsPath()
 }
 
 /**
@@ -95,9 +96,8 @@ export class HermesCredentialStore {
   private getCrypto(): CredentialCrypto {
     if (!this.cryptoImpl) {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      this.cryptoImpl = createElectronCredentialCrypto(
-        require('electron') as typeof safeStorage,
-      )
+      const electron = require('electron') as typeof import('electron')
+      this.cryptoImpl = createElectronCredentialCrypto(electron.safeStorage)
     }
     return this.cryptoImpl
   }

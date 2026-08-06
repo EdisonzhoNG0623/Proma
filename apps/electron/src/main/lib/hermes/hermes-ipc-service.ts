@@ -31,27 +31,42 @@ import { redactSecrets } from './hermes-errors'
 
 /**
  * Hermes IPC 服务
+ *
+ * 默认使用全局 store 单例；测试可注入临时目录的 store 实例以隔离数据。
  */
 export class HermesIpcService {
+  private readonly targetStore: typeof hermesTargetStore
+  private readonly credentialStore: typeof hermesCredentialStore
+
+  constructor(
+    stores: {
+      targetStore?: typeof hermesTargetStore
+      credentialStore?: typeof hermesCredentialStore
+    } = {},
+  ) {
+    this.targetStore = stores.targetStore ?? hermesTargetStore
+    this.credentialStore = stores.credentialStore ?? hermesCredentialStore
+  }
+
   listTargets(): HermesTarget[] {
-    return hermesTargetStore.listTargets()
+    return this.targetStore.listTargets()
   }
 
   getTarget(id: string): HermesTarget | null {
-    return hermesTargetStore.getTarget(id)
+    return this.targetStore.getTarget(id)
   }
 
   createTarget(input: HermesTargetCreateInput): HermesTarget {
-    return hermesTargetStore.createTarget(input)
+    return this.targetStore.createTarget(input)
   }
 
   updateTarget(id: string, input: HermesTargetUpdateInput): HermesTarget {
-    return hermesTargetStore.updateTarget(id, input)
+    return this.targetStore.updateTarget(id, input)
   }
 
   /** 删除 target 并清理关联凭据（dashboard / api server / ssh） */
   deleteTarget(id: string): HermesDeleteTargetResult {
-    const removed = hermesTargetStore.deleteTarget(id)
+    const removed = this.targetStore.deleteTarget(id)
     if (!removed) {
       return { ok: false, targetId: id, removedCredentialRefs: [] }
     }
@@ -60,25 +75,25 @@ export class HermesIpcService {
     if (removed.auth.apiServerKeyRef) refs.push(removed.auth.apiServerKeyRef)
     if (removed.ssh?.credentialRef) refs.push(removed.ssh.credentialRef)
     for (const ref of refs) {
-      hermesCredentialStore.deleteCredential(ref)
+      this.credentialStore.deleteCredential(ref)
     }
     return { ok: true, targetId: id, removedCredentialRefs: refs }
   }
 
   /** 保存任意类型凭据 */
   setCredential(kind: HermesCredentialKind, input: HermesSetCredentialInput): HermesSetCredentialResult {
-    const ref = hermesCredentialStore.setCredential(kind, input.secret, input.ref)
+    const ref = this.credentialStore.setCredential(kind, input.secret, input.ref)
     return { ref }
   }
 
   /** 保存 Dashboard 账号密码（JSON 编码）并更新 target 引用 */
   setDashboardPassword(input: HermesSetDashboardPasswordInput): HermesSetCredentialResult {
     const secret = JSON.stringify({ username: input.username, password: input.password })
-    const ref = hermesCredentialStore.setCredential('dashboard-password', secret, input.ref)
+    const ref = this.credentialStore.setCredential('dashboard-password', secret, input.ref)
     if (input.targetId) {
-      const target = hermesTargetStore.getTarget(input.targetId)
+      const target = this.targetStore.getTarget(input.targetId)
       if (target) {
-        hermesTargetStore.updateTarget(input.targetId, {
+        this.targetStore.updateTarget(input.targetId, {
           auth: {
             ...target.auth,
             dashboardCredentialRef: ref,
@@ -92,11 +107,11 @@ export class HermesIpcService {
 
   /** 保存 API Server key 并更新 target 引用 */
   setApiServerKey(input: HermesSetCredentialInput): HermesSetCredentialResult {
-    const ref = hermesCredentialStore.setCredential('api-server-key', input.secret, input.ref)
+    const ref = this.credentialStore.setCredential('api-server-key', input.secret, input.ref)
     if (input.targetId) {
-      const target = hermesTargetStore.getTarget(input.targetId)
+      const target = this.targetStore.getTarget(input.targetId)
       if (target) {
-        hermesTargetStore.updateTarget(input.targetId, {
+        this.targetStore.updateTarget(input.targetId, {
           auth: { ...target.auth, apiServerKeyRef: ref },
         })
       }
@@ -106,11 +121,11 @@ export class HermesIpcService {
 
   /** 保存 SSH 密码并更新 target 引用 */
   setSshPassword(input: HermesSetCredentialInput): HermesSetCredentialResult {
-    const ref = hermesCredentialStore.setCredential('ssh-password', input.secret, input.ref)
+    const ref = this.credentialStore.setCredential('ssh-password', input.secret, input.ref)
     if (input.targetId) {
-      const target = hermesTargetStore.getTarget(input.targetId)
+      const target = this.targetStore.getTarget(input.targetId)
       if (target?.ssh) {
-        hermesTargetStore.updateTarget(input.targetId, {
+        this.targetStore.updateTarget(input.targetId, {
           ssh: { ...target.ssh, credentialRef: ref },
         })
       }
@@ -119,12 +134,12 @@ export class HermesIpcService {
   }
 
   deleteCredential(ref: string): boolean {
-    return hermesCredentialStore.deleteCredential(ref)
+    return this.credentialStore.deleteCredential(ref)
   }
 
   /** 探测 target 能力并缓存快照 */
   async probeTarget(targetId: string): Promise<HermesCapabilities> {
-    const target = hermesTargetStore.getTarget(targetId)
+    const target = this.targetStore.getTarget(targetId)
     if (!target) {
       throw new Error('Hermes target 不存在')
     }
@@ -134,7 +149,7 @@ export class HermesIpcService {
         dashboardTransport: transport,
         apiServerTransport: transport,
       })
-      hermesTargetStore.updateTarget(targetId, { lastCapabilitySnapshot: snapshot })
+      this.targetStore.updateTarget(targetId, { lastCapabilitySnapshot: snapshot })
       return snapshot
     } finally {
       transport.dispose()
@@ -167,7 +182,7 @@ export class HermesIpcService {
 
   /** 探测 target 的登录 provider 列表（GET /api/auth/providers，公开接口） */
   async getAuthProviders(targetId: string): Promise<HermesAuthProviderInfo[]> {
-    const target = hermesTargetStore.getTarget(targetId)
+    const target = this.targetStore.getTarget(targetId)
     if (!target) {
       throw new Error('Hermes target 不存在')
     }
