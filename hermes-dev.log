@@ -1,0 +1,113 @@
+$ bun run --filter='@proma/electron' dev
+@proma/electron dev: [vite] $ vite dev
+@proma/electron dev: [electron] $ bun run dev:kill && bun run build:main && bun run build:preload && bun run build:native-helpers && bun run build:resources && bun run scripts/sleep.ts 2 && concurrently -k -n main,preload,app -c yellow,magenta,cyan "bun run watch:main" "bun run watch:preload" "bunx electronmon ."
+@proma/electron dev: [electron] $ bun run scripts/dev-kill.ts
+@proma/electron dev: [vite] 
+@proma/electron dev: [vite]   [32m[1mVITE[22m v6.4.1[39m  [2mready in [0m[1m310[22m[2m[0m ms[22m
+@proma/electron dev: [vite] 
+@proma/electron dev: [vite]   [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m5173[22m/[39m
+@proma/electron dev: [electron] $ esbuild src/main/index.ts --bundle --platform=node --format=cjs --outfile=dist/main.cjs --external:electron --external:@anthropic-ai/claude-agent-sdk --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-ai --external:sharp
+@proma/electron dev: [electron] 
+@proma/electron dev: [electron]   dist\main.cjs  26.9mb
+@proma/electron dev: [electron] 
+@proma/electron dev: [electron] Done in 820ms
+@proma/electron dev: [electron] $ esbuild src/preload/index.ts --bundle --platform=node --format=cjs --outfile=dist/preload.cjs --external:electron
+@proma/electron dev: [electron] 
+@proma/electron dev: [electron]   dist\preload.cjs  96.4kb
+@proma/electron dev: [electron] 
+@proma/electron dev: [electron] Done in 34ms
+@proma/electron dev: [electron] $ bun run build:agent-island-native && bun run build:eventkit-native
+@proma/electron dev: [electron] $ bun run scripts/build-agent-island-native.ts
+@proma/electron dev: [electron] [agent-island-native] skipped (macOS only)
+@proma/electron dev: [electron] $ bun run scripts/build-eventkit-native.ts
+@proma/electron dev: [electron] [eventkit-native] skipped (macOS only)
+@proma/electron dev: [electron] $ cp -r resources dist/ 2>/dev/null || true
+@proma/electron dev: [electron] [main] $ esbuild src/main/index.ts --bundle --platform=node --format=cjs --outfile=dist/main.cjs --external:electron --external:@anthropic-ai/claude-agent-sdk --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-ai --external:sharp --watch=forever
+@proma/electron dev: [electron] [preload] $ esbuild src/preload/index.ts --bundle --platform=node --format=cjs --outfile=dist/preload.cjs --external:electron --watch=forever
+@proma/electron dev: [electron] [preload] [watch] build finished, watching for changes...
+@proma/electron dev: [electron] [app] 
+@proma/electron dev: [electron] [app] [electronmon] waiting for a change to restart it
+@proma/electron dev: [electron] [app] [配置] 配置目录: ~/.proma-dev/（开发模式）
+@proma/electron dev: [electron] [main] [watch] build finished, watching for changes...
+@proma/electron dev: [electron] [app] [electronmon] main file change: dist\main.cjs
+@proma/electron dev: [electron] [app] [协作工具] EventBus 阻塞事件监听已注册
+@proma/electron dev: [electron] [app] [Claude 适配器] 退出扫描执行失败: Error: Command failed: powershell -NoProfile -Command Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq 30480 -and $_.CommandLine -like '*claude-agent-sdk*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+@proma/electron dev: [electron] [app]     at genericNodeError (node:internal/errors:985:15)
+@proma/electron dev: [electron] [app]     at wrappedFn (node:internal/errors:539:14)
+@proma/electron dev: [electron] [app]     at checkExecSyncError (node:child_process:939:11)
+@proma/electron dev: [electron] [app]     at execFileSync (node:child_process:975:15)
+@proma/electron dev: [electron] [app]     at func (node:electron/js2c/node_init:2:2625)
+@proma/electron dev: [electron] [app]     at scanAndKillOrphanedClaudeSubprocesses (C:\Users\Edzzz\.proma\agent-workspaces\default\workspace-files\Proma\apps\electron\dist\main.cjs:437791:51)
+@proma/electron dev: [electron] [app]     at killOrphanedClaudeSubprocesses (C:\Users\Edzzz\.proma\agent-workspaces\default\workspace-files\Proma\apps\electron\dist\main.cjs:605016:3)
+@proma/electron dev: [electron] [app]     at EventEmitter.<anonymous> (C:\Users\Edzzz\.proma\agent-workspaces\default\workspace-files\Proma\apps\electron\dist\main.cjs:632978:7)
+@proma/electron dev: [electron] [app]     at EventEmitter.emit (node:events:509:28)
+@proma/electron dev: [electron] [app]     at exit (C:\Users\Edzzz\.proma\agent-workspaces\default\workspace-files\Proma\node_modules\electronmon\src\hook.js:36:16) {
+@proma/electron dev: [electron] [app]   status: 4294967295,
+@proma/electron dev: [electron] [app]   signal: null,
+@proma/electron dev: [electron] [app]   output: [ null, null, null ],
+@proma/electron dev: [electron] [app]   pid: 9856,
+@proma/electron dev: [electron] [app]   stdout: null,
+@proma/electron dev: [electron] [app]   stderr: null
+@proma/electron dev: [electron] [app] }
+@proma/electron dev: [electron] [app] [飞书 BridgeManager] 所有 Bot 已停止
+@proma/electron dev: [electron] [app] [钉钉 BridgeManager] 所有 Bot 已停止
+@proma/electron dev: [electron] [app] [微信 Bridge] 已停止
+@proma/electron dev: [electron] [app] [全局快捷键] 已注销所有
+@proma/electron dev: [electron] [app] [electronmon] restarting app due to file change
+@proma/electron dev: [electron] [app] 
+@proma/electron dev: [electron] [app] [配置] 配置目录: ~/.proma-dev/（开发模式）
+@proma/electron dev: [electron] [app] [协作工具] EventBus 阻塞事件监听已注册
+@proma/electron dev: [electron] [app] [运行时初始化] 开始初始化运行时环境...
+@proma/electron dev: [electron] [app] [Node.js 检测] 开始检测 Node.js 运行时...
+@proma/electron dev: [electron] [app] [Node.js 检测] 找到 Node.js: C:\Program Files\nodejs\node.exe (26.5.1)
+@proma/electron dev: [electron] [app] [Bun 检测] 开始检测 Bun 运行时（可选组件）...
+@proma/electron dev: [electron] [app] [Bun 检测] 未找到 Bun（可选，不影响 Proma 核心功能）
+@proma/electron dev: [electron] [app] [Git 检测] 开始检测 Git 运行时...
+@proma/electron dev: [electron] [app] [Git 检测] 找到 Git: C:\Program Files\Git\cmd\git.exe (2.54.0)
+@proma/electron dev: [electron] [app] [Git Bash 检测] 找到 Git Bash (常见路径): C:\Program Files\Git\bin\bash.exe (5.3.9)
+@proma/electron dev: [electron] [app] [WSL 检测] WSL 未就绪
+@proma/electron dev: [electron] [app] [运行时初始化] Shell 环境检测完成: {
+@proma/electron dev: [electron] [app]   gitBash: '✅ 5.3.9',
+@proma/electron dev: [electron] [app]   wsl: '❌ WSL 未就绪，如已安装 Git Bash 可不安装',
+@proma/electron dev: [electron] [app]   recommended: 'git-bash'
+@proma/electron dev: [electron] [app] }
+@proma/electron dev: [electron] [app] [运行时初始化] 初始化完成 (耗时 736ms)
+@proma/electron dev: [electron] [app] [运行时初始化] 状态: {
+@proma/electron dev: [electron] [app]   node: '✅ 26.5.1',
+@proma/electron dev: [electron] [app]   bun: '❌ null',
+@proma/electron dev: [electron] [app]   git: '✅ 2.54.0',
+@proma/electron dev: [electron] [app]   shell: '✅ git-bash',
+@proma/electron dev: [electron] [app]   envLoaded: '✅'
+@proma/electron dev: [electron] [app] }
+@proma/electron dev: [electron] [app] [IPC] 正在注册 IPC 处理器...
+@proma/electron dev: [electron] [app] [IPC] IPC 处理器注册完成
+@proma/electron dev: [electron] [app] [更新 IPC] 正在注册更新 IPC 处理器...
+@proma/electron dev: [electron] [app] [更新 IPC] 更新 IPC 处理器注册完成
+@proma/electron dev: [electron] [app] App icon not found at: C:\Users\Edzzz\.proma\agent-workspaces\default\workspace-files\Proma\apps\electron\dist\resources\icon.ico
+@proma/electron dev: [electron] [app] Tray icon not found at: C:\Users\Edzzz\.proma\agent-workspaces\default\workspace-files\Proma\apps\electron\dist\resources\proma-logos\iconTemplate.png
+@proma/electron dev: [electron] [app] [工作区监听] 已启动文件监听: C:\Users\Edzzz\.proma-dev\agent-workspaces
+@proma/electron dev: [electron] [app] [Chat 工具监听] 配置文件不存在，跳过: C:\Users\Edzzz\.proma-dev\chat-tools.json
+@proma/electron dev: [electron] [app] [快速任务窗口] 预创建完成
+@proma/electron dev: [electron] [app] [agent-island] 使用 Electron 降级窗口：non-macOS platform
+@proma/electron dev: [electron] [app] [全局快捷键] 注册失败（可能被占用）: quick-task → Alt+Space
+@proma/electron dev: [electron] [app] [全局快捷键] 注册失败（可能被占用）: show-main-window → CommandOrControl+Shift+P
+@proma/electron dev: [electron] [app] [全局快捷键] 注册成功: open-planning → CommandOrControl+Shift+T
+@proma/electron dev: [electron] [app] [全局快捷键] 跳过注册: voice-dictation 未启用
+@proma/electron dev: [electron] [app] [Bridge Registry] 自愈守护已启动
+@proma/electron dev: [electron] [app] [定时任务] 调度器已启动，tick 周期 30s
+@proma/electron dev: [electron] [app] (node:19376) electron: Failed to load URL: file:///C:/Users/Edzzz/.proma/agent-workspaces/default/workspace-files/Proma/apps/electron/dist/resources/startup-splash/index.html with error: ERR_FILE_NOT_FOUND
+@proma/electron dev: [electron] [app] (Use `electron --trace-warnings ...` to show where the warning was created)
+@proma/electron dev: [electron] [app] [启动] 原生启动页加载失败，将继续启动主窗口: Error: ERR_FILE_NOT_FOUND (-6) loading 'file:///C:/Users/Edzzz/.proma/agent-workspaces/default/workspace-files/Proma/apps/electron/dist/resources/startup-splash/index.html'
+@proma/electron dev: [electron] [app]     at rejectAndCleanup (node:electron/js2c/browser_init:2:95767)
+@proma/electron dev: [electron] [app]     at WebContents.finishListener (node:electron/js2c/browser_init:2:95929)
+@proma/electron dev: [electron] [app]     at WebContents.emit (node:events:509:28) {
+@proma/electron dev: [electron] [app]   errno: -6,
+@proma/electron dev: [electron] [app]   code: 'ERR_FILE_NOT_FOUND',
+@proma/electron dev: [electron] [app]   url: 'file:///C:/Users/Edzzz/.proma/agent-workspaces/default/workspace-files/Proma/apps/electron/dist/resources/startup-splash/index.html'
+@proma/electron dev: [electron] [app] }
+@proma/electron dev: [vite] Browserslist: browsers data (caniuse-lite) is 7 months old. Please run:
+@proma/electron dev: [vite]   npx update-browserslist-db@latest
+@proma/electron dev: [vite]   Why you should do it regularly: https://github.com/browserslist/update-db#readme
+@proma/electron dev: [electron] [app] [设置] 已更新 keys: mainWindowState
+@proma/electron dev: [electron] [app] [设置] 已更新 keys: scratchPadActive
+@proma/electron dev: [electron] [app] [设置] 已更新 keys: tabState
