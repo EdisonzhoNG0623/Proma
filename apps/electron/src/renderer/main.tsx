@@ -64,6 +64,7 @@ import {
   initializeMarkdownFontSize,
 } from './atoms/markdown-font-size'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
+import { useHermesTargetsInitializer } from './hooks/useHermesListeners'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
 import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID } from './atoms/tab-atoms'
 import type { TabItem } from './atoms/tab-atoms'
@@ -675,6 +676,12 @@ function AgentListenersInitializer(): null {
   return null
 }
 
+/** Hermes Remote 初始化：启动时加载 target 列表 */
+function HermesInitializer(): null {
+  useHermesTargetsInitializer()
+  return null
+}
+
 /**
  * Chat 工具初始化组件
  *
@@ -1126,6 +1133,7 @@ if (isQuickTaskWindow) {
       <MarkdownFontSizeInitializer />
       <ChatListenersInitializer />
       <AgentListenersInitializer />
+      <HermesInitializer />
       <ChatToolInitializer />
       <UpdaterInitializer />
       <AutomationInitializer />
