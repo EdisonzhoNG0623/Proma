@@ -6,7 +6,7 @@
  */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS } from '@proma/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, HERMES_IPC_CHANNELS } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import type {
   RuntimeStatus,
@@ -1209,6 +1209,22 @@ export interface ElectronAPI {
   /** 主应用用于确认完成会话已查看；macOS 原生 Island 消费主进程投影。 */
   agentIsland: {
     markSessionViewed: (sessionId: string) => Promise<void>
+  }
+
+  /** Hermes Remote 连接管理 */
+  hermes: {
+    listTargets: () => Promise<import('@proma/shared').HermesTarget[]>
+    getTarget: (id: string) => Promise<import('@proma/shared').HermesTarget | null>
+    createTarget: (input: import('@proma/shared').HermesTargetCreateInput) => Promise<import('@proma/shared').HermesTarget>
+    updateTarget: (id: string, input: import('@proma/shared').HermesTargetUpdateInput) => Promise<import('@proma/shared').HermesTarget>
+    deleteTarget: (id: string) => Promise<import('@proma/shared').HermesDeleteTargetResult>
+    probeTarget: (id: string) => Promise<import('@proma/shared').HermesCapabilities>
+    testConnection: (id: string) => Promise<import('@proma/shared').HermesConnectionTestResult>
+    getAuthProviders: (id: string) => Promise<import('@proma/shared').HermesAuthProviderInfo[]>
+    setDashboardPassword: (input: import('@proma/shared').HermesSetDashboardPasswordInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
+    setApiServerKey: (input: import('@proma/shared').HermesSetCredentialInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
+    setSshPassword: (input: import('@proma/shared').HermesSetCredentialInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
+    deleteCredential: (ref: string) => Promise<boolean>
   }
 }
 
@@ -2734,6 +2750,27 @@ const electronAPI: ElectronAPI = {
   agentIsland: {
     markSessionViewed: (sessionId: string) =>
       ipcRenderer.invoke(AGENT_ISLAND_IPC_CHANNELS.MARK_SESSION_VIEWED, sessionId),
+  },
+
+  // ===== Hermes Remote =====
+  hermes: {
+    listTargets: () => ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_TARGETS),
+    getTarget: (id: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.GET_TARGET, id),
+    createTarget: (input: import('@proma/shared').HermesTargetCreateInput) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_TARGET, input),
+    updateTarget: (id: string, input: import('@proma/shared').HermesTargetUpdateInput) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.UPDATE_TARGET, id, input),
+    deleteTarget: (id: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.DELETE_TARGET, id),
+    probeTarget: (id: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.PROBE_TARGET, id),
+    testConnection: (id: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.TEST_CONNECTION, id),
+    getAuthProviders: (id: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.GET_AUTH_PROVIDERS, id),
+    setDashboardPassword: (input: import('@proma/shared').HermesSetDashboardPasswordInput) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.SET_DASHBOARD_PASSWORD, input),
+    setApiServerKey: (input: import('@proma/shared').HermesSetCredentialInput) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.SET_API_SERVER_KEY, input),
+    setSshPassword: (input: import('@proma/shared').HermesSetCredentialInput) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.SET_SSH_PASSWORD, input),
+    deleteCredential: (ref: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.DELETE_CREDENTIAL, ref),
   },
 }
 
