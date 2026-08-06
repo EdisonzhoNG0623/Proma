@@ -31,6 +31,10 @@ import type {
 import { ClaudeAgentAdapter, scanAndKillOrphanedClaudeSubprocesses } from './adapters/claude-agent-adapter'
 import { PiAgentAdapter, cleanupPiRuntimeResources } from './adapters/pi-agent-adapter'
 import { RuntimeRoutingAgentAdapter } from './adapters/runtime-routing-agent-adapter'
+import { HermesRuntimeFacade } from './hermes/hermes-runtime-facade'
+import { hermesTargetStore } from './hermes/hermes-target-store'
+import { hermesCredentialStore } from './hermes/hermes-credential-store'
+import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes/hermes-connection'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentOrchestrator } from './agent-orchestrator'
 import { getAgentSessionWorkspacePath } from './config-paths'
@@ -43,9 +47,43 @@ import { sendAgentStreamComplete } from './agent-completion-payload'
 // ===== 实例创建 =====
 
 const eventBus = new AgentEventBus()
+
+/**
+ * Hermes Remote Runtime Facade（External Runtime）。
+ *
+ * 会话绑定（hermesTargetId/hermesProfile/hermesRemoteSessionId）持久化在 AgentSessionMeta；
+ * Hermes 的 Skills/Memory/Automation 与 Proma 本地完全隔离，不在此处映射。
+ */
+const hermesFacade = new HermesRuntimeFacade({
+  getTarget: (targetId) => hermesTargetStore.getTarget(targetId),
+  getCredential: (ref) => (ref ? hermesCredentialStore.getCredential(ref) : null),
+  readDashboardPassword: (ref) => {
+    const secret = ref ? hermesCredentialStore.getCredential(ref) : null
+    return secret ? parseDashboardPasswordSecret(secret) : null
+  },
+  getBinding: (sessionId) => {
+    const meta = getAgentSessionMeta(sessionId)
+    if (!meta?.hermesTargetId) return null
+    return {
+      targetId: meta.hermesTargetId,
+      profile: meta.hermesProfile,
+      remoteSessionId: meta.hermesRemoteSessionId,
+    }
+  },
+  persistRemoteSessionId: (sessionId, remoteSessionId) => {
+    try {
+      updateAgentSessionMeta(sessionId, { hermesRemoteSessionId: remoteSessionId })
+    } catch {
+      // 会话可能已删除；远端会话仍可通过 Dashboard 会话列表访问
+    }
+  },
+  buildTransport: async (target) => buildHermesTransport(target),
+})
+
 const adapter = new RuntimeRoutingAgentAdapter({
   claude: new ClaudeAgentAdapter(),
   pi: new PiAgentAdapter(),
+  'hermes-remote': hermesFacade,
 })
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
 

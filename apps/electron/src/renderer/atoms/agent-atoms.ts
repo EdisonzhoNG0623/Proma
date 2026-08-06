@@ -7,7 +7,7 @@
 
 import { atom } from 'jotai'
 import { atomFamily, atomWithStorage } from 'jotai/utils'
-import type { AgentSessionMeta, AgentEvent, AgentWorkspace, AgentPendingFile, RetryAttempt, PromaPermissionMode, PermissionRequest, AskUserRequest, ExitPlanModeRequest, ThinkingConfig, AgentEffort, SDKMessage, UnstagedChangesResult } from '@proma/shared'
+import type { AgentSessionMeta, AgentEvent, AgentWorkspace, AgentPendingFile, RetryAttempt, PromaPermissionMode, PermissionRequest, AskUserRequest, ExitPlanModeRequest, ThinkingConfig, AgentEffort, SDKMessage, UnstagedChangesResult, AgentRuntime } from '@proma/shared'
 import { PROMA_DEFAULT_PERMISSION_MODE } from '@proma/shared'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
 import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
@@ -284,7 +284,7 @@ export const agentModelIdAtom = atom<string | null>(null)
 /** Agent 启用的渠道 ID 列表（多选，设置页 Switch 开关控制） */
 export const agentChannelIdsAtom = atom<string[]>([])
 /** 新 Agent 会话默认 runtime */
-export const agentRuntimeAtom = atom<'claude' | 'pi'>('pi')
+export const agentRuntimeAtom = atom<AgentRuntime>('pi')
 
 /** Per-session 渠道 ID Map — sessionId → channelId */
 export const agentSessionChannelMapAtom = atom<Map<string, string>>(new Map())
