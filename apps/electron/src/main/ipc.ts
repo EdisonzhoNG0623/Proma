@@ -910,7 +910,7 @@ function cacheNull(key: string): null {
 }
 
 function isAgentRuntime(value: unknown): value is AgentRuntime {
-  return value === 'claude' || value === 'pi'
+  return value === 'claude' || value === 'pi' || value === 'hermes-remote'
 }
 
 /**
@@ -2691,7 +2691,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_SESSION_AGENT_RUNTIME,
-    async (_, sessionId: string, runtime: AgentRuntime): Promise<AgentSessionMeta> => {
+    async (_, sessionId: string, runtime: AgentRuntime, hermesTargetId?: string): Promise<AgentSessionMeta> => {
       if (!isAgentRuntime(runtime)) {
         throw new Error(`无效的 Agent runtime: ${String(runtime)}`)
       }
@@ -2704,8 +2704,12 @@ export function registerIpcHandlers(): void {
 
       // 历史会话缺失 runtime 时按 Claude 处理，避免将 Claude SDK 会话 ID 交给 Pi 恢复。
       const previousRuntime: AgentRuntime = isAgentRuntime(current.agentRuntime) ? current.agentRuntime : 'claude'
-      const updates: Partial<Pick<AgentSessionMeta, 'agentRuntime' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings'>> = {
+      const updates: Partial<Pick<AgentSessionMeta, 'agentRuntime' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'hermesTargetId' | 'hermesProfile' | 'hermesRemoteSessionId'>> = {
         agentRuntime: runtime,
+      }
+      // Hermes Remote 会话绑定 target（切换时由 UI 传入）
+      if (runtime === 'hermes-remote' && typeof hermesTargetId === 'string' && hermesTargetId) {
+        updates.hermesTargetId = hermesTargetId
       }
       if (previousRuntime !== runtime) {
         // 两套 runtime 的会话 artifact 不可互用；下一轮从 Proma 已持久化的转录恢复。

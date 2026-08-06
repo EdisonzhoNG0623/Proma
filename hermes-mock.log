@@ -1,0 +1,5 @@
+[验收] mock Hermes 服务器已启动:
+  Dashboard URL: http://127.0.0.1:50774/
+  用户名/密码: admin / correct-password
+  API Server Key: mock-api-key
+  端口信息已写入 ./hermes-mock-port.json

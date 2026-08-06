@@ -16,8 +16,9 @@
 import * as React from 'react'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
+import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
 import { toast } from 'sonner'
-import { Box, CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ChevronDown, ListTodo, Paperclip } from 'lucide-react'
+import { Box, CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ChevronDown, ListTodo, Paperclip, Server } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -370,7 +371,7 @@ interface AgentRuntimeOption {
   label: string
   description: string
   badge?: string
-  badgeTone?: 'recommended' | 'deprecated'
+  badgeTone?: 'recommended' | 'deprecated' | 'info'
   notice?: string
 }
 
@@ -390,6 +391,13 @@ const AGENT_RUNTIME_OPTIONS: AgentRuntimeOption[] = [
     badge: '即将下线',
     badgeTone: 'deprecated',
     notice: '新功能已不再支持，将于 8 月中旬彻底下线，建议尽快切换到 Pi',
+  },
+  {
+    value: 'hermes-remote',
+    label: 'Hermes 远程',
+    description: '连接远端 Hermes Agent（External Runtime），会话在远端执行，与本地完全隔离',
+    badge: '远端',
+    badgeTone: 'info',
   },
 ]
 
@@ -538,6 +546,11 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const sessionMetaChannelId = sessionMeta?.channelId
   const sessionMetaModelId = sessionMeta?.modelId
   const hasSessionMeta = Boolean(sessionMeta)
+  /** Hermes Remote 绑定 target 名称（远端位置标识） */
+  const hermesTargets = useAtomValue(hermesTargetsAtom)
+  const hermesTargetName = sessionMeta?.hermesTargetId
+    ? hermesTargets.find((t) => t.id === sessionMeta.hermesTargetId)?.name ?? null
+    : null
   const agentChannelId = sessionMetaChannelId ?? sessionChannelMap.get(sessionId) ?? defaultChannelId
   const agentModelId = sessionMetaModelId ?? sessionModelMap.get(sessionId) ?? defaultModelId
   const agentChannelIds = useAtomValue(agentChannelIdsAtom)
@@ -2102,6 +2115,21 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return
     }
 
+    // Hermes Remote 需要先确定绑定的 target
+    let hermesTargetId: string | undefined
+    if (runtime === 'hermes-remote') {
+      const targets = store.get(hermesTargetsAtom)
+      const activeId = store.get(activeHermesTargetIdAtom)
+      const target = targets.find((t) => t.id === activeId) ?? targets[0]
+      if (!target) {
+        toast.error('请先在「设置 → Hermes 远程」创建连接', {
+          description: 'Hermes Remote 会话需要绑定一个远端 Hermes target',
+        })
+        return
+      }
+      hermesTargetId = target.id
+    }
+
     const runtimeSwitchDeferred = streaming || backgroundWaiting
     const previousDefaultRuntime = agentRuntime
     const previousSessionMeta = sessionMeta
@@ -2115,6 +2143,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             sdkSessionId: undefined,
             piSessionFile: undefined,
             piEntryBindings: undefined,
+            ...(hermesTargetId ? { hermesTargetId } : {}),
             updatedAt: Date.now(),
           }
           : item
@@ -2122,7 +2151,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
 
     try {
-      const updated = await window.electronAPI.updateSessionAgentRuntime(sessionId, runtime)
+      const updated = await window.electronAPI.updateSessionAgentRuntime(sessionId, runtime, hermesTargetId)
       setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? updated : item))
       window.electronAPI.updateSettings({ agentRuntime: runtime }).catch((error) => {
         console.error('[AgentView] 保存 Agent Runtime 默认值失败:', error)
@@ -3089,6 +3118,15 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           runtime={sessionAgentRuntime}
           onChange={handleAgentRuntimeChange}
         />
+        {sessionAgentRuntime === 'hermes-remote' && (
+          <span
+            title={`远端执行：${hermesTargetName ?? '未绑定 target'}`}
+            className="flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-primary/80"
+          >
+            <Server className="size-3.5" />
+            <span className="max-w-[10rem] truncate">{hermesTargetName ?? '未绑定'}</span>
+          </span>
+        )}
       </div>
       {sendControl}
     </>
