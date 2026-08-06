@@ -1,0 +1,165 @@
+/**
+ * Hermes 事件归一化
+ *
+ * 把两种远端事件形态归一化为统一的 HermesTurnEvent：
+ * - Dashboard WS notification：{ method, params }
+ * - API Server SSE event：{ event, ...data }
+ *
+ * 字段解析采用宽容策略（尝试常见字段名），保证协议演进时首版不崩溃。
+ */
+
+import type { HermesTurnEvent } from './hermes-sdk-message-mapper'
+
+/** 从对象中取第一个存在的字符串字段 */
+function pickString(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = obj[key]
+    if (typeof value === 'string' && value) {
+      return value
+    }
+  }
+  return undefined
+}
+
+function pickObject(obj: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const value = obj[key]
+    if (value && typeof value === 'object') {
+      return value as Record<string, unknown>
+    }
+  }
+  return undefined
+}
+
+function pickNumber(obj: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = obj[key]
+    if (typeof value === 'number') {
+      return value
+    }
+  }
+  return undefined
+}
+
+/**
+ * 归一化 Dashboard WS notification。
+ *
+ * @returns 事件；无法识别时返回 null（调用方忽略并记录）
+ */
+export function normalizeDashboardNotification(
+  method: string,
+  rawParams: unknown,
+): HermesTurnEvent | null {
+  const params = rawParams && typeof rawParams === 'object'
+    ? (rawParams as Record<string, unknown>)
+    : {}
+
+  switch (method) {
+    case 'message.delta': {
+      const text = pickString(params, ['text', 'delta', 'content'])
+      return text ? { type: 'text.delta', text } : null
+    }
+    case 'thinking.delta': {
+      const text = pickString(params, ['text', 'delta'])
+      return text ? { type: 'reasoning.delta', text } : null
+    }
+    case 'reasoning.delta': {
+      const text = pickString(params, ['text', 'delta'])
+      return text ? { type: 'reasoning.delta', text } : null
+    }
+    case 'tool.start':
+    case 'tool.started': {
+      const toolUseId = pickString(params, ['tool_use_id', 'toolUseId', 'id']) ?? `tool-${Date.now()}`
+      const toolName = pickString(params, ['tool_name', 'toolName', 'name']) ?? 'unknown'
+      return {
+        type: 'tool.started',
+        toolUseId,
+        toolName,
+        input: pickObject(params, ['input', 'tool_input']) ?? {},
+      }
+    }
+    case 'tool.complete':
+    case 'tool.completed': {
+      const toolUseId = pickString(params, ['tool_use_id', 'toolUseId', 'id']) ?? `tool-${Date.now()}`
+      const toolName = pickString(params, ['tool_name', 'toolName', 'name']) ?? 'unknown'
+      return { type: 'tool.completed', toolUseId, toolName, output: params.output }
+    }
+    case 'approval.request': {
+      return {
+        type: 'approval.request',
+        requestId: pickString(params, ['request_id', 'requestId', 'approval_id']) ?? `appr-${Date.now()}`,
+        message: pickString(params, ['message', 'prompt', 'description']) ?? '远端请求批准',
+        toolName: pickString(params, ['tool_name', 'toolName']),
+        toolInput: pickObject(params, ['tool_input', 'input']),
+      }
+    }
+    case 'clarify.request': {
+      return {
+        type: 'clarify.request',
+        requestId: pickString(params, ['request_id', 'requestId']) ?? `clar-${Date.now()}`,
+        question: pickString(params, ['question', 'prompt', 'message']) ?? '远端提出问题',
+      }
+    }
+    case 'sudo.request': {
+      return {
+        type: 'sudo.request',
+        requestId: pickString(params, ['request_id', 'requestId']) ?? `sudo-${Date.now()}`,
+        message: pickString(params, ['message', 'prompt']) ?? '远端请求 sudo 密码',
+      }
+    }
+    case 'secret.request': {
+      return {
+        type: 'secret.request',
+        requestId: pickString(params, ['request_id', 'requestId']) ?? `sec-${Date.now()}`,
+        message: pickString(params, ['message', 'prompt']) ?? '远端请求密钥',
+      }
+    }
+    case 'error':
+      return { type: 'error', message: pickString(params, ['message', 'error']) ?? '远端错误' }
+    case 'turn.completed':
+    case 'run.completed':
+      return { type: 'turn.completed' }
+    case 'turn.failed':
+    case 'run.failed':
+      return {
+        type: 'turn.failed',
+        error: pickString(params, ['error', 'message']) ?? '远端 run 失败',
+      }
+    case 'run.cancelled':
+      // 取消视为正常结束（上层通过 abort 感知中断）
+      return { type: 'turn.completed' }
+    case 'session.info': {
+      const status = pickString(params, ['status', 'state'])
+      if (status === 'complete' || status === 'ended' || status === 'idle') {
+        return { type: 'turn.completed' }
+      }
+      return null
+    }
+    default:
+      return null
+  }
+}
+
+/**
+ * 归一化 API Server SSE 事件。
+ */
+export function normalizeApiServerEvent(event: HermesTurnEvent | Record<string, unknown>): HermesTurnEvent | null {
+  if (!event || typeof event !== 'object') {
+    return null
+  }
+  const name = pickString(event as Record<string, unknown>, ['event', 'type'])
+  if (!name) {
+    return null
+  }
+  return normalizeDashboardNotification(name, event)
+}
+
+/** Dashboard 通知中的 usage 字段归一化（预留：后续 token 统计） */
+export function pickUsage(obj: Record<string, unknown>): { inputTokens?: number; outputTokens?: number } | undefined {
+  const usage = pickObject(obj, ['usage'])
+  if (!usage) return undefined
+  return {
+    inputTokens: pickNumber(usage, ['input_tokens', 'inputTokens']),
+    outputTokens: pickNumber(usage, ['output_tokens', 'outputTokens']),
+  }
+}

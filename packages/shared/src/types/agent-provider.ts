@@ -8,7 +8,7 @@
 import type { SDKMessage } from './agent'
 
 /** Agent runtime 实现 */
-export type AgentRuntime = 'claude' | 'pi'
+export type AgentRuntime = 'claude' | 'pi' | 'hermes-remote'
 
 /** SDK 用户消息（队列消息注入用，匹配 SDK SDKUserMessage 结构） */
 export interface SDKUserMessageInput {

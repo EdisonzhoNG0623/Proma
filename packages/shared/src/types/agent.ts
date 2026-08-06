@@ -658,6 +658,12 @@ export interface AgentSessionMeta {
   piEntryBindings?: Record<string, string>
   /** 当前会话使用的 Agent runtime；历史会话缺省为 claude */
   agentRuntime?: import('./agent-provider').AgentRuntime
+  /** Hermes Remote 目标绑定（agentRuntime=hermes-remote 时生效） */
+  hermesTargetId?: string
+  /** 远端 profile 名 */
+  hermesProfile?: string
+  /** Hermes 远端持久会话 ID（stored_session_id，REST 与重连使用） */
+  hermesRemoteSessionId?: string
   /** ChatGPT Codex Fast Mode 开关；仅 Pi + ChatGPT OAuth 的受支持模型实际生效。 */
   codexFastMode?: boolean
   /** 本会话的推理深度；未设置时兼容旧版全局思考设置。 */

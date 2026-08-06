@@ -20,7 +20,7 @@ import { join, dirname } from 'node:path'
 import { accessSync, constants, existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { app } from 'electron'
-import type { AgentRuntime, AgentSendInput, AgentMessage, AgentGenerateTitleInput, AgentProviderAdapter, AgentSessionMeta, CodexOAuthCredentials, XaiOAuthCredentials, TypedError, RetryAttempt, SDKMessage, SDKAssistantMessage, AgentStreamPayload, RewindSessionResult, ProviderType } from '@proma/shared'
+import type { AgentRuntime, AgentSendInput, AgentMessage, AgentGenerateTitleInput, AgentProviderAdapter, AgentSessionMeta, CodexOAuthCredentials, XaiOAuthCredentials, TypedError, RetryAttempt, SDKMessage, SDKAssistantMessage, AgentStreamPayload, RewindSessionResult, ProviderType, AgentQueryInput } from '@proma/shared'
 import {
   PROMA_DEFAULT_PERMISSION_MODE,
   PROMA_PERMISSION_MODE_CONFIG,
@@ -36,7 +36,7 @@ import {
   resolveReasoningProfile,
   isAgentCompatibleProvider,
 } from '@proma/shared'
-import type { PromaPermissionMode, AskUserRequest, ExitPlanModeRequest, SDKSystemMessage } from '@proma/shared'
+import type { PromaPermissionMode, AskUserRequest, ExitPlanModeRequest, SDKSystemMessage, Channel } from '@proma/shared'
 import type { ClaudeAgentQueryOptions } from './adapters/claude-agent-adapter'
 import { getClaudeSettingSourcesForWorkspace, isPromptTooLongError, isThinkingSignatureError, friendlyErrorMessage, mapSDKErrorToTypedError, extractErrorDetails, shouldKeepChannelOpen } from './adapters/claude-agent-adapter'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
@@ -1055,8 +1055,25 @@ export class AgentOrchestrator {
     }
 
     // 2. 获取渠道信息并解密 API Key
-    const channel = getChannelById(channelId)
-    if (!channel) {
+    // Hermes Remote 是 External Runtime：凭据来自 Hermes Target/凭据库，不依赖 Proma 渠道；
+    // 这里使用虚拟 channel 占位，避免后续 SDK 环境构建分支因 undefined 扩散。
+    const isHermesRemote = normalizeAgentRuntime(
+      inputAgentRuntime ?? sessionMeta?.agentRuntime ?? 'claude',
+    ) === 'hermes-remote'
+    const channel: Channel = isHermesRemote
+      ? {
+          id: channelId,
+          name: 'Hermes Remote',
+          provider: 'custom' as const,
+          baseUrl: '',
+          apiKey: '',
+          enabled: true,
+          models: [],
+          createdAt: 0,
+          updatedAt: 0,
+        }
+      : getChannelById(channelId)!
+    if (!isHermesRemote && !channel) {
       reportPreflightError({
         code: 'channel_not_found',
         title: '渠道不存在',
@@ -1073,9 +1090,10 @@ export class AgentOrchestrator {
     let codexOAuthCredentials: CodexOAuthCredentials | undefined
     let xaiOAuthCredentials: XaiOAuthCredentials | undefined
     try {
-      // 订阅 OAuth 渠道必须保留完整凭据给 Pi runtime，才能在执行中按真实 expires
-      // 自动刷新；其余渠道只需解密 API Key。
-      if (channel.provider === 'openai-codex') {
+      if (isHermesRemote) {
+        // Hermes Remote 不消费 Proma 渠道 API Key；凭据由 HermesRuntimeFacade 自行管理
+        apiKey = ''
+      } else if (channel.provider === 'openai-codex') {
         codexOAuthCredentials = await resolveCodexOAuthCredentials(channelId)
         apiKey = codexOAuthCredentials.access
       } else if (channel.provider === 'xai') {
@@ -1128,7 +1146,7 @@ export class AgentOrchestrator {
     }
     console.log(`[Agent 编排] Agent runtime: ${agentRuntime}`)
 
-    if (!channel.enabled) {
+    if (!isHermesRemote && !channel.enabled) {
       reportPreflightError({
         code: 'channel_disabled',
         title: '渠道已禁用',
@@ -1206,20 +1224,24 @@ export class AgentOrchestrator {
     delete process.env.ANTHROPIC_BASE_URL
     delete process.env.ANTHROPIC_CUSTOM_HEADERS
     delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
-    applyAgentSdkAuthEnv(process.env, channel.provider, apiKey, getPromaUserAgent(pkg.version))
-    // 使用与 buildSdkEnv 相同的规范化逻辑，确保 process.env 和 sdkEnv 中的 URL 一致
-    if (channel.baseUrl && channel.baseUrl !== 'https://api.anthropic.com') {
-      process.env.ANTHROPIC_BASE_URL = normalizeAnthropicBaseUrlForSdk(channel.baseUrl)
+    if (!isHermesRemote) {
+      applyAgentSdkAuthEnv(process.env, channel.provider, apiKey, getPromaUserAgent(pkg.version))
+      // 使用与 buildSdkEnv 相同的规范化逻辑，确保 process.env 和 sdkEnv 中的 URL 一致
+      if (channel.baseUrl && channel.baseUrl !== 'https://api.anthropic.com') {
+        process.env.ANTHROPIC_BASE_URL = normalizeAnthropicBaseUrlForSdk(channel.baseUrl)
+      }
     }
 
     const proxyUrl = await getEffectiveProxyUrl()
-    const runtimeEnv = this.buildSdkRuntimeEnv(
-      apiKey,
-      channel.baseUrl,
-      channel.provider,
-      modelId || DEFAULT_MODEL_ID,
-      proxyUrl,
-    )
+    const runtimeEnv = isHermesRemote
+      ? { env: {} as Record<string, string> }
+      : this.buildSdkRuntimeEnv(
+          apiKey,
+          channel.baseUrl,
+          channel.provider,
+          modelId || DEFAULT_MODEL_ID,
+          proxyUrl,
+        )
     const sdkEnv = runtimeEnv.env
 
     // 4. 读取已有的 SDK session ID（用于 resume）
@@ -1781,7 +1803,13 @@ export class AgentOrchestrator {
       const claudeSettingsFilePath = agentRuntime === 'claude' && workspaceId
         ? ensureClaudeSessionSettings(workspaceId, sessionId)
         : undefined
-      const queryOptions: ClaudeAgentQueryOptions | PiAgentQueryOptions = agentRuntime === 'pi' ? {
+      const queryOptions: ClaudeAgentQueryOptions | PiAgentQueryOptions | (AgentQueryInput & RecoverableAgentQueryOptions) = agentRuntime === 'hermes-remote' ? {
+        agentRuntime: 'hermes-remote',
+        sessionId,
+        prompt: finalPrompt,
+        model: selectedModelId,
+        cwd: agentCwd,
+      } : agentRuntime === 'pi' ? {
         agentRuntime: 'pi',
         sessionId,
         prompt: finalPrompt,
