@@ -24,6 +24,8 @@ export interface HermesRequestOptions {
 export interface HermesJsonResponse {
   status: number
   body: unknown
+  /** 原始响应头（实现层透出；供 Cookie 捕获等场景使用） */
+  headers?: Record<string, unknown>
 }
 
 /** SSE 事件（解析后的单个事件） */
