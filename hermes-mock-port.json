@@ -1,7 +1,0 @@
-{
-  "dashboardUrl": "http://127.0.0.1:50774/",
-  "username": "admin",
-  "password": "correct-password",
-  "apiServerKey": "mock-api-key",
-  "port": 50774
-}
