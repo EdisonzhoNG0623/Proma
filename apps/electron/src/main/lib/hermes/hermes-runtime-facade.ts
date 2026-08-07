@@ -153,10 +153,11 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     // create / resume 远端会话（cwd 优先显式 remoteCwd，否则用同步目录）
     const remoteCwd = binding.remoteCwd
       ?? (binding.workspaceSlug ? `~/proma-projects/${binding.workspaceSlug}` : undefined)
-    // 新建远端会话前：确保远端 cwd 目录存在（有 SSH 时自动创建同名项目目录；无 SSH 返回 false 不阻塞）
+    // 新建远端会话前：有 SSH 时用 SFTP 快速确保 cwd 目录存在（无 SSH 返回 false，稍后走免 SSH 引导）
+    let preEnsuredCwd = false
     if (remoteCwd && !binding.remoteSessionId) {
       try {
-        await this.deps.ensureRemoteCwd(binding.targetId, remoteCwd)
+        preEnsuredCwd = await this.deps.ensureRemoteCwd(binding.targetId, remoteCwd)
       } catch (error) {
         console.warn('[Hermes] ensureRemoteCwd 异常:', error instanceof Error ? error.message : String(error))
       }
@@ -183,13 +184,11 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
       this.deps.persistRemoteSessionId(input.sessionId, resolvedSession.storedSessionId)
     }
 
-    await dashboard.submitPrompt(resolvedSession.sessionId, input.prompt, binding.profile)
-
+    // 事件 handler 提前注册：引导 turn（mkdir 初始化）也需要被监听
     const mapper = new HermesSdkMessageMapper({
       sessionId: input.sessionId,
       model: input.model,
     })
-
     const notificationHandler: HermesWsNotificationHandler = (method, params) => {
       const turnEvent = normalizeDashboardNotification(method, params)
       if (!turnEvent) return
@@ -197,14 +196,58 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     }
     const off = client.onNotification(notificationHandler)
 
-    // 等待 turn 结束：poll mapper 输出（notification 已同步进入 mapper）
-    // 首版采用同步事件流：notification 处理中直接产出（由 dispatchTurnEvent 缓存后这里消费）
     try {
-      // 简易实现：notification 已在 handler 中通过 mapper.push 产出并放入 pending 队列
-      // 这里用轮询等待 turn 终止事件
+      // 新建会话：SFTP 未确保目录时走免 SSH 引导（让 Hermes Agent 自己 mkdir，然后 cwd.set）
+      if (resolvedSession.created && remoteCwd && !preEnsuredCwd) {
+        await this.bootstrapRemoteCwd(dashboard, resolvedSession.sessionId, remoteCwd, binding.profile)
+      }
+
+      await dashboard.submitPrompt(resolvedSession.sessionId, input.prompt, binding.profile)
+
+      // 等待 turn 结束：poll mapper 输出（notification 已同步进入 mapper）
+      // 首版采用同步事件流：notification 处理中直接产出（由 dispatchTurnEvent 缓存后这里消费）
       yield* this.drainTurnMessages(active, input.sessionId)
     } finally {
       off()
+    }
+  }
+
+  /**
+   * 免 SSH 引导：让 Hermes Agent 在远端执行 mkdir -p 创建项目目录，
+   * 完成后用 session.cwd.set 把会话 cwd 指向该目录（引导 turn 事件丢弃，不进对话）。
+   * 失败不阻断（Hermes 会忽略不存在的 cwd，会话落默认 workspace）。
+   */
+  private async bootstrapRemoteCwd(
+    dashboard: HermesDashboardAdapter,
+    sessionId: string,
+    cwd: string,
+    profile?: string,
+  ): Promise<void> {
+    try {
+      await dashboard.submitPrompt(
+        sessionId,
+        `Proma 初始化：请仅执行 bash 命令 mkdir -p ${cwd}，不要做任何其他操作，完成后只回复 OK。`,
+        profile,
+      )
+      // 等待引导 turn 完成（事件进入队列但此处直接消费丢弃）
+      const deadline = Date.now() + 30_000
+      while (Date.now() < deadline) {
+        const queue = this.turnQueues.get(sessionId) ?? []
+        this.turnQueues.set(sessionId, [])
+        let terminated = false
+        for (const event of queue) {
+          if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') {
+            terminated = true
+          }
+        }
+        if (terminated) break
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        if (!this.activeTurns.has(sessionId)) break
+      }
+      // 目录已创建，把会话 cwd 指向项目目录（session.cwd.set 要求目录存在）
+      await dashboard.setSessionCwd(sessionId, cwd)
+    } catch (error) {
+      console.warn('[Hermes] 免 SSH 引导创建项目目录失败:', error instanceof Error ? error.message : String(error))
     }
   }
 

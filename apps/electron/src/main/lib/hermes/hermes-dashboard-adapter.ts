@@ -225,6 +225,11 @@ export class HermesDashboardAdapter {
     return await this.client.request<unknown>('approval.respond', params)
   }
 
+  /** 设置会话 cwd（session.cwd.set，目录必须已存在） */
+  async setSessionCwd(sessionId: string, cwd: string): Promise<void> {
+    await this.client.request<unknown>('session.cwd.set', { session_id: sessionId, cwd })
+  }
+
   /** 响应 clarify */
   async respondClarify(input: HermesClarifyResponseInput): Promise<unknown> {
     return await this.client.request<unknown>('clarify.respond', {
