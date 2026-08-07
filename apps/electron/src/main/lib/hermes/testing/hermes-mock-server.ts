@@ -27,6 +27,8 @@ export interface MockHermesServerOptions {
   disableDashboardWs?: boolean
   /** prompt.submit 后推送的事件序列（默认 message.delta × 2 + turn.completed） */
   turnEvents?: Array<{ method: string; params?: Record<string, unknown> }>
+  /** 监听端口（默认 0=随机） */
+  port?: number
 }
 
 /** 记录收到的请求 */
@@ -68,7 +70,7 @@ export async function startMockHermesServer(
   const turnEvents = options.turnEvents ?? DEFAULT_TURN_EVENTS
 
   const server = Bun.serve<{ authenticated: boolean }>({
-    port: 0,
+    port: options.port ?? 0,
     async fetch(req, srv) {
       const url = new URL(req.url)
       httpPaths.push(`${req.method} ${url.pathname}`)
@@ -195,6 +197,33 @@ export async function startMockHermesServer(
           reply({ session_id: 'run-1', stored_session_id: 'stored-1' })
         } else if (method === 'session.resume') {
           reply({ session_id: 'run-2', stored_session_id: 'stored-1' })
+        } else if (method === 'session.list') {
+          reply({
+            sessions: [
+              { id: 's1', title: 'Mock 会话 A', preview: '你好', started_at: Date.now() - 60000, message_count: 3, source: 'cli' },
+              { id: 's2', title: 'Mock 会话 B', preview: '继续', started_at: Date.now() - 120000, message_count: 8, source: 'gateway' },
+            ],
+          })
+        } else if (method === 'projects.tree') {
+          reply({
+            projects: [
+              { id: 'p_1', label: 'mock-project-a', path: '/srv/a', sessionCount: 2, lastActive: Date.now(), previewSessions: [{ id: 's1', title: 'Mock 会话 A' }] },
+              { id: 'p_2', label: 'mock-project-b', path: '/srv/b', sessionCount: 1, lastActive: Date.now(), previewSessions: [] },
+            ],
+            active_id: 'p_1',
+            scoped_session_ids: ['s1', 's2'],
+          })
+        } else if (method === 'projects.project_sessions') {
+          reply({
+            project: {
+              id: String((msg.params as Record<string, unknown>)?.project_id ?? 'p_1'),
+              label: 'mock-project-a',
+              path: '/srv/a',
+              sessionCount: 2,
+              repos: [],
+              previewSessions: [],
+            },
+          })
         } else if (method === 'prompt.submit') {
           reply({})
           // 推送 turn 事件序列（微延迟保证请求响应先到）

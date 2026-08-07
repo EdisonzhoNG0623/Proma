@@ -27,7 +27,7 @@ import { hermesCredentialStore, type HermesCredentialKind } from './hermes-crede
 import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes-connection'
 import { probeHermesCapabilities } from './hermes-capability-probe'
 import { parseAuthProviders } from './hermes-auth'
-import { redactSecrets } from './hermes-errors'
+import { HermesError, redactSecrets } from './hermes-errors'
 import { HermesAuthService, buildTicketWsUrl, canSubmitPasswordTo } from './hermes-auth'
 import { HermesDashboardAdapter, type HermesRemoteProject, type HermesRemoteSessionSummary } from './hermes-dashboard-adapter'
 import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
@@ -209,8 +209,8 @@ export class HermesIpcService {
   /**
    * 打开临时 Dashboard WS 连接（用于项目/会话视图 RPC）。
    *
-   * 复用认证链路：password-cookie 登录 → WS ticket → 连接。
-   * 返回 adapter 与关闭函数；调用方负责 finally close。
+   * 认证策略：优先复用已持久化的 Cookie 会话（避免频繁密码登录触发限流）；
+   * 401 时回退密码登录并更新 Cookie。
    */
   private async openDashboardAdapter(target: HermesTarget): Promise<{
     adapter: HermesDashboardAdapter
@@ -218,10 +218,34 @@ export class HermesIpcService {
     close: () => void
   }> {
     const transport = await buildHermesTransport(target)
+    const cookieRef = `hermes-cookie-${target.id}`
     try {
       const auth = new HermesAuthService(transport)
       const mode = target.auth.dashboardMode ?? 'password-cookie'
-      if (mode === 'password-cookie' && auth.cookieJarFor(target.id).size === 0) {
+
+      // 1. 优先复用持久化 Cookie
+      const persistedCookie = this.credentialStore.getCredential(cookieRef)
+      if (mode === 'password-cookie' && persistedCookie) {
+        try {
+          const jar = JSON.parse(persistedCookie) as Record<string, string>
+          for (const [name, value] of Object.entries(jar)) {
+            auth.cookieJarFor(target.id).set(name, value)
+          }
+        } catch {
+          // Cookie 解析失败则忽略，走登录流程
+        }
+      }
+
+      // 2. 尝试用现有 Cookie 直接 mint ticket；失败（401）再密码登录
+      let ticket: string
+      try {
+        ticket = await auth.mintWsTicket(target.id)
+      } catch (error) {
+        const isAuthError = error instanceof HermesError && error.code === 'unauthorized'
+        if (!isAuthError || mode !== 'password-cookie') {
+          throw error
+        }
+        // 3. 密码登录并持久化 Cookie
         const secret = target.auth.dashboardCredentialRef
           ? this.credentialStore.getCredential(target.auth.dashboardCredentialRef)
           : null
@@ -237,8 +261,18 @@ export class HermesIpcService {
           username: credential.username,
           password: credential.password,
         })
+        // 持久化 Cookie（含 refresh cookie，供后续复用）
+        const jar = Object.fromEntries(auth.cookieJarFor(target.id).entries())
+        if (Object.keys(jar).length > 0) {
+          try {
+            this.credentialStore.setCredential('dashboard-cookie', JSON.stringify(jar), cookieRef)
+          } catch (cookieError) {
+            console.warn('[Hermes] 持久化 Dashboard Cookie 失败:', cookieError instanceof Error ? cookieError.message : String(cookieError))
+          }
+        }
+        ticket = await auth.mintWsTicket(target.id)
       }
-      const ticket = await auth.mintWsTicket(target.id)
+
       const wsUrl = buildTicketWsUrl(transport.baseUrl, ticket)
       const client = new HermesDashboardWsClient((url) => transport.connectWebSocket(url))
       await client.connect(wsUrl)

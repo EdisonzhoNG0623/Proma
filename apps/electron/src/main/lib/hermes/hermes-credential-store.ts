@@ -29,6 +29,8 @@ export type HermesCredentialKind =
   | 'api-server-key'
   | 'ssh-password'
   | 'ssh-key'
+  /** Dashboard 登录 Cookie 会话（refresh cookie 复用，避免频繁密码登录触发限流） */
+  | 'dashboard-cookie'
 
 /** 凭据条目（仅元数据 + 密文，不含明文） */
 export interface HermesCredentialEntry {
