@@ -2827,7 +2827,8 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
           </div>
         </div>
       ) : mode === 'agent' && viewMode === 'active' ? (
-        <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin titlebar-no-drag">
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin titlebar-no-drag">
           {pinnedAgentSessions.length > 0 && (
             <div className="pt-2 pb-1 flex-shrink-0 titlebar-no-drag">
               <div className="pl-[18px] pr-3.5 pb-1 text-[13px] font-medium leading-[18px] text-foreground/40 select-none">
@@ -2901,9 +2902,8 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               </div>
             </div>
           )}
-
-          {/* 下区标题：项目历史 */}
-          <div className="px-2 pt-2 pb-1 flex items-center justify-between flex-shrink-0">
+        </div>
+        <div className="px-2 pt-2 pb-1 flex items-center justify-between flex-shrink-0">
             <span className="px-1.5 text-[11px] font-medium text-foreground/40 select-none">项目</span>
             <div className="flex items-center gap-0.5">
               <Tooltip>
@@ -2936,7 +2936,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
           </div>
 
           {/* 下区：项目分组历史 */}
-          <div className="px-2 pb-3">
+          <div className="flex-1 min-h-0 flex flex-col px-2 pb-3">
             {creatingProject && (
               <div className="flex items-center gap-2 px-2 py-1.5 mb-1 rounded-md bg-foreground/[0.04]">
                 <FolderOpen size={14} className="flex-shrink-0 text-foreground/40" />
@@ -2956,7 +2956,8 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               </div>
             )}
 
-            <div className="flex flex-col gap-0.5">
+            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
+              <div className="flex flex-col gap-0.5">
               {displayProjectGroups.map((group) => {
                 const isAuto = group.workspace.id === AUTOMATION_GROUP_ID
                 return (
@@ -3005,8 +3006,9 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
                   />
                 )
               })}
-              <HermesSidebarProjects />
+              </div>
             </div>
+            <HermesSidebarProjects />
           </div>
         </div>
       ) : (
