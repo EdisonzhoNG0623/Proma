@@ -11,10 +11,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
-import { getHermesTargetsPath } from '../config-paths'
 import type {
   HermesTarget,
   HermesTargetCreateInput,
@@ -36,6 +34,9 @@ export const DEFAULT_SSH_PORT = 22
 
 /** 默认配置文件路径（与 Proma 配置目录一致，开发模式为 .proma-dev） */
 function defaultHermesTargetsPath(): string {
+  // 惰性 require：避免全量测试并发加载时与 config-paths 的 ESM 解析竞态（Bun Windows）
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getHermesTargetsPath } = require('../config-paths') as typeof import('../config-paths')
   return getHermesTargetsPath()
 }
 

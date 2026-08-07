@@ -15,10 +15,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
-import { getHermesCredentialsPath } from '../config-paths'
 import type { safeStorage } from 'electron'
 
 /** 配置文件版本 */
@@ -74,6 +72,9 @@ export function createElectronCredentialCrypto(
 
 /** 默认配置文件路径（与 Proma 配置目录一致，开发模式为 .proma-dev） */
 function defaultHermesCredentialsPath(): string {
+  // 惰性 require：避免全量测试并发加载时与 config-paths 的 ESM 解析竞态（Bun Windows）
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { getHermesCredentialsPath } = require('../config-paths') as typeof import('../config-paths')
   return getHermesCredentialsPath()
 }
 

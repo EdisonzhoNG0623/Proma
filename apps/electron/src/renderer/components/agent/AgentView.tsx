@@ -581,6 +581,10 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const sessionAgentRuntime: AgentRuntime = hasSessionMeta
     ? sessionMeta?.agentRuntime ?? 'claude'
     : agentRuntime
+  /** Hermes 远程会话不依赖 Proma 渠道/模型（模型在远端 Hermes 配置） */
+  const isHermesRemoteSession = sessionAgentRuntime === 'hermes-remote'
+  /** Hermes 远程使用占位渠道（虚拟 channel）；本地 runtime 使用实际渠道 */
+  const effectiveChannelId = isHermesRemoteSession ? 'hermes-remote' : (agentChannelId ?? '')
   // 只有会话元数据尚未加载时，才允许使用全局默认值初始化新会话。
   React.useEffect(() => {
     if (!sessionId) return
@@ -1155,7 +1159,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       ? buildQuotedSelectionBlock(message.quotedSelection)
       : ''
     const payload = buildQueuedMessageSendPayload(message, quotedSelectionBlock)
-    if (!payload.rawText || !agentChannelId || !hasAvailableModel) return
+    if (!payload.rawText || (!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel))) return
 
     clearStoppedByUser()
 
@@ -1178,7 +1182,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       } catch (error) {
         if (isStaleAgentQueueError(error)) {
           console.warn('[AgentView] 检测到陈旧的 Agent 追加通道，改为启动新一轮运行:', error)
-          await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, agentChannelId, message.additionalDirectories)
+          await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, effectiveChannelId, message.additionalDirectories)
           return
         }
         throw error
@@ -1186,7 +1190,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return
     }
 
-    await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, agentChannelId, message.additionalDirectories)
+    await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, effectiveChannelId, message.additionalDirectories)
   }, [
     agentChannelId,
     backgroundWaiting,
@@ -1347,7 +1351,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径），
       // 展示/持久化保留编码原文（remarkMentions 解码显示）。
       sdkMessage: parseQueuedMessageMentions(pendingPrompt.message).cleanedText,
-      channelId: agentChannelId,
+      channelId: effectiveChannelId,
       modelId: agentModelId || undefined,
       workspaceId: currentWorkspaceId || undefined,
       additionalDirectories: Array.from(new Set([...attachedDirs, ...attachedFileDirectories, ...(pendingPrompt.additionalDirectories ?? [])])),
@@ -2218,7 +2222,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   /** 构建 externalSelectedModel 给 ModelSelector */
   const computedSelectedModel = React.useMemo(() => {
     if (!agentChannelId || !agentModelId) return null
-    return { channelId: agentChannelId, modelId: agentModelId }
+    return { channelId: effectiveChannelId, modelId: agentModelId }
   }, [agentChannelId, agentModelId])
 
   // 防止瞬态 null 传递给 ModelSelector（防御 overflow remount 时 stableModelInfoRef 丢失）
@@ -2232,7 +2236,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     // 如果输入为空但有建议，使用建议内容
     const effectiveText = text || suggestion || ''
     const pendingFilesSnapshot = pendingFilesRef.current
-    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || (!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel))) return
     if (!streaming && messagesRefreshingRef.current) {
       toast.info('上一轮消息正在同步', {
         description: '请稍等片刻再发送；队列会在同步完成后继续。',
@@ -2410,7 +2414,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       sessionId,
       userMessage: sdkMessage,
       rawUserMessage: finalMessage,
-      channelId: agentChannelId,
+      channelId: effectiveChannelId,
       modelId: agentModelId || undefined,
       agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
@@ -2516,7 +2520,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     window.electronAPI.sendAgentMessage({
       sessionId,
       userMessage: '/compact',
-      channelId: agentChannelId,
+      channelId: effectiveChannelId,
       modelId: agentModelId || undefined,
       agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
@@ -2638,7 +2642,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       // Agent 侧使用解码后的文本（@file 真实路径）；持久化/展示保留编码原文，避免新历史记录被 \S+ 截断
       userMessage: lastUserMessage,
       rawUserMessage: lastUserRawMessage,
-      channelId: agentChannelId,
+      channelId: effectiveChannelId,
       modelId: agentModelId || undefined,
       agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
@@ -2681,7 +2685,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       window.electronAPI.sendAgentMessage({
         sessionId: meta.id,
         userMessage: prompt,
-        channelId: agentChannelId,
+        channelId: effectiveChannelId,
         modelId: agentModelId || undefined,
         agentRuntime: sessionAgentRuntime,
         workspaceId: currentWorkspaceId || undefined,
@@ -2819,7 +2823,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     (allAskUserRequests.get(sessionId)?.length ?? 0) > 0 ||
     (allExitPlanRequests.get(sessionId)?.length ?? 0) > 0
   const hasBlockingRequests = hasBannerOverlay || (allPermissionRequests.get(sessionId)?.length ?? 0) > 0
-  const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests
+  const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && (isHermesRemoteSession || (!!agentChannelId && hasAvailableModel)) && !hasBlockingRequests
   const autoSendingQueuedRef = React.useRef(false)
   const queuedSendInFlightRef = React.useRef(false)
   const sendingQueuedMessageIdsRef = React.useRef<Set<string>>(new Set())
@@ -2936,7 +2940,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [togglePreviewPanel])
 
   const hasTextInput = inputContent.trim().length > 0
-  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
+  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && (isHermesRemoteSession || (agentChannelId !== null && hasAvailableModel)) && (!streaming || hasTextInput)
 
   const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => [
     ...(isCodexFastModeAvailable ? [{
@@ -3094,13 +3098,15 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const inputTrailingNode = (
     <>
       <div className="flex min-w-0 items-center gap-1 [&_.model-selector-trigger>span]:max-w-[min(12rem,30vw)]">
-        <ModelSelector
-          filterChannelIds={sessionAgentRuntime === 'pi' ? undefined : agentChannelIds}
-          externalSelectedModel={externalSelectedModel}
-          onModelSelect={handleModelSelect}
-          showChannelInTrigger
-          useSharedOpenState
-        />
+        {!isHermesRemoteSession && (
+          <ModelSelector
+            filterChannelIds={sessionAgentRuntime === 'pi' ? undefined : agentChannelIds}
+            externalSelectedModel={externalSelectedModel}
+            onModelSelect={handleModelSelect}
+            showChannelInTrigger
+            useSharedOpenState
+          />
+        )}
         <AgentRuntimeSelector
           runtime={sessionAgentRuntime}
           onChange={handleAgentRuntimeChange}
@@ -3186,8 +3192,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             onDrop={handleDrop}
           >
             {(isPlanMode || isPermissionPlanMode) && !isDragOver && <PlanModeDashedBorder />}
-            {/* 无 Agent 渠道或无可用模型提示 */}
-            {(!agentChannelId || !hasAvailableModel) && (
+            {/* 无 Agent 渠道或无可用模型提示（Hermes 远程不依赖渠道/模型） */}
+            {!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel) && (
               <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 dark:text-amber-400">
                 <Settings size={14} />
                 <span>{!agentChannelId ? '请在设置中选择 Agent 供应商' : '暂无可用模型，请在设置中启用 Agent 渠道并配置模型'}</span>
