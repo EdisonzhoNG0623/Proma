@@ -2956,7 +2956,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               </div>
             )}
 
-            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
+            <div className="flex-shrink-0 max-h-[50vh] overflow-y-auto scrollbar-thin">
               <div className="flex flex-col gap-0.5">
               {displayProjectGroups.map((group) => {
                 const isAuto = group.workspace.id === AUTOMATION_GROUP_ID
