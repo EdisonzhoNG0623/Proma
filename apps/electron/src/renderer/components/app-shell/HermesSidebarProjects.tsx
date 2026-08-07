@@ -7,6 +7,7 @@ import { appModeAtom } from '@/atoms/app-mode'
 import { activeViewAtom } from '@/atoms/active-view'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
 import { useOpenSession } from '@/hooks/useOpenSession'
+import { getOrCreateWorkspaceForProject } from '@/lib/hermes-workspace-helper'
 import type { HermesRemoteProject } from '@proma/shared'
 
 /**
@@ -54,14 +55,18 @@ export function HermesSidebarProjects(): React.ReactElement | null {
 
   if (!target) return null
 
-  /** 在项目目录新建 Hermes 对话（cwd 走协议，无需 SSH） */
+  /** 在项目目录新建 Hermes 对话：先复用/创建同名本地项目文件夹，会话挂到其下（cwd 仍为远端项目目录） */
   const handleNewChat = async (project: HermesRemoteProject): Promise<void> => {
     setStartingChatId(project.id)
     try {
+      // 1. 本地 Agent 项目文件夹：同名已存在则复用，否则创建
+      const workspace = await getOrCreateWorkspaceForProject(project.label)
+      // 2. 在该项目文件夹下创建远端会话（cwd 绑定远端项目目录）
       const created = await window.electronAPI.hermes.createRemoteSession({
         targetId: target.id,
         remoteCwd: project.path || undefined,
         title: `${project.label} 对话`,
+        workspaceId: workspace.id,
       })
       setAgentSessions(await window.electronAPI.listAgentSessions())
       setSettingsOpen(false)
