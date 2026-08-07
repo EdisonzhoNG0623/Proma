@@ -3279,15 +3279,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               voiceInputId={agentVoiceInputId}
               longTextPasteThreshold={longTextPasteAsAttachmentEnabled ? LONG_TEXT_ATTACHMENT_THRESHOLD : undefined}
               placeholder={
-                agentChannelId && hasAvailableModel
-                  ? sendWithCmdEnter
-                    ? '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；⌘/Ctrl+Enter 发送）'
-                    : '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；Enter 发送）'
-                  : !agentChannelId
-                    ? '请先在设置中选择 Agent 供应商'
-                    : '暂无可用模型，请先在设置中启用渠道'
+                isHermesRemoteSession
+                  ? '输入消息...（发送到远端 Hermes 执行）'
+                  : agentChannelId && hasAvailableModel
+                    ? sendWithCmdEnter
+                      ? '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；⌘/Ctrl+Enter 发送）'
+                      : '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；Enter 发送）'
+                    : !agentChannelId
+                      ? '请先在设置中选择 Agent 供应商'
+                      : '暂无可用模型，请先在设置中启用渠道'
               }
-              disabled={!agentChannelId || !hasAvailableModel}
+              disabled={!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel)}
               autoFocusTrigger={sessionId}
               collapsible
               enableMentions
