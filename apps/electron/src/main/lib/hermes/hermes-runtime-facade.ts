@@ -55,6 +55,11 @@ export interface HermesRuntimeDeps {
   persistRemoteSessionId(sessionId: string, remoteSessionId: string): void
   /** 构建 target 的 transport（Direct 或 SSH Tunnel） */
   buildTransport(target: HermesTarget): Promise<HermesTransport>
+  /**
+   * 确保远端目录存在（SFTP mkdirp，用于自动创建同名项目目录）。
+   * 无 SSH 配置或失败时返回 false（不阻塞会话，Hermes 会忽略不存在的 cwd）。
+   */
+  ensureRemoteCwd(targetId: string, cwd: string): Promise<boolean>
 }
 
 /** 活跃 turn 连接状态 */
@@ -148,6 +153,14 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     // create / resume 远端会话（cwd 优先显式 remoteCwd，否则用同步目录）
     const remoteCwd = binding.remoteCwd
       ?? (binding.workspaceSlug ? `~/proma-projects/${binding.workspaceSlug}` : undefined)
+    // 新建远端会话前：确保远端 cwd 目录存在（有 SSH 时自动创建同名项目目录；无 SSH 返回 false 不阻塞）
+    if (remoteCwd && !binding.remoteSessionId) {
+      try {
+        await this.deps.ensureRemoteCwd(binding.targetId, remoteCwd)
+      } catch (error) {
+        console.warn('[Hermes] ensureRemoteCwd 异常:', error instanceof Error ? error.message : String(error))
+      }
+    }
     const session = binding.remoteSessionId
       ? await dashboard.resumeSession(binding.remoteSessionId, {
           profile: binding.profile,
