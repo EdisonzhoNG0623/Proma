@@ -1030,7 +1030,11 @@ export class AgentOrchestrator {
     }
 
     // 1. Windows 平台：检查 Shell 环境可用性
-    if (process.platform === 'win32') {
+    // Hermes Remote 会话在远端执行，不依赖本地 Git Bash / WSL shell。
+    const isHermesRemotePreflight = normalizeAgentRuntime(
+      inputAgentRuntime ?? sessionMeta?.agentRuntime ?? 'claude',
+    ) === 'hermes-remote'
+    if (process.platform === 'win32' && !isHermesRemotePreflight) {
       const runtimeStatus = getRuntimeStatus()
       const shellStatus = runtimeStatus?.shell
 
