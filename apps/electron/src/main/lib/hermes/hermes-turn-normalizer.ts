@@ -44,17 +44,32 @@ function pickNumber(obj: Record<string, unknown>, keys: string[]): number | unde
 /**
  * 归一化 Dashboard WS notification。
  *
+ * 兼容两种格式：
+ * 1. 真实 Hermes：method="event"，params={ type, session_id, payload }（事件类型在 params.type）
+ * 2. mock/旧格式：method="message.delta"，params={ text }（method 即事件名）
+ *
  * @returns 事件；无法识别时返回 null（调用方忽略并记录）
  */
 export function normalizeDashboardNotification(
   method: string,
   rawParams: unknown,
 ): HermesTurnEvent | null {
-  const params = rawParams && typeof rawParams === 'object'
-    ? (rawParams as Record<string, unknown>)
+  // 真实 Hermes 格式：method='event'，事件类型在 params.type，数据在 params.payload
+  let eventName = method
+  let eventPayload: unknown = rawParams
+  if (method === 'event' && rawParams && typeof rawParams === 'object') {
+    const inner = rawParams as { type?: unknown; payload?: unknown }
+    if (typeof inner.type === 'string' && inner.type) {
+      eventName = inner.type
+      eventPayload = inner.payload ?? {}
+    }
+  }
+
+  const params = eventPayload && typeof eventPayload === 'object'
+    ? (eventPayload as Record<string, unknown>)
     : {}
 
-  switch (method) {
+  switch (eventName) {
     case 'message.start':
       // 单条消息开始（无内容载荷），忽略
       return null
