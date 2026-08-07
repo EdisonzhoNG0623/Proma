@@ -24,6 +24,24 @@ import { normalizeApiServerEvent, normalizeDashboardNotification } from './herme
 import type { HermesTransport } from './transport/hermes-transport'
 import type { HermesTarget } from '@proma/shared'
 
+/**
+ * 归一化远端 cwd 用于比较：Hermes 返回的 resolvedCwd 是绝对路径（~ 已展开），
+ * 请求 cwd 可能带 ~/ 前缀；两者归一化后比较判断目录是否已存在。
+ */
+function normalizeRemoteCwdForCompare(resolved: string, requested: string): boolean {
+  const norm = (p: string): string => {
+    let s = p.trim()
+    if (s.startsWith('~/')) s = s.slice(2)
+    while (s.endsWith('/')) s = s.slice(0, -1)
+    return s.toLowerCase()
+  }
+  const r = norm(resolved)
+  const q = norm(requested)
+  if (r === q) return true
+  // Hermes 展开 ~ 后可能与请求的 ~/xxx 尾部一致（如 /home/ai/proma-projects/elevit vs ~/proma-projects/elevit）
+  return r.endsWith(q) || q.endsWith(r)
+}
+
 /** 会话绑定（持久化在 AgentSessionMeta 中） */
 export interface HermesSessionBinding {
   targetId: string
@@ -252,9 +270,15 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     const off = client.onNotification(notificationHandler)
 
     try {
-      // 新建会话：SFTP 未确保目录时走免 SSH 引导（让 Hermes Agent 自己 mkdir，然后 cwd.set）
+      // 新建会话：SFTP 未确保目录时，用 Hermes 返回的 resolvedCwd 探测目录是否已存在——
+      // 请求的 cwd 与 Hermes 实际解析一致 = 目录已存在 → 跳过引导；不一致（落默认）= 目录不存在 → 引导 mkdir
       if (resolvedSession.created && remoteCwd && !preEnsuredCwd) {
-        await this.bootstrapRemoteCwd(dashboard, resolvedSession.sessionId, remoteCwd, binding.profile)
+        const cwdMatches = resolvedSession.resolvedCwd && normalizeRemoteCwdForCompare(resolvedSession.resolvedCwd, remoteCwd)
+        if (!cwdMatches) {
+          await this.bootstrapRemoteCwd(dashboard, resolvedSession.sessionId, remoteCwd, binding.profile)
+        } else {
+          console.log('[Hermes] 远端项目目录已存在，跳过引导:', remoteCwd)
+        }
       }
 
       await this.submitPromptWithRetry(dashboard, resolvedSession.sessionId, input.prompt, binding.profile)
@@ -412,12 +436,16 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
   /** 轮询消费 turn 事件直到终止事件（turn.completed / turn.failed / error） */
   private async *drainTurnMessages(active: ActiveTurn, sessionId: string): AsyncIterable<SDKMessage> {
     const mapper = new HermesSdkMessageMapper({ sessionId })
+    // 卡住保护：较长时间无任何事件（如事件流被其他客户端抢占/连接异常）时自动结束，避免永久 running
+    const STALL_TIMEOUT_MS = 180_000
+    let lastEventAt = Date.now()
     // 一次性消费队列；终止事件后结束
     while (true) {
       const queue = this.turnQueues.get(sessionId) ?? []
       this.turnQueues.set(sessionId, [])
       let terminated = false
       for (const event of queue) {
+        lastEventAt = Date.now()
         yield* mapper.push(event)
         if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') {
           terminated = true
@@ -428,6 +456,12 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
         return
       }
       // 队列为空：等待新事件（10ms 轮询；断线/关闭时跳出由连接 close 处理）
+      if (Date.now() - lastEventAt > STALL_TIMEOUT_MS) {
+        console.warn('[Hermes] turn 超过 3 分钟无事件（可能被其他客户端抢占），自动结束')
+        this.turnQueues.delete(sessionId)
+        yield* mapper.flush()
+        return
+      }
       await new Promise((resolve) => setTimeout(resolve, 10))
       if (!this.activeTurns.has(sessionId)) {
         yield* mapper.flush()
@@ -467,6 +501,7 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
   async respondInteraction(input: {
     sessionId: string
     type: 'approval' | 'clarify' | 'sudo' | 'secret'
+    requestId?: string
     choice?: 'allow' | 'deny'
     all?: boolean
     answer?: string
@@ -491,15 +526,18 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
         break
       case 'clarify':
         if (!input.answer) throw new HermesError('缺少回答内容', 'unknown')
-        await active.dashboard.respondClarify({ sessionId: remoteSessionId, answer: input.answer })
+        if (!input.requestId) throw new HermesError('缺少 requestId（Hermes 用其匹配待回答请求）', 'unknown')
+        await active.dashboard.respondClarify({ sessionId: remoteSessionId, answer: input.answer, requestId: input.requestId })
         break
       case 'sudo':
         if (!input.password) throw new HermesError('缺少 sudo 密码', 'unknown')
-        await active.dashboard.respondSudo({ sessionId: remoteSessionId, password: input.password })
+        if (!input.requestId) throw new HermesError('缺少 requestId', 'unknown')
+        await active.dashboard.respondSudo({ sessionId: remoteSessionId, password: input.password, requestId: input.requestId })
         break
       case 'secret':
         if (!input.value) throw new HermesError('缺少密钥', 'unknown')
-        await active.dashboard.respondSecret({ sessionId: remoteSessionId, value: input.value })
+        if (!input.requestId) throw new HermesError('缺少 requestId', 'unknown')
+        await active.dashboard.respondSecret({ sessionId: remoteSessionId, value: input.value, requestId: input.requestId })
         break
     }
   }

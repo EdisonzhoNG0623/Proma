@@ -120,10 +120,11 @@ describe('Dashboard 完整契约', () => {
     expect(types).toContain('result')
     expect(types).toContain('tool_progress')
 
-    const assistant = messages.find((m) => (m as { type: string }).type === 'assistant') as {
+    const assistants = messages.filter((m) => (m as { type: string }).type === 'assistant' && (m as { _partial?: boolean })._partial !== true) as Array<{
       message: { content: Array<{ type: string; text?: string }> }
-    }
-    const text = assistant.message.content
+    }>
+    const text = assistants
+      .flatMap((a) => a.message.content)
       .filter((block) => block.type === 'text')
       .map((block) => block.text)
       .join('')

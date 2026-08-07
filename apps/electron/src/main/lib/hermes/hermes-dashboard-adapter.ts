@@ -45,6 +45,8 @@ export interface HermesSessionResult {
   storedSessionId: string
   /** 是否新建（resume 时为 false） */
   created: boolean
+  /** Hermes 实际解析的 cwd（info.cwd）；与请求 cwd 不一致 = 目录不存在被忽略 */
+  resolvedCwd?: string
 }
 
 /** approval 响应输入 */
@@ -55,22 +57,25 @@ export interface HermesApprovalResponseInput {
   all?: boolean
 }
 
-/** clarify 响应输入 */
+/** clarify 响应输入（Hermes 用 request_id 匹配 pending；必传） */
 export interface HermesClarifyResponseInput {
   sessionId: string
   answer: string
+  requestId: string
 }
 
-/** sudo 响应输入 */
+/** sudo 响应输入（Hermes 用 request_id 匹配 pending；必传） */
 export interface HermesSudoResponseInput {
   sessionId: string
   password: string
+  requestId: string
 }
 
 /** secret 响应输入 */
 export interface HermesSecretResponseInput {
   sessionId: string
   value: string
+  requestId: string
 }
 
 /** 解析 session.create/resume 响应 */
@@ -81,15 +86,17 @@ export function parseSessionResult(
   if (!body || typeof body !== 'object') {
     throw new Error('session 响应格式异常')
   }
-  const data = body as { session_id?: unknown; stored_session_id?: unknown; resumed?: unknown }
+  const data = body as { session_id?: unknown; stored_session_id?: unknown; resumed?: unknown; info?: { cwd?: unknown } }
   if (typeof data.session_id !== 'string' || !data.session_id) {
     throw new Error('session 响应缺少 session_id')
   }
   const stored = data.stored_session_id ?? data.resumed ?? data.session_id
+  const resolvedCwd = data.info && typeof data.info.cwd === 'string' ? data.info.cwd : undefined
   return {
     sessionId: data.session_id,
     storedSessionId: typeof stored === 'string' ? stored : data.session_id,
     created,
+    ...(resolvedCwd ? { resolvedCwd } : {}),
   }
 }
 
@@ -238,11 +245,12 @@ export class HermesDashboardAdapter {
     await this.client.request<unknown>('session.title', { session_id: sessionId, title })
   }
 
-  /** 响应 clarify */
+  /** 响应 clarify（Hermes 用 request_id 匹配 pending） */
   async respondClarify(input: HermesClarifyResponseInput): Promise<unknown> {
     return await this.client.request<unknown>('clarify.respond', {
       session_id: input.sessionId,
       answer: input.answer,
+      request_id: input.requestId,
     })
   }
 
@@ -251,6 +259,7 @@ export class HermesDashboardAdapter {
     return await this.client.request<unknown>('sudo.respond', {
       session_id: input.sessionId,
       password: input.password,
+      request_id: input.requestId,
     })
   }
 
@@ -259,6 +268,7 @@ export class HermesDashboardAdapter {
     return await this.client.request<unknown>('secret.respond', {
       session_id: input.sessionId,
       value: input.value,
+      request_id: input.requestId,
     })
   }
 

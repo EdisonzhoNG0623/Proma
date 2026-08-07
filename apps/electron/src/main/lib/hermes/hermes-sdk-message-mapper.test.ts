@@ -12,18 +12,26 @@ import {
 import type { SDKMessage } from '@proma/shared'
 
 describe('HermesSdkMessageMapper 文本累积', () => {
-  test('Given 多个 text.delta When 处理 Then 攒到 assistant 直到事件边界', () => {
+  test('Given 多个 text.delta When 处理 Then 产出 partial 流式消息，turn.completed 产出完整 assistant', () => {
     const mapper = new HermesSdkMessageMapper({ sessionId: 's1' })
     const out: SDKMessage[] = []
     out.push(...mapper.push({ type: 'text.delta', text: '你' }))
     out.push(...mapper.push({ type: 'text.delta', text: '好' }))
-    expect(out).toHaveLength(0)
-    out.push(...mapper.push({ type: 'turn.completed' }))
+    // 流式：每个 text.delta 产出同 uuid 的 partial 消息
     expect(out).toHaveLength(2)
-    expect(out[0]?.type).toBe('assistant')
-    const assistant = out[0] as { message: { content: Array<{ type: string; text?: string }> } }
+    expect((out[0] as { _partial?: boolean })._partial).toBe(true)
+    expect((out[1] as { _partial?: boolean })._partial).toBe(true)
+    const p0 = out[0] as { message: { content: Array<{ type: string; text?: string }> } }
+    const p1 = out[1] as { message: { content: Array<{ type: string; text?: string }> } }
+    expect(p0.message.content[0]?.text).toBe('你')
+    expect(p1.message.content[0]?.text).toBe('你好')
+    const finalOut = mapper.push({ type: 'turn.completed' })
+    expect(finalOut).toHaveLength(2)
+    expect(finalOut[0]?.type).toBe('assistant')
+    const assistant = finalOut[0] as { message: { content: Array<{ type: string; text?: string }> }; _partial?: boolean }
+    expect(assistant._partial).toBeUndefined()
     expect(assistant.message.content[0]?.text).toBe('你好')
-    expect(out[1]?.type).toBe('result')
+    expect(finalOut[1]?.type).toBe('result')
   })
 
   test('Given 无文本 When turn.completed Then 只产出 result', () => {
@@ -51,15 +59,19 @@ describe('HermesSdkMessageMapper 工具事件', () => {
       toolName: 'Bash',
       input: { command: 'ls' },
     })
-    expect(startedOut).toHaveLength(0)
+    // 工具边界 flush 当前文本为完整 assistant（结束 partial 流）
+    expect(startedOut).toHaveLength(1)
+    expect(startedOut[0]?.type).toBe('assistant')
+    expect((startedOut[0] as { _partial?: boolean })._partial).toBeUndefined()
+    const flushed = startedOut[0] as { message: { content: Array<{ type: string; text?: string }> } }
+    expect(flushed.message.content[0]?.text).toBe('我来执行')
     const out = mapper.push({ type: 'turn.completed' })
     expect(out[0]?.type).toBe('assistant')
     const assistant = out[0] as { message: { content: Array<{ type: string; text?: string; name?: string; id?: string }> } }
     const blocks = assistant.message.content
-    expect(blocks[0]?.text).toBe('我来执行')
-    expect(blocks[1]?.type).toBe('tool_use')
-    expect(blocks[1]?.name).toBe('Bash')
-    expect(blocks[1]?.id).toBe('t1')
+    expect(blocks[0]?.type).toBe('tool_use')
+    expect(blocks[0]?.name).toBe('Bash')
+    expect(blocks[0]?.id).toBe('t1')
   })
 
   test('Given tool.completed When 处理 Then 产出 tool_progress', () => {

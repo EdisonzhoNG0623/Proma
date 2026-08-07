@@ -124,10 +124,12 @@ export function normalizeDashboardNotification(
       }
     }
     case 'clarify.request': {
+      const question = pickString(params, ['question', 'prompt', 'message']) ?? '远端提出问题'
+      console.log('[Hermes] 收到 clarify.request:', question)
       return {
         type: 'clarify.request',
         requestId: pickString(params, ['request_id', 'requestId']) ?? `clar-${Date.now()}`,
-        question: pickString(params, ['question', 'prompt', 'message']) ?? '远端提出问题',
+        question,
       }
     }
     case 'sudo.request': {

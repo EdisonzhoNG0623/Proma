@@ -155,7 +155,7 @@ export function registerHermesIpcHandlers(): void {
   // 响应 Hermes 交互请求（approval/clarify/sudo/secret）
   ipcMain.handle(
     HERMES_IPC_CHANNELS.RESPOND_INTERACTION,
-    async (_, input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => {
+    async (_, input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; requestId?: string; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => {
       if (!input || typeof input !== 'object') throw new Error('input 必填')
       requireString(input.sessionId, 'sessionId')
       return await respondHermesInteraction(input)

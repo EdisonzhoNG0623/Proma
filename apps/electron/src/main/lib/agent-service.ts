@@ -140,6 +140,7 @@ export { eventBus as agentEventBus }
 export function respondHermesInteraction(input: {
   sessionId: string
   type: 'approval' | 'clarify' | 'sudo' | 'secret'
+  requestId?: string
   choice?: 'allow' | 'deny'
   all?: boolean
   answer?: string

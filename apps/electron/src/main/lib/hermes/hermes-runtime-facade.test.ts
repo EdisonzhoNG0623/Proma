@@ -160,15 +160,16 @@ describe('HermesRuntimeFacade query', () => {
     expect(types).toContain('assistant')
     expect(types).toContain('result')
     expect(types).toContain('tool_progress')
-    const assistant = messages.find((m) => (m as { type: string }).type === 'assistant') as {
+    const assistants = messages.filter((m) => (m as { type: string }).type === 'assistant') as Array<{
       message: { content: Array<{ type: string; text?: string; name?: string }> }
-    }
-    const texts = assistant.message.content
+    }>
+    const allBlocks = assistants.flatMap((a) => a.message.content)
+    const texts = allBlocks
       .filter((block) => block.type === 'text')
       .map((block) => block.text)
       .join('')
     expect(texts).toContain('你好')
-    expect(assistant.message.content.some((block) => block.type === 'tool_use')).toBe(true)
+    expect(allBlocks.some((block) => block.type === 'tool_use')).toBe(true)
   })
 
   test('Given 绑定包含 remoteSessionId When query Then 走 resume', async () => {

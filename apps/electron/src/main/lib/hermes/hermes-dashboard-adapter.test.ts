@@ -218,20 +218,20 @@ describe('HermesDashboardAdapter 会话与交互', () => {
 
   test('Given respondClarify When 调用 Then 发送 answer', async () => {
     const { adapter, socket } = await setupAdapter()
-    const promise = adapter.respondClarify({ sessionId: 'run-1', answer: '是' })
+    const promise = adapter.respondClarify({ sessionId: 'run-1', answer: '是', requestId: 'rid-1' })
     const sent = JSON.parse(socket.sent[0]!)
     expect(sent.method).toBe('clarify.respond')
-    expect(sent.params).toEqual({ session_id: 'run-1', answer: '是' })
+    expect(sent.params).toEqual({ session_id: 'run-1', answer: '是', request_id: 'rid-1' })
     socket.emitMessage({ jsonrpc: '2.0', id: 1, result: {} })
     await promise
   })
 
   test('Given respondSudo When 调用 Then 发送 password', async () => {
     const { adapter, socket } = await setupAdapter()
-    const promise = adapter.respondSudo({ sessionId: 'run-1', password: 'p' })
+    const promise = adapter.respondSudo({ sessionId: 'run-1', password: 'p', requestId: 'rid-1' })
     const sent = JSON.parse(socket.sent[0]!)
     expect(sent.method).toBe('sudo.respond')
-    expect(sent.params).toEqual({ session_id: 'run-1', password: 'p' })
+    expect(sent.params).toEqual({ session_id: 'run-1', password: 'p', request_id: 'rid-1' })
     socket.emitMessage({ jsonrpc: '2.0', id: 1, result: {} })
     await promise
   })

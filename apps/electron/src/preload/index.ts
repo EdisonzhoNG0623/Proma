@@ -1244,7 +1244,7 @@ export interface ElectronAPI {
     /** 读取远端文件内容 */
     readRemoteFile: (targetId: string, remotePath: string) => Promise<string>
     /** 响应 Hermes 交互请求（approval/clarify/sudo/secret） */
-    respondInteraction: (input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => Promise<void>
+    respondInteraction: (input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; requestId?: string; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => Promise<void>
   }
 }
 

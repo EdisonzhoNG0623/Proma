@@ -1421,11 +1421,14 @@ export class AgentOrchestrator {
       }
 
       // 11. 构建动态上下文和最终 prompt
-      const dynamicCtx = buildDynamicContext({
-        workspaceName: workspace?.name,
-        workspaceSlug,
-        agentCwd,
-      })
+      // Hermes Remote：不注入 Proma 本地动态上下文（时间/工作区/MCP）——Hermes 端自带完整会话上下文
+      const dynamicCtx = isHermesRemote
+        ? ''
+        : buildDynamicContext({
+            workspaceName: workspace?.name,
+            workspaceSlug,
+            agentCwd,
+          })
 
       // 11.5 注入 mention 引用指令（Skill/MCP/会话）— 仅影响 prompt，不影响持久化
       let enrichedMessage = userMessage

@@ -763,6 +763,7 @@ interface HermesInteractionMessage {
 function HermesInteractionCard({ message }: { message: HermesInteractionMessage }): React.ReactElement {
   const [responding, setResponding] = React.useState(false)
   const [done, setDone] = React.useState(false)
+  const [expired, setExpired] = React.useState(false)
   const [text, setText] = React.useState('')
   const [error, setError] = React.useState<string | null>(null)
 
@@ -779,11 +780,19 @@ function HermesInteractionCard({ message }: { message: HermesInteractionMessage 
     try {
       await window.electronAPI.hermes.respondInteraction({
         sessionId: message.session_id ?? '',
+        requestId: message.requestId,
         ...payload,
       })
       setDone(true)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      // Hermes 只接受活跃 turn 中的响应；历史卡片（上一轮请求）已过期
+      if (/no pending|not found|expired|already|无.*请求/i.test(msg)) {
+        setExpired(true)
+        setError('该请求已过期或已处理（Hermes 只接受当前对话中的响应）')
+      } else {
+        setError(msg)
+      }
     } finally {
       setResponding(false)
     }
@@ -805,6 +814,8 @@ function HermesInteractionCard({ message }: { message: HermesInteractionMessage 
           )}
           {done ? (
             <div className="mt-2 text-xs text-muted-foreground">✓ 已响应</div>
+          ) : expired ? (
+            <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">⏰ 该请求已过期或已处理（Hermes 只接受当前对话中的响应）</div>
           ) : kind === 'approval' ? (
             <div className="mt-2 flex flex-wrap gap-2">
               <Button size="sm" disabled={responding} onClick={() => void respond({ type: 'approval', choice: 'allow' })}>

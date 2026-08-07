@@ -5,12 +5,14 @@
  * 归一化为统一的 HermesTurnEvent，再由有状态映射器转换为 Proma 的 SDKMessage 流。
  *
  * 转换规则：
- * - text.delta / reasoning.delta / tool.started 统一累积到 blocks，事件边界才 flush 为完整 assistant；
+ * - text.delta → 累积 blocks 并产出 partial assistant（同 uuid 流式替换，UI 实时显示）；
+ * - reasoning.delta / tool.started 统一累积到 blocks，工具边界 flush 为完整 assistant；
  * - tool.completed → tool_progress 心跳消息；
  * - turn.completed → assistant + result(success)；
  * - turn.failed / error → assistant + result(error)。
  */
 
+import { randomUUID } from 'node:crypto'
 import type { SDKAssistantMessage, SDKContentBlock, SDKMessage, SDKResultMessage, SDKTextBlock, SDKThinkingBlock, SDKToolProgressMessage } from '@proma/shared'
 
 /** 归一化后的 Hermes turn 事件 */
@@ -80,6 +82,8 @@ export class HermesSdkMessageMapper {
 
   /** 远端 Hermes 实际模型（session.info 事件更新；Hermes 会话优先于 Proma 本地 modelId） */
   private latestModel: string | undefined
+  /** 当前流式文本块的稳定 uuid（partial 消息同 uuid 替换，实现实时流式输出） */
+  private streamUuid = randomUUID()
 
   /** 取走当前累积的 blocks 并产出 assistant（无内容时返回 null）；Hermes 会话用远端模型 */
   private takeAssistant(): SDKAssistantMessage | null {
@@ -88,10 +92,33 @@ export class HermesSdkMessageMapper {
     }
     const content = this.blocks
     this.blocks = []
-    return buildAssistantMessage(content, {
-      sessionId: this.options.sessionId,
-      model: this.latestModel ?? this.options.model,
-    })
+    return {
+      ...buildAssistantMessage(content, {
+        sessionId: this.options.sessionId,
+        model: this.latestModel ?? this.options.model,
+      }),
+      uuid: this.streamUuid,
+    }
+  }
+
+  /** 产出流式 partial assistant 消息（同 uuid，UI 实时替换显示） */
+  private buildStreamingPartial(): SDKAssistantMessage {
+    // 深拷贝 blocks：后续 appendText 会原地修改 text block，partial 必须持有快照
+    const snapshot = this.blocks.map((b) => (
+      b.type === 'text'
+        ? { ...b, text: (b as SDKTextBlock).text }
+        : b.type === 'thinking'
+          ? { ...b, thinking: (b as SDKThinkingBlock).thinking }
+          : { ...b }
+    ))
+    return {
+      ...buildAssistantMessage(snapshot, {
+        sessionId: this.options.sessionId,
+        model: this.latestModel ?? this.options.model,
+      }),
+      uuid: this.streamUuid,
+      _partial: true,
+    } as SDKAssistantMessage
   }
 
   private appendText(text: string): void {
@@ -122,11 +149,15 @@ export class HermesSdkMessageMapper {
     switch (event.type) {
       case 'text.delta':
         this.appendText(event.text)
-        return []
+        return [this.buildStreamingPartial()]
       case 'reasoning.delta':
         this.appendThinking(event.text)
         return []
       case 'tool.started': {
+        const messages: SDKMessage[] = []
+        // 先 flush 当前累积文本为完整 assistant（同 uuid，结束 partial 流）
+        const assistant = this.takeAssistant()
+        if (assistant) messages.push(assistant)
         // 文本与 tool_use 放在同一个 assistant blocks 中（贴近 SDK 消息展示）
         this.blocks.push({
           type: 'tool_use',
@@ -134,7 +165,9 @@ export class HermesSdkMessageMapper {
           name: event.toolName,
           input: event.input ?? {},
         })
-        return []
+        // 后续文本开始新的流式块
+        this.streamUuid = randomUUID()
+        return messages
       }
       case 'tool.completed': {
         const progress: SDKToolProgressMessage = {
