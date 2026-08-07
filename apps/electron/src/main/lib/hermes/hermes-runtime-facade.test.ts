@@ -200,6 +200,18 @@ describe('HermesRuntimeFacade query', () => {
     const facade = new HermesRuntimeFacade(
       createDeps({
         readDashboardPassword: () => null,
+        // 无持久化 Cookie（getCredential 默认 null），ws-ticket 401 → 需密码登录 → 凭据缺失
+        buildTransport: async () => {
+          const transport = createFakeTransport()
+          const original = transport.requestJson.bind(transport)
+          transport.requestJson = async (path, options) => {
+            if (path === '/api/auth/ws-ticket') {
+              return { status: 401, body: { error: 'unauthorized' } }
+            }
+            return original(path, options)
+          }
+          return transport
+        },
       }),
     )
     const error = await collect(facade.query({ sessionId: 'sess-1', prompt: 'hi', agentRuntime: 'hermes-remote' })).catch((e: unknown) => e)
