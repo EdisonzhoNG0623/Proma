@@ -54,6 +54,7 @@ const createFacade = (): HermesRuntimeFacade => {
       bindings.set(sessionId, { ...current, remoteSessionId })
     },
     buildTransport: async (target) => buildHermesTransport(target),
+    ensureRemoteCwd: async () => false,
   })
 }
 

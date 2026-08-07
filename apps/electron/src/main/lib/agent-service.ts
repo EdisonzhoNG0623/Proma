@@ -32,6 +32,8 @@ import { ClaudeAgentAdapter, scanAndKillOrphanedClaudeSubprocesses } from './ada
 import { PiAgentAdapter, cleanupPiRuntimeResources } from './adapters/pi-agent-adapter'
 import { RuntimeRoutingAgentAdapter } from './adapters/runtime-routing-agent-adapter'
 import { HermesRuntimeFacade } from './hermes/hermes-runtime-facade'
+import { HermesRemoteSftp } from './hermes/hermes-remote-sftp'
+import type { HermesSftpAuth } from './hermes/hermes-remote-sftp'
 import { hermesTargetStore } from './hermes/hermes-target-store'
 import { hermesCredentialStore } from './hermes/hermes-credential-store'
 import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes/hermes-connection'
@@ -81,6 +83,39 @@ const hermesFacade = new HermesRuntimeFacade({
     }
   },
   buildTransport: async (target) => buildHermesTransport(target),
+  ensureRemoteCwd: async (targetId, cwd) => {
+    try {
+      const target = hermesTargetStore.getTarget(targetId)
+      if (!target?.ssh) {
+        // 无 SSH 配置：Hermes 协议无法自动建目录，不阻塞（会话 cwd 落默认）
+        return false
+      }
+      const sshSecret = target.ssh.credentialRef
+        ? hermesCredentialStore.getCredential(target.ssh.credentialRef)
+        : null
+      const auth: HermesSftpAuth = {
+        host: target.ssh.host,
+        port: target.ssh.port,
+        username: target.ssh.username,
+        ...(sshSecret
+          ? sshSecret.includes('PRIVATE KEY') || sshSecret.startsWith('-----BEGIN')
+            ? { privateKey: sshSecret }
+            : { password: sshSecret }
+          : {}),
+      }
+      const sftp = new HermesRemoteSftp()
+      await sftp.connect(auth)
+      try {
+        await sftp.mkdirp(cwd)
+        return true
+      } finally {
+        sftp.close()
+      }
+    } catch (error) {
+      console.warn('[Hermes] 自动创建远端项目目录失败:', error instanceof Error ? error.message : String(error))
+      return false
+    }
+  },
 })
 
 const adapter = new RuntimeRoutingAgentAdapter({

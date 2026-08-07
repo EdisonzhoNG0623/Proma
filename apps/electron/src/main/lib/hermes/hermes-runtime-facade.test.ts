@@ -59,6 +59,7 @@ const createDeps = (overrides: Partial<HermesRuntimeDeps> = {}): HermesRuntimeDe
       persisted.set(sessionId, remoteSessionId)
     },
     buildTransport: async () => createFakeTransport(),
+    ensureRemoteCwd: async () => false,
     ...overrides,
   }
 }
