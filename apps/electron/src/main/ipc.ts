@@ -2704,12 +2704,17 @@ export function registerIpcHandlers(): void {
 
       // 历史会话缺失 runtime 时按 Claude 处理，避免将 Claude SDK 会话 ID 交给 Pi 恢复。
       const previousRuntime: AgentRuntime = isAgentRuntime(current.agentRuntime) ? current.agentRuntime : 'claude'
-      const updates: Partial<Pick<AgentSessionMeta, 'agentRuntime' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'hermesTargetId' | 'hermesProfile' | 'hermesRemoteSessionId'>> = {
+      const updates: Partial<Pick<AgentSessionMeta, 'agentRuntime' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'hermesTargetId' | 'hermesProfile' | 'hermesRemoteSessionId' | 'channelId' | 'modelId'>> = {
         agentRuntime: runtime,
       }
-      // Hermes Remote 会话绑定 target（切换时由 UI 传入）
+      // Hermes Remote 会话绑定 target（切换时由 UI 传入）；不依赖 Proma 本地渠道/模型
       if (runtime === 'hermes-remote' && typeof hermesTargetId === 'string' && hermesTargetId) {
         updates.hermesTargetId = hermesTargetId
+      }
+      if (runtime === 'hermes-remote') {
+        // 清掉本地渠道/模型（避免 UI 显示 DeepSeek 等本地模型头像，远端模型在 Hermes 端配置）
+        updates.channelId = 'hermes-remote'
+        updates.modelId = undefined
       }
       if (previousRuntime !== runtime) {
         // 两套 runtime 的会话 artifact 不可互用；下一轮从 Proma 已持久化的转录恢复。

@@ -551,8 +551,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const hermesTargetName = sessionMeta?.hermesTargetId
     ? hermesTargets.find((t) => t.id === sessionMeta.hermesTargetId)?.name ?? null
     : null
-  const agentChannelId = sessionMetaChannelId ?? sessionChannelMap.get(sessionId) ?? defaultChannelId
-  const agentModelId = sessionMetaModelId ?? sessionModelMap.get(sessionId) ?? defaultModelId
+  /** Hermes 远程会话不依赖 Proma 渠道/模型（模型在远端 Hermes 配置），占位渠道避免显示本地 DeepSeek 等 */
+  const isHermesRemoteSessionForChannel = hasSessionMeta
+    ? sessionMeta?.agentRuntime === 'hermes-remote'
+    : false
+  const agentChannelId = isHermesRemoteSessionForChannel
+    ? 'hermes-remote'
+    : (sessionMetaChannelId ?? sessionChannelMap.get(sessionId) ?? defaultChannelId)
+  const agentModelId = isHermesRemoteSessionForChannel
+    ? 'hermes-remote'
+    : (sessionMetaModelId ?? sessionModelMap.get(sessionId) ?? defaultModelId)
   const agentChannelIds = useAtomValue(agentChannelIdsAtom)
   const [agentRuntime, setAgentRuntime] = useAtom(agentRuntimeAtom)
   const [agentThinking, setAgentThinking] = useAtom(agentThinkingAtom)

@@ -29,6 +29,7 @@ export type HermesTurnEvent =
   | { type: 'clarify.request'; requestId: string; question: string }
   | { type: 'sudo.request'; requestId: string; message: string }
   | { type: 'secret.request'; requestId: string; message: string }
+  | { type: 'session.info'; model?: string; status?: string }
   | { type: 'turn.completed'; usage?: unknown }
   | { type: 'turn.failed'; error: string }
   | { type: 'error'; message: string }
@@ -77,7 +78,10 @@ export class HermesSdkMessageMapper {
     private readonly options: { sessionId?: string; model?: string } = {},
   ) {}
 
-  /** 取走当前累积的 blocks 并产出 assistant（无内容时返回 null） */
+  /** 远端 Hermes 实际模型（session.info 事件更新；Hermes 会话优先于 Proma 本地 modelId） */
+  private latestModel: string | undefined
+
+  /** 取走当前累积的 blocks 并产出 assistant（无内容时返回 null）；Hermes 会话用远端模型 */
   private takeAssistant(): SDKAssistantMessage | null {
     if (this.blocks.length === 0) {
       return null
@@ -86,7 +90,7 @@ export class HermesSdkMessageMapper {
     this.blocks = []
     return buildAssistantMessage(content, {
       sessionId: this.options.sessionId,
-      model: this.options.model,
+      model: this.latestModel ?? this.options.model,
     })
   }
 
@@ -162,6 +166,21 @@ export class HermesSdkMessageMapper {
           tool_input: 'toolInput' in event ? event.toolInput : undefined,
         } as unknown as SDKMessage)
         return messages
+      }
+      case 'session.info': {
+        // 透传远端 Hermes 实际模型（如 claude-xxx），供消息头像/模型显示
+        if (event.model) {
+          this.latestModel = event.model
+        }
+        if (event.status === 'complete' || event.status === 'ended' || event.status === 'idle') {
+          this.ended = true
+          const messages: SDKMessage[] = []
+          const assistant = this.takeAssistant()
+          if (assistant) messages.push(assistant)
+          messages.push(buildResultMessage('success', { sessionId: this.options.sessionId }))
+          return messages
+        }
+        return []
       }
       case 'turn.completed': {
         this.ended = true

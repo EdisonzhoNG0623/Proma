@@ -239,7 +239,7 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     // 事件 handler 提前注册：引导 turn（mkdir 初始化）也需要被监听
     const mapper = new HermesSdkMessageMapper({
       sessionId: input.sessionId,
-      model: input.model,
+      // Hermes 会话不传 Proma 本地 modelId（远端模型由 session.info 事件提供，避免头像显示本地模型）
     })
     const notificationHandler: HermesWsNotificationHandler = (method, params) => {
       const turnEvent = normalizeDashboardNotification(method, params)
@@ -377,7 +377,7 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
 
     const mapper = new HermesSdkMessageMapper({
       sessionId: input.sessionId,
-      model: input.model,
+      // Hermes 会话不传 Proma 本地 modelId（远端模型由 session.info 事件提供，避免头像显示本地模型）
     })
 
     const events: HermesTurnEvent[] = []

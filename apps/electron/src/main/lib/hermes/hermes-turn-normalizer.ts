@@ -160,10 +160,12 @@ export function normalizeDashboardNotification(
       return { type: 'turn.completed' }
     case 'session.info': {
       const status = pickString(params, ['status', 'state'])
+      // 透传远端 Hermes 实际模型（session.info 带 model），供消息头像/模型显示
+      const model = pickString(params, ['model'])
       if (status === 'complete' || status === 'ended' || status === 'idle') {
-        return { type: 'turn.completed' }
+        return model ? { type: 'session.info', model, status } : { type: 'turn.completed' }
       }
-      return null
+      return model ? { type: 'session.info', model, status } : null
     }
     default:
       return null

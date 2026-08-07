@@ -2273,17 +2273,17 @@ export class AgentOrchestrator {
                 } else {
                   // 为结果消息注入渠道信息，确保持久化后能按 Agent SDK 运行窗口计算压缩阈值
                   if (msg.type === 'result') {
-                    if (modelId) {
+                    if (modelId && !isHermesRemote) {
                       (msg as Record<string, unknown>)._channelModelId = modelId
                     }
-                    ;(msg as Record<string, unknown>)._channelProvider = channel.provider
+                    ;(msg as Record<string, unknown>)._channelProvider = isHermesRemote ? 'hermes' : channel.provider
                   }
                   // 为 assistant 消息注入渠道信息，确保持久化后能正确匹配模型显示名与 Agent SDK 窗口
                   if (msg.type === 'assistant') {
-                    if (modelId) {
+                    if (modelId && !isHermesRemote) {
                       (msg as Record<string, unknown>)._channelModelId = modelId
                     }
-                    ;(msg as Record<string, unknown>)._channelProvider = channel.provider
+                    ;(msg as Record<string, unknown>)._channelProvider = isHermesRemote ? 'hermes' : channel.provider
                   }
                   accumulatedMessages.push(msg)
                 }
