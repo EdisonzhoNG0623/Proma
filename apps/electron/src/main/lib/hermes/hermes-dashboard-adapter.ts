@@ -15,6 +15,7 @@
 
 import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
 import type { HermesWsConnector } from './hermes-dashboard-ws-client'
+import type { HermesRemoteProject, HermesProjectTree, HermesRemoteSessionSummary } from '@proma/shared'
 
 /** 会话创建输入 */
 export interface HermesSessionCreateInput {
@@ -88,6 +89,52 @@ export function parseSessionResult(
     storedSessionId: typeof stored === 'string' ? stored : data.session_id,
     created,
   }
+}
+
+/** 远端项目树（projects.tree 响应） */
+export type { HermesRemoteProject, HermesProjectTree, HermesRemoteSessionSummary } from '@proma/shared'
+
+/** 解析 projects.tree 响应 */
+export function parseProjectTree(body: unknown): HermesProjectTree {
+  if (!body || typeof body !== 'object') {
+    return { projects: [], activeId: null, scopedSessionIds: [] }
+  }
+  const data = body as { projects?: unknown; active_id?: unknown; scoped_session_ids?: unknown }
+  const projects = Array.isArray(data.projects)
+    ? data.projects.filter((item): item is HermesRemoteProject =>
+        !!item && typeof item === 'object' && typeof (item as HermesRemoteProject).id === 'string')
+    : []
+  return {
+    projects,
+    activeId: typeof data.active_id === 'string' ? data.active_id : null,
+    scopedSessionIds: Array.isArray(data.scoped_session_ids)
+      ? data.scoped_session_ids.filter((item): item is string => typeof item === 'string')
+      : [],
+  }
+}
+
+/** 解析 session.list 响应 */
+export function parseSessionList(body: unknown): HermesRemoteSessionSummary[] {
+  if (!body || typeof body !== 'object') {
+    return []
+  }
+  const sessions = (body as { sessions?: unknown }).sessions
+  if (!Array.isArray(sessions)) {
+    return []
+  }
+  return sessions.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const s = item as { id?: unknown; title?: unknown; preview?: unknown; started_at?: unknown; message_count?: unknown; source?: unknown }
+    if (typeof s.id !== 'string') return []
+    return [{
+      id: s.id,
+      title: typeof s.title === 'string' ? s.title : '',
+      preview: typeof s.preview === 'string' ? s.preview : '',
+      startedAt: typeof s.started_at === 'number' ? s.started_at : 0,
+      messageCount: typeof s.message_count === 'number' ? s.message_count : 0,
+      source: typeof s.source === 'string' ? s.source : '',
+    }]
+  })
 }
 
 /**
@@ -171,6 +218,37 @@ export class HermesDashboardAdapter {
       session_id: input.sessionId,
       value: input.value,
     })
+  }
+
+  /** 获取远端项目树（projects.tree：项目 → 仓库 → lane 分组） */
+  async listProjects(): Promise<HermesProjectTree> {
+    const result = await this.client.request<unknown>('projects.tree', {
+      preview_limit: 3,
+      session_limit: 2000,
+    })
+    return parseProjectTree(result)
+  }
+
+  /** 获取某项目的完整会话分组（projects.project_sessions） */
+  async listProjectSessions(projectId: string): Promise<HermesRemoteProject | null> {
+    const result = await this.client.request<unknown>('projects.project_sessions', {
+      project_id: projectId,
+      session_limit: 5000,
+    })
+    if (!result || typeof result !== 'object') {
+      return null
+    }
+    const project = (result as { project?: unknown }).project
+    if (!project || typeof project !== 'object') {
+      return null
+    }
+    return project as HermesRemoteProject
+  }
+
+  /** 获取远端会话列表（session.list，按最近活跃排序） */
+  async listSessions(limit = 200): Promise<HermesRemoteSessionSummary[]> {
+    const result = await this.client.request<unknown>('session.list', { limit })
+    return parseSessionList(result)
   }
 }
 

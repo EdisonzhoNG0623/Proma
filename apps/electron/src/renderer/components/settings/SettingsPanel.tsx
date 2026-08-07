@@ -64,6 +64,7 @@ import { PromptSettings } from "./PromptSettings";
 import { ToolSettings } from "./ToolSettings";
 import { BotHubSettings } from "./BotHubSettings";
 import { HermesSettings } from "./HermesSettings";
+import { HermesRemoteSessionsView } from "./HermesRemoteSessionsView";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { VoiceInputSettings } from "./VoiceInputSettings";
 import { MigrationSettings } from "./MigrationSettings";

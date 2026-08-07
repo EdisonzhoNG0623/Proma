@@ -30,6 +30,7 @@ import { SettingsSelect } from './primitives/SettingsSelect'
 import { SettingsSegmentedControl } from './primitives/SettingsSegmentedControl'
 import { SettingsSection } from './primitives/SettingsSection'
 import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
+import { HermesRemoteSessionsView } from './HermesRemoteSessionsView'
 import {
   loadHermesTargets,
   createHermesTarget,
@@ -534,6 +535,9 @@ export function HermesSettings(): React.ReactElement {
         onClose={() => setFormOpen(false)}
         onSaved={() => void refresh()}
       />
+
+      {/* 远端会话项目视图（①：projects.tree / session.list） */}
+      <HermesRemoteSessionsView />
     </div>
   )
 }

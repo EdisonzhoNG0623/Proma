@@ -102,4 +102,20 @@ export function registerHermesIpcHandlers(): void {
   ipcMain.handle(HERMES_IPC_CHANNELS.DELETE_CREDENTIAL, (_, ref: string): boolean => {
     return hermesIpcService.deleteCredential(requireString(ref, 'ref'))
   })
+
+  // ---- 远端项目/会话视图 ----
+  ipcMain.handle(HERMES_IPC_CHANNELS.LIST_REMOTE_PROJECTS, async (_, targetId: string) => {
+    return await hermesIpcService.listRemoteProjects(requireString(targetId, 'targetId'))
+  })
+
+  ipcMain.handle(HERMES_IPC_CHANNELS.LIST_REMOTE_PROJECT_SESSIONS, async (_, targetId: string, projectId: string) => {
+    return await hermesIpcService.listRemoteProjectSessions(
+      requireString(targetId, 'targetId'),
+      requireString(projectId, 'projectId'),
+    )
+  })
+
+  ipcMain.handle(HERMES_IPC_CHANNELS.LIST_REMOTE_SESSIONS, async (_, targetId: string, limit?: number) => {
+    return await hermesIpcService.listRemoteSessions(requireString(targetId, 'targetId'), limit ?? 100)
+  })
 }

@@ -10,6 +10,8 @@ import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
 import {
   HermesDashboardAdapter,
   parseSessionResult,
+  parseProjectTree,
+  parseSessionList,
 } from './hermes-dashboard-adapter'
 import { HermesError } from './hermes-errors'
 
@@ -259,5 +261,81 @@ describe('parseSessionResult 响应解析', () => {
   test('Given 畸形响应 When 解析 Then 抛错', () => {
     expect(() => parseSessionResult(null, true)).toThrow('格式异常')
     expect(() => parseSessionResult({}, true)).toThrow('缺少 session_id')
+  })
+})
+
+describe('parseProjectTree / parseSessionList 项目视图解析', () => {
+  test('Given projects.tree 响应 When 解析 Then 返回项目列表', () => {
+    const tree = parseProjectTree({
+      projects: [
+        { id: 'p_1', label: '项目A', path: '/srv/a', sessionCount: 3, lastActive: 123 },
+        { id: 'p_2', label: '项目B', path: '/srv/b' },
+        { id: 42 }, // 畸形项被过滤
+      ],
+      active_id: 'p_1',
+      scoped_session_ids: ['s1', 's2'],
+    })
+    expect(tree.projects).toHaveLength(2)
+    expect(tree.projects[0]?.id).toBe('p_1')
+    expect(tree.projects[0]?.sessionCount).toBe(3)
+    expect(tree.activeId).toBe('p_1')
+    expect(tree.scopedSessionIds).toEqual(['s1', 's2'])
+  })
+
+  test('Given 畸形 projects.tree When 解析 Then 返回空列表', () => {
+    expect(parseProjectTree(null)).toEqual({ projects: [], activeId: null, scopedSessionIds: [] })
+    expect(parseProjectTree({})).toEqual({ projects: [], activeId: null, scopedSessionIds: [] })
+  })
+
+  test('Given session.list 响应 When 解析 Then 返回会话摘要', () => {
+    const sessions = parseSessionList({
+      sessions: [
+        { id: 's1', title: '会话1', preview: 'hi', started_at: 123, message_count: 5, source: 'cli' },
+        { id: 42 }, // 畸形项被过滤
+      ],
+    })
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]).toMatchObject({ id: 's1', title: '会话1', messageCount: 5, source: 'cli' })
+  })
+
+  test('Given 畸形 session.list When 解析 Then 返回空列表', () => {
+    expect(parseSessionList(null)).toEqual([])
+    expect(parseSessionList({})).toEqual([])
+  })
+})
+
+describe('HermesDashboardAdapter 远端项目视图', () => {
+  const setupAdapter = async (): Promise<{ adapter: HermesDashboardAdapter; socket: FakeWebSocket }> => {
+    const { client, socket } = await connectClient()
+    return { adapter: new HermesDashboardAdapter(client), socket }
+  }
+
+  test('Given listProjects When 调用 Then 发送 projects.tree 并返回项目树', async () => {
+    const { adapter, socket } = await setupAdapter()
+    const promise = adapter.listProjects()
+    const sent = JSON.parse(socket.sent[0]!)
+    expect(sent.method).toBe('projects.tree')
+    socket.emitMessage({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { projects: [{ id: 'p_1', label: '项目A', path: '/srv/a' }], active_id: 'p_1', scoped_session_ids: [] },
+    })
+    const tree = await promise
+    expect(tree.projects[0]?.label).toBe('项目A')
+  })
+
+  test('Given listSessions When 调用 Then 发送 session.list 并返回会话', async () => {
+    const { adapter, socket } = await setupAdapter()
+    const promise = adapter.listSessions(50)
+    const sent = JSON.parse(socket.sent[0]!)
+    expect(sent.method).toBe('session.list')
+    expect(sent.params).toEqual({ limit: 50 })
+    socket.emitMessage({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { sessions: [{ id: 's1', title: '会话1', preview: '', started_at: 1, message_count: 2, source: 'cli' }] },
+    })
+    const sessions = await promise
+    expect(sessions[0]?.title).toBe('会话1')
   })
 })

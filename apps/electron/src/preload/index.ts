@@ -1245,6 +1245,12 @@ export interface ElectronAPI {
     setApiServerKey: (input: import('@proma/shared').HermesSetCredentialInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
     setSshPassword: (input: import('@proma/shared').HermesSetCredentialInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
     deleteCredential: (ref: string) => Promise<boolean>
+    /** 获取远端项目树 */
+    listRemoteProjects: (targetId: string) => Promise<import('@proma/shared').HermesRemoteProject[]>
+    /** 获取某项目完整会话分组 */
+    listRemoteProjectSessions: (targetId: string, projectId: string) => Promise<import('@proma/shared').HermesRemoteProject | null>
+    /** 获取远端会话列表 */
+    listRemoteSessions: (targetId: string, limit?: number) => Promise<import('@proma/shared').HermesRemoteSessionSummary[]>
   }
 }
 
@@ -2815,6 +2821,12 @@ const electronAPI: ElectronAPI = {
     setSshPassword: (input: import('@proma/shared').HermesSetCredentialInput) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.SET_SSH_PASSWORD, input),
     deleteCredential: (ref: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.DELETE_CREDENTIAL, ref),
+    listRemoteProjects: (targetId: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_PROJECTS, targetId),
+    listRemoteProjectSessions: (targetId: string, projectId: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_PROJECT_SESSIONS, targetId, projectId),
+    listRemoteSessions: (targetId: string, limit?: number) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_SESSIONS, targetId, limit),
   },
 }
 
