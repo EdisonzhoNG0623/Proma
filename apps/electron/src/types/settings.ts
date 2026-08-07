@@ -297,6 +297,10 @@ export interface AppSettings {
   windowsShellPreference?: WindowsShellPreference
   /** 侧栏「自动任务」合成项目组在项目列表中的位置索引（默认 0 = 最靠前；可拖拽调整） */
   agentAutomationGroupOrder?: number
+  /** 每个 Hermes target 隐藏的远端项目 id（Hermes Desktop 式隐藏项目文件夹） */
+  hermesHiddenProjects?: Record<string, string[]>
+  /** 侧栏 Hermes 远端区块高度（px，可拖动分割线调整） */
+  hermesRemotePanelHeight?: number
   /** 是否已完成 Onboarding 流程 */
   onboardingCompleted?: boolean
   /** 已完成的 Onboarding 版本；低于当前版本时会再次展示引导。 */

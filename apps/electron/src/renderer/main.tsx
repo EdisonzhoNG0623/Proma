@@ -43,6 +43,7 @@ import {
   dockBadgeCountAtom,
   unviewedCompletedSessionIdsAtom,
 } from './atoms/agent-atoms'
+import { hermesHiddenProjectsAtom, hermesRemotePanelHeightAtom } from './atoms/hermes-atoms'
 import { updateStatusAtom, initializeUpdater } from './atoms/updater'
 import { automationsAtom } from './atoms/automation-atoms'
 import { calendarEventsAtom, calendarPlanningGroupsAtom, planningTagsAtom, todoPlanningGroupsAtom, todosAtom } from './atoms/planning-atoms'
@@ -184,6 +185,8 @@ function AgentSettingsInitializer(): null {
   const setMaxBudget = useSetAtom(agentMaxBudgetUsdAtom)
   const setMaxTurns = useSetAtom(agentMaxTurnsAtom)
   const setAutomationGroupOrder = useSetAtom(automationGroupOrderAtom)
+  const setHermesHiddenProjects = useSetAtom(hermesHiddenProjectsAtom)
+  const setHermesRemotePanelHeight = useSetAtom(hermesRemotePanelHeightAtom)
 
   const setAgentSettingsReady = useSetAtom(agentSettingsReadyAtom)
   const setChannels = useSetAtom(channelsAtom)
@@ -269,6 +272,12 @@ function AgentSettingsInitializer(): null {
       if (typeof settings.agentAutomationGroupOrder === 'number') {
         setAutomationGroupOrder(settings.agentAutomationGroupOrder)
       }
+      if (settings.hermesHiddenProjects && typeof settings.hermesHiddenProjects === 'object') {
+        setHermesHiddenProjects(settings.hermesHiddenProjects)
+      }
+      if (typeof settings.hermesRemotePanelHeight === 'number') {
+        setHermesRemotePanelHeight(settings.hermesRemotePanelHeight)
+      }
 
       // 加载工作区列表并恢复上次选中的工作区
       window.electronAPI.listAgentWorkspaces().then((workspaces) => {
@@ -289,7 +298,7 @@ function AgentSettingsInitializer(): null {
       console.error(err)
       setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
     })
-  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentRuntime, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setChannels, setChannelsLoaded, setAgentSettingsReady])
+  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentRuntime, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setHermesHiddenProjects, setHermesRemotePanelHeight, setChannels, setChannelsLoaded, setAgentSettingsReady])
 
   // 工作区切换时重置能力缓存，预加载基线
   useEffect(() => {
