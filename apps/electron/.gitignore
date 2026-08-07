@@ -1,0 +1,2 @@
+# 内置便携 Git（构建时由本地资源提供，不入仓库）
+resources/mingit/
