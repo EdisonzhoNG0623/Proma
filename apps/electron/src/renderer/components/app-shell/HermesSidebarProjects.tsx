@@ -158,6 +158,11 @@ export function HermesSidebarProjects(): React.ReactElement | null {
   const dragStateRef = React.useRef<{ startY: number; startHeight: number } | null>(null)
   const handleResizePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
     event.preventDefault()
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId)
+    } catch {
+      // 捕获失败忽略
+    }
     dragStateRef.current = { startY: event.clientY, startHeight: panelHeight }
     const onMove = (moveEvent: PointerEvent): void => {
       if (!dragStateRef.current) return
@@ -177,13 +182,13 @@ export function HermesSidebarProjects(): React.ReactElement | null {
 
   return (
     <div className="sticky bottom-0 z-10 mt-1 flex-shrink-0 border-t border-foreground/[0.06] bg-[hsl(var(--sidebar-surface))] pt-1">
-      {/* 可拖动分割线：调整 Hermes 远端区块高度（项目区 flex 自动伸缩） */}
+      {/* 可拖动分割线：调整 Hermes 远端区块高度 */}
       <div
-        className="group/resizer relative -mx-1 mb-0.5 flex h-3 cursor-row-resize items-center justify-center"
+        className="group/resizer relative -mx-1 mb-0.5 flex h-4 cursor-row-resize touch-none items-center justify-center"
         onPointerDown={handleResizePointerDown}
-        title="拖动调整高度"
+        title="拖动调整高度（项目少时也可拉动）"
       >
-        <div className="h-1 w-8 rounded-full bg-foreground/[0.08] transition-colors group-hover/resizer:bg-foreground/20" />
+        <div className="h-1 w-10 rounded-full bg-foreground/[0.12] transition-colors group-hover/resizer:h-1.5 group-hover/resizer:bg-foreground/25" />
       </div>
 
       <div style={{ height: panelHeight }} className="overflow-y-auto scrollbar-thin">
