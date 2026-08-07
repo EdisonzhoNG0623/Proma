@@ -243,6 +243,12 @@ export const HERMES_IPC_CHANNELS = {
   DEDUPE_REMOTE_SESSIONS: 'hermes:dedupe-remote-sessions',
   /** 同步本地项目到远端 Hermes（SFTP 增量上传） */
   SYNC_PROJECT_TO_REMOTE: 'hermes:sync-project-to-remote',
+  /** 创建远端项目（SFTP mkdir） */
+  CREATE_REMOTE_PROJECT: 'hermes:create-remote-project',
+  /** 列出远端项目文件 */
+  LIST_REMOTE_FILES: 'hermes:list-remote-files',
+  /** 读取远端文件内容 */
+  READ_REMOTE_FILE: 'hermes:read-remote-file',
 } as const
 
 /**
@@ -336,4 +342,13 @@ export interface HermesSyncResult {
   skipped: number
   failed: number
   errors: string[]
+}
+
+/** 远端文件条目 */
+export interface HermesRemoteFileEntry {
+  name: string
+  path: string
+  isDirectory: boolean
+  size: number
+  mtimeMs: number
 }

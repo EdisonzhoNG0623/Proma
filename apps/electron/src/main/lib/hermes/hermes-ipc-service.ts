@@ -36,6 +36,7 @@ import { appendSDKMessages } from '../agent-session-manager'
 import { getAgentWorkspace } from '../agent-workspace-manager'
 import { existsSync } from 'node:fs'
 import type { SDKMessage } from '@proma/shared'
+import type { HermesRemoteFileEntry } from './hermes-remote-sftp'
 import type { HermesTransport } from './transport/hermes-transport'
 
 /**
@@ -402,6 +403,85 @@ export class HermesIpcService {
       return history.length
     } finally {
       session.close()
+    }
+  }
+
+  /**
+   * 建立 SFTP 连接（SSH Tunnel target 的 SSH 配置）。
+   * 调用方负责 close。
+   */
+  private async connectSftpForTarget(target: HermesTarget): Promise<HermesRemoteSftp> {
+    if (!target.ssh) {
+      throw new Error('当前 Hermes target 无 SSH 配置（请使用 SSH Tunnel 模式连接）')
+    }
+    const sshSecret = target.ssh.credentialRef
+      ? this.credentialStore.getCredential(target.ssh.credentialRef)
+      : null
+    const auth: HermesSftpAuth = {
+      host: target.ssh.host,
+      port: target.ssh.port,
+      username: target.ssh.username,
+      ...(sshSecret
+        ? sshSecret.includes('PRIVATE KEY') || sshSecret.startsWith('-----BEGIN')
+          ? { privateKey: sshSecret }
+          : { password: sshSecret }
+        : {}),
+    }
+    const sftp = new HermesRemoteSftp()
+    await sftp.connect(auth)
+    return sftp
+  }
+
+  /** 远端项目根目录约定 */
+  private remoteProjectsRoot(_target: HermesTarget): string {
+    return '~/proma-projects'
+  }
+
+  /** 创建远端项目（在远端建目录 ~/proma-projects/<name>） */
+  async createRemoteProject(targetId: string, name: string): Promise<string> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) {
+      throw new Error('Hermes target 不存在')
+    }
+    const safeName = name.trim().replace(/[^\w.-]/g, '-')
+    if (!safeName) {
+      throw new Error('项目名称无效')
+    }
+    const sftp = await this.connectSftpForTarget(target)
+    try {
+      const remoteDir = `${this.remoteProjectsRoot(target)}/${safeName}`
+      await sftp.mkdirp(remoteDir)
+      return remoteDir
+    } finally {
+      sftp.close()
+    }
+  }
+
+  /** 列出远端项目文件（一级目录） */
+  async listRemoteProjectFiles(targetId: string, remotePath: string): Promise<HermesRemoteFileEntry[]> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) {
+      throw new Error('Hermes target 不存在')
+    }
+    const sftp = await this.connectSftpForTarget(target)
+    try {
+      return await sftp.listDir(remotePath)
+    } finally {
+      sftp.close()
+    }
+  }
+
+  /** 读取远端文件内容（文本） */
+  async readRemoteFile(targetId: string, remotePath: string): Promise<string> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) {
+      throw new Error('Hermes target 不存在')
+    }
+    const sftp = await this.connectSftpForTarget(target)
+    try {
+      return await sftp.readFile(remotePath)
+    } finally {
+      sftp.close()
     }
   }
 

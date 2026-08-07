@@ -31,6 +31,7 @@ import { SettingsSegmentedControl } from './primitives/SettingsSegmentedControl'
 import { SettingsSection } from './primitives/SettingsSection'
 import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
 import { HermesRemoteSessionsView } from './HermesRemoteSessionsView'
+import { HermesRemoteFileBrowser } from './HermesRemoteFileBrowser'
 import {
   loadHermesTargets,
   createHermesTarget,
@@ -440,6 +441,11 @@ function HermesTargetForm({
 export function HermesSettings(): React.ReactElement {
   const [targets, setTargets] = useAtom(hermesTargetsAtom)
   const [activeTargetId, setActiveTargetId] = useAtom(activeHermesTargetIdAtom)
+  /** 当前 target（active 优先，缺省第一个） */
+  const target = React.useMemo(
+    () => targets.find((t) => t.id === activeTargetId) ?? targets[0],
+    [targets, activeTargetId],
+  )
   const [formOpen, setFormOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<HermesTarget | null>(null)
   const [refreshing, setRefreshing] = React.useState(false)
@@ -538,6 +544,11 @@ export function HermesSettings(): React.ReactElement {
 
       {/* 远端会话项目视图（①：projects.tree / session.list） */}
       <HermesRemoteSessionsView />
+
+      {/* 远端项目文件浏览（新建远端项目 + 浏览/查看文件，数据在远端） */}
+      {target && (
+        <HermesRemoteFileBrowser target={target} />
+      )}
     </div>
   )
 }
