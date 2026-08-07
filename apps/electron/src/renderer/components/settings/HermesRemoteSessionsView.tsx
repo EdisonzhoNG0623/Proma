@@ -19,20 +19,44 @@ import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import type { HermesRemoteProject, HermesRemoteSessionSummary } from '@proma/shared'
 
+/** 从 projects.project_sessions 的 repos lanes 提取会话摘要（与 session.list 结构一致） */
+function extractProjectSessions(detail: HermesRemoteProject | null): HermesRemoteSessionSummary[] {
+  if (!detail?.repos) return []
+  const out: HermesRemoteSessionSummary[] = []
+  for (const repo of detail.repos) {
+    if (!repo || typeof repo !== 'object') continue
+    const sessions = (repo as { sessions?: unknown }).sessions
+    if (!Array.isArray(sessions)) continue
+    for (const item of sessions) {
+      if (!item || typeof item !== 'object') continue
+      const s = item as { id?: unknown; title?: unknown; preview?: unknown; started_at?: unknown; message_count?: unknown; source?: unknown }
+      if (typeof s.id !== 'string') continue
+      out.push({
+        id: s.id,
+        title: typeof s.title === 'string' ? s.title : '',
+        preview: typeof s.preview === 'string' ? s.preview : '',
+        startedAt: typeof s.started_at === 'number' ? s.started_at : 0,
+        messageCount: typeof s.message_count === 'number' ? s.message_count : 0,
+        source: typeof s.source === 'string' ? s.source : '',
+      })
+    }
+  }
+  return out
+}
+
 /** 单个项目节点 */
 function ProjectRow({
   project,
-  sessions,
   onRefresh,
   targetId,
 }: {
   project: HermesRemoteProject
-  sessions: HermesRemoteSessionSummary[] | null
-  onRefresh: () => void
+  onRefresh: () => Promise<void>
   targetId: string
 }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
   const [loadingSessions, setLoadingSessions] = React.useState(false)
+  const [projectSessions, setProjectSessions] = React.useState<HermesRemoteSessionSummary[] | null>(null)
   const [startingChat, setStartingChat] = React.useState(false)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const setAppMode = useSetAtom(appModeAtom)
@@ -41,10 +65,15 @@ function ProjectRow({
   const openSession = useOpenSession()
 
   const toggle = async (): Promise<void> => {
-    if (!expanded && sessions === null) {
+    if (!expanded && projectSessions === null) {
       setLoadingSessions(true)
       try {
-        await window.electronAPI.hermes.listRemoteProjectSessions(targetId, project.id)
+        // 展开时加载该项目专属会话（projects.project_sessions 的 repos lanes）
+        const detail = await window.electronAPI.hermes.listRemoteProjectSessions(targetId, project.id)
+        setProjectSessions(extractProjectSessions(detail))
+      } catch (error) {
+        console.error('[Hermes] 加载项目会话失败:', error)
+        setProjectSessions([])
       } finally {
         setLoadingSessions(false)
       }
@@ -100,26 +129,14 @@ function ProjectRow({
       </div>
       {expanded && (
         <div className="ml-6 border-l pl-3 pb-2">
-          {project.previewSessions && project.previewSessions.length > 0 ? (
-            project.previewSessions.map((session, index) => (
-              <div key={index} className="flex items-center gap-1.5 py-1 text-sm text-muted-foreground">
-                <MessageSquare size={12} />
-                <span className="truncate">{String((session as { title?: unknown })?.title ?? '会话')}</span>
-              </div>
+          {loadingSessions ? (
+            <div className="py-1 text-xs text-muted-foreground">加载会话...</div>
+          ) : projectSessions && projectSessions.length > 0 ? (
+            projectSessions.map((session) => (
+              <SessionRow key={session.id} targetId={targetId} session={session} onOpened={onRefresh} />
             ))
           ) : (
-            <div className="py-1 text-xs text-muted-foreground">该项目的会话通过 projects.project_sessions 展开（后续）</div>
-          )}
-          {sessions && sessions.length > 0 && (
-            <div className="mt-1">
-              {sessions.map((session) => (
-                <div key={session.id} className="flex items-center gap-1.5 py-1 text-sm">
-                  <MessageSquare size={12} className="text-muted-foreground" />
-                  <span className="truncate">{session.title || session.id}</span>
-                  <span className="ml-auto text-xs text-muted-foreground">{session.source}</span>
-                </div>
-              ))}
-            </div>
+            <div className="py-1 text-xs text-muted-foreground">该项目暂无会话</div>
           )}
         </div>
       )}
@@ -262,7 +279,6 @@ export function HermesRemoteSessionsView(): React.ReactElement {
               <ProjectRow
                 key={project.id}
                 project={project}
-                sessions={sessions}
                 onRefresh={() => void refresh()}
                 targetId={target.id}
               />
