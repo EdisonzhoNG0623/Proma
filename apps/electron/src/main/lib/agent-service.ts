@@ -59,6 +59,13 @@ const eventBus = new AgentEventBus()
 const hermesFacade = new HermesRuntimeFacade({
   getTarget: (targetId) => hermesTargetStore.getTarget(targetId),
   getCredential: (ref) => (ref ? hermesCredentialStore.getCredential(ref) : null),
+  saveCredential: (ref, secret) => {
+    try {
+      hermesCredentialStore.setCredential('dashboard-cookie', secret, ref)
+    } catch {
+      // 持久化失败不阻断（下次重新登录）
+    }
+  },
   readDashboardPassword: (ref) => {
     const secret = ref ? hermesCredentialStore.getCredential(ref) : null
     return secret ? parseDashboardPasswordSecret(secret) : null

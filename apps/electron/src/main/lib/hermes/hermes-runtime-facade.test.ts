@@ -60,6 +60,7 @@ const createDeps = (overrides: Partial<HermesRuntimeDeps> = {}): HermesRuntimeDe
     },
     buildTransport: async () => createFakeTransport(),
     ensureRemoteCwd: async () => false,
+    saveCredential: () => {},
     ...overrides,
   }
 }

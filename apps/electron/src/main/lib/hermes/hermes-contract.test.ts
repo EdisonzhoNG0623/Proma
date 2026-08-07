@@ -55,6 +55,7 @@ const createFacade = (): HermesRuntimeFacade => {
     },
     buildTransport: async (target) => buildHermesTransport(target),
     ensureRemoteCwd: async () => false,
+    saveCredential: () => {},
   })
 }
 
