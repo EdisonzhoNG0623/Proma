@@ -1255,6 +1255,8 @@ export interface ElectronAPI {
     createRemoteSession: (input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) => Promise<import('@proma/shared').AgentSessionMeta>
     /** 清理重复远端会话，返回删除数量 */
     dedupeRemoteSessions: () => Promise<number>
+    /** 同步本地项目到远端 Hermes（SFTP 增量上传） */
+    syncProjectToRemote: (targetId: string, workspaceId: string) => Promise<import('@proma/shared').HermesSyncResult>
   }
 }
 
@@ -2835,6 +2837,8 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION, input),
     dedupeRemoteSessions: () =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.DEDUPE_REMOTE_SESSIONS),
+    syncProjectToRemote: (targetId: string, workspaceId: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.SYNC_PROJECT_TO_REMOTE, targetId, workspaceId),
   },
 }
 

@@ -31,7 +31,10 @@ import { HermesError, redactSecrets } from './hermes-errors'
 import { HermesAuthService, buildTicketWsUrl, canSubmitPasswordTo } from './hermes-auth'
 import { HermesDashboardAdapter, type HermesRemoteProject, type HermesRemoteSessionSummary, type HermesHistoryMessage } from './hermes-dashboard-adapter'
 import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
+import { HermesRemoteSftp, type HermesSyncResult, type HermesSftpAuth } from './hermes-remote-sftp'
 import { appendSDKMessages } from '../agent-session-manager'
+import { getAgentWorkspace } from '../agent-workspace-manager'
+import { existsSync } from 'node:fs'
 import type { SDKMessage } from '@proma/shared'
 import type { HermesTransport } from './transport/hermes-transport'
 
@@ -399,6 +402,54 @@ export class HermesIpcService {
       return history.length
     } finally {
       session.close()
+    }
+  }
+
+  /**
+   * 同步本地项目到远端 Hermes（SFTP，增量）。
+   *
+   * 要求 target 为 SSH Tunnel 模式（有 SSH 配置）；远端目标目录默认 ~/proma-projects/<slug>。
+   * 同步后 Hermes 会话可用 cwd 指向该目录在远端工作。
+   */
+  async syncProjectToRemote(
+    targetId: string,
+    workspaceId: string,
+    remoteBaseDir = '~/proma-projects',
+  ): Promise<HermesSyncResult> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target?.ssh) {
+      throw new Error('当前 Hermes target 无 SSH 配置（请使用 SSH Tunnel 模式连接）')
+    }
+    const workspace = getAgentWorkspace(workspaceId)
+    if (!workspace?.projectRootPath) {
+      throw new Error('工作区无项目根目录')
+    }
+    if (!existsSync(workspace.projectRootPath)) {
+      throw new Error(`本地项目目录不存在: ${workspace.projectRootPath}`)
+    }
+
+    // SSH 凭据：优先私钥（若存），否则密码
+    const sshSecret = target.ssh.credentialRef
+      ? this.credentialStore.getCredential(target.ssh.credentialRef)
+      : null
+    const auth: HermesSftpAuth = {
+      host: target.ssh.host,
+      port: target.ssh.port,
+      username: target.ssh.username,
+      ...(sshSecret
+        ? sshSecret.includes('PRIVATE KEY') || sshSecret.startsWith('-----BEGIN')
+          ? { privateKey: sshSecret }
+          : { password: sshSecret }
+        : {}),
+    }
+
+    const sftp = new HermesRemoteSftp()
+    await sftp.connect(auth)
+    try {
+      const remoteDir = `${remoteBaseDir.replace(/\/+$/, '')}/${workspace.slug}`
+      return await sftp.syncDir(workspace.projectRootPath, remoteDir)
+    } finally {
+      sftp.close()
     }
   }
 }

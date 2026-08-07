@@ -241,6 +241,8 @@ export const HERMES_IPC_CHANNELS = {
   CREATE_REMOTE_SESSION: 'hermes:create-remote-session',
   /** 清理重复的远端会话（返回删除数量） */
   DEDUPE_REMOTE_SESSIONS: 'hermes:dedupe-remote-sessions',
+  /** 同步本地项目到远端 Hermes（SFTP 增量上传） */
+  SYNC_PROJECT_TO_REMOTE: 'hermes:sync-project-to-remote',
 } as const
 
 /**
@@ -326,4 +328,12 @@ export interface HermesRemoteSessionSummary {
   startedAt: number
   messageCount: number
   source: string
+}
+
+/** 项目同步结果（SFTP 增量上传） */
+export interface HermesSyncResult {
+  uploaded: number
+  skipped: number
+  failed: number
+  errors: string[]
 }
