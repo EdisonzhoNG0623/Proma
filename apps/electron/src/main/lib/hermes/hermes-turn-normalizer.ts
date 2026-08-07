@@ -55,9 +55,23 @@ export function normalizeDashboardNotification(
     : {}
 
   switch (method) {
+    case 'message.start':
+      // 单条消息开始（无内容载荷），忽略
+      return null
     case 'message.delta': {
       const text = pickString(params, ['text', 'delta', 'content'])
       return text ? { type: 'text.delta', text } : null
+    }
+    case 'message.complete': {
+      // Hermes Desktop 语义：assistant 消息完成即 turn 结束
+      const status = pickString(params, ['status', 'state'])
+      if (status === 'error' || status === 'failed') {
+        return {
+          type: 'turn.failed',
+          error: pickString(params, ['text', 'error', 'message']) ?? '远端消息失败',
+        }
+      }
+      return { type: 'turn.completed' }
     }
     case 'thinking.delta': {
       const text = pickString(params, ['text', 'delta'])
@@ -68,7 +82,8 @@ export function normalizeDashboardNotification(
       return text ? { type: 'reasoning.delta', text } : null
     }
     case 'tool.start':
-    case 'tool.started': {
+    case 'tool.started':
+    case 'tool.generating': {
       const toolUseId = pickString(params, ['tool_use_id', 'toolUseId', 'id']) ?? `tool-${Date.now()}`
       const toolName = pickString(params, ['tool_name', 'toolName', 'name']) ?? 'unknown'
       return {

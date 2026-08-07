@@ -72,6 +72,32 @@ describe('normalizeDashboardNotification Dashboard 通知归一化', () => {
   test('Given message.delta 空文本 When 归一化 Then null', () => {
     expect(normalizeDashboardNotification('message.delta', {})).toBeNull()
   })
+
+  test('Given message.start When 归一化 Then null（turn 开始信号）', () => {
+    expect(normalizeDashboardNotification('message.start', {})).toBeNull()
+  })
+
+  test('Given message.complete When 归一化 Then turn.completed（Hermes Desktop 语义）', () => {
+    expect(normalizeDashboardNotification('message.complete', { text: 'ok' })).toEqual({
+      type: 'turn.completed',
+    })
+  })
+
+  test('Given message.complete 带 error 状态 When 归一化 Then turn.failed', () => {
+    const event = normalizeDashboardNotification('message.complete', {
+      text: 'Error: boom',
+      status: 'error',
+    })
+    expect(event).toMatchObject({ type: 'turn.failed', error: 'Error: boom' })
+  })
+
+  test('Given tool.generating When 归一化 Then tool.started', () => {
+    const event = normalizeDashboardNotification('tool.generating', {
+      tool_use_id: 't1',
+      tool_name: 'Bash',
+    })
+    expect(event?.type).toBe('tool.started')
+  })
 })
 
 describe('normalizeApiServerEvent API SSE 归一化', () => {
