@@ -2936,7 +2936,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
           </div>
 
           {/* 下区：项目分组历史 */}
-          <div className="flex-shrink-0 flex flex-col px-2 pb-3">
+          <div className="flex-1 min-h-0 flex flex-col px-2 pb-3">
             {creatingProject && (
               <div className="flex items-center gap-2 px-2 py-1.5 mb-1 rounded-md bg-foreground/[0.04]">
                 <FolderOpen size={14} className="flex-shrink-0 text-foreground/40" />
@@ -2956,7 +2956,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               </div>
             )}
 
-            <div className="max-h-[45vh] overflow-y-auto scrollbar-thin">
+            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin">
               <div className="flex flex-col gap-0.5">
               {displayProjectGroups.map((group) => {
                 const isAuto = group.workspace.id === AUTOMATION_GROUP_ID
