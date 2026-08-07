@@ -111,7 +111,7 @@ function sdkPermissionModeForPromaMode(mode: PromaPermissionMode): PromaPermissi
 }
 
 function normalizeAgentRuntime(value: unknown): AgentRuntime {
-  return value === 'pi' ? 'pi' : 'claude'
+  return value === 'pi' ? 'pi' : value === 'hermes-remote' ? 'hermes-remote' : 'claude'
 }
 
 const EMPTY_RESPONSE_RESULT_SUBTYPE = 'empty_response'
