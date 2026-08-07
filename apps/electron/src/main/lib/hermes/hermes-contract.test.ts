@@ -150,6 +150,28 @@ describe('Dashboard 完整契约', () => {
     await collect(facade.query({ sessionId: 'sess-3', prompt: 'hi', agentRuntime: 'hermes-remote' }))
     expect(bindings.get('sess-3')?.remoteSessionId).toBe('stored-1')
   })
+
+  test('Given 新会话无 SSH 且绑定 workspaceSlug When query Then 免 SSH 引导 mkdir + session.cwd.set', async () => {
+    const targetId = setupTarget()
+    // 无 remoteSessionId（新会话）+ workspaceSlug → remoteCwd 推导为 ~/proma-projects/<slug>
+    bindings.set('sess-bootstrap', { targetId, workspaceSlug: 'my-project' })
+    const facade = createFacade()
+    await collect(facade.query({ sessionId: 'sess-bootstrap', prompt: '你好', agentRuntime: 'hermes-remote' }))
+
+    // 1. 引导：先提交 mkdir 初始化指令（prompt.submit 引导消息）
+    const wsMethods = server.wsRequests.map((r) => r.method)
+    const submits = server.wsRequests.filter((r) => r.method === 'prompt.submit')
+    expect(submits.length).toBeGreaterThanOrEqual(2) // 引导 + 用户消息
+    expect(wsMethods).toContain('session.cwd.set')
+    // cwd 指向 ~/proma-projects/my-project
+    const cwdReq = server.wsRequests.find((r) => r.method === 'session.cwd.set')
+    expect((cwdReq?.params as Record<string, unknown>)?.cwd).toBe('~/proma-projects/my-project')
+    // 存在引导消息（mkdir -p 指令）
+    const mkdirSubmit = server.wsRequests.find(
+      (r) => r.method === 'prompt.submit' && String((r.params as Record<string, unknown>)?.text ?? '').includes('mkdir -p'),
+    )
+    expect(mkdirSubmit).toBeTruthy()
+  })
 })
 
 describe('API Server fallback 契约', () => {
