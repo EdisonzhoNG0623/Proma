@@ -233,6 +233,11 @@ export class HermesDashboardAdapter {
     await this.client.request<unknown>('session.cwd.set', { session_id: sessionId, cwd })
   }
 
+  /** 设置会话标题（session.title，需活跃会话） */
+  async setSessionTitle(sessionId: string, title: string): Promise<void> {
+    await this.client.request<unknown>('session.title', { session_id: sessionId, title })
+  }
+
   /** 响应 clarify */
   async respondClarify(input: HermesClarifyResponseInput): Promise<unknown> {
     return await this.client.request<unknown>('clarify.respond', {

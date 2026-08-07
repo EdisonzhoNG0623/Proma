@@ -186,6 +186,14 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     if (resolvedSession.created) {
       this.deps.persistRemoteSessionId(input.sessionId, resolvedSession.storedSessionId)
     }
+    // 标题同步：把 Proma 当前标题同步到远端（含重命名后；create 时已在 session.create 传 title，resume 时这里补同步）
+    if (binding.title) {
+      try {
+        await dashboard.setSessionTitle(resolvedSession.sessionId, binding.title)
+      } catch (error) {
+        console.warn('[Hermes] 同步远端标题失败:', error instanceof Error ? error.message : String(error))
+      }
+    }
 
     // 事件 handler 提前注册：引导 turn（mkdir 初始化）也需要被监听
     const mapper = new HermesSdkMessageMapper({
