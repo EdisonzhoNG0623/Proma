@@ -7,11 +7,11 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { FolderOpen, MessageSquare, RefreshCw, Play, MessageSquarePlus } from 'lucide-react'
+import { FolderOpen, MessageSquare, RefreshCw, Play, MessageSquarePlus, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { SettingsCard } from './primitives/SettingsCard'
-import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
+import { hermesTargetsAtom, activeHermesTargetIdAtom, hermesHiddenProjectsAtom } from '@/atoms/hermes-atoms'
 import { agentSessionsAtom } from '@/atoms/agent-atoms'
 import { appModeAtom } from '@/atoms/app-mode'
 import { activeViewAtom } from '@/atoms/active-view'
@@ -26,10 +26,14 @@ function ProjectRow({
   project,
   onRefresh,
   targetId,
+  hidden,
+  onToggleHidden,
 }: {
   project: HermesRemoteProject
   onRefresh: () => Promise<void>
   targetId: string
+  hidden: boolean
+  onToggleHidden: (project: HermesRemoteProject) => void
 }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
   const [loadingSessions, setLoadingSessions] = React.useState(false)
@@ -96,6 +100,16 @@ function ProjectRow({
           <Badge variant="secondary" className="text-xs">{project.sessionCount}</Badge>
         )}
         {loadingSessions && <span className="text-xs text-muted-foreground">加载中...</span>}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 px-2 text-xs text-muted-foreground"
+          title={hidden ? '在列表中显示该项目' : '隐藏该项目（侧栏不显示）'}
+          onClick={() => onToggleHidden(project)}
+        >
+          <EyeOff size={12} className="mr-1" />
+          {hidden ? '恢复' : '隐藏'}
+        </Button>
         <Button
           variant="ghost"
           size="sm"
@@ -190,6 +204,8 @@ function SessionRow({
 export function HermesRemoteSessionsView(): React.ReactElement {
   const targets = useAtomValue(hermesTargetsAtom)
   const activeTargetId = useAtomValue(activeHermesTargetIdAtom)
+  const hiddenProjects = useAtomValue(hermesHiddenProjectsAtom)
+  const setHiddenProjects = useSetAtom(hermesHiddenProjectsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const [projects, setProjects] = React.useState<HermesRemoteProject[] | null>(null)
   const [sessions, setSessions] = React.useState<HermesRemoteSessionSummary[] | null>(null)
@@ -239,6 +255,20 @@ export function HermesRemoteSessionsView(): React.ReactElement {
     if (target) void refresh()
   }, [target, refresh])
 
+  // 隐藏项目管理
+  const hiddenIds = target ? (hiddenProjects[target.id] ?? []) : []
+  const visibleProjects = (projects ?? []).filter((p) => !hiddenIds.includes(p.id))
+  const hiddenProjectsList = (projects ?? []).filter((p) => hiddenIds.includes(p.id))
+  const handleToggleHidden = (project: HermesRemoteProject): void => {
+    if (!target) return
+    const nextHidden = hiddenIds.includes(project.id)
+      ? hiddenIds.filter((id) => id !== project.id)
+      : Array.from(new Set([...hiddenIds, project.id]))
+    const next = { ...hiddenProjects, [target.id]: nextHidden }
+    setHiddenProjects(next)
+    window.electronAPI.updateSettings({ hermesHiddenProjects: next }).catch(console.error)
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -264,15 +294,40 @@ export function HermesRemoteSessionsView(): React.ReactElement {
             <div className="px-4 py-4 text-sm text-muted-foreground">加载远端项目...</div>
           ) : projects.length === 0 ? (
             <div className="px-4 py-4 text-sm text-muted-foreground">远端暂无项目（或未开启 Dashboard）</div>
+          ) : visibleProjects.length === 0 && hiddenProjectsList.length === 0 ? (
+            <div className="px-4 py-4 text-sm text-muted-foreground">远端暂无项目（或未开启 Dashboard）</div>
           ) : (
-            projects.map((project) => (
+            visibleProjects.map((project) => (
               <ProjectRow
                 key={project.id}
                 project={project}
                 onRefresh={() => refresh()}
                 targetId={target.id}
+                hidden={false}
+                onToggleHidden={handleToggleHidden}
               />
             ))
+          )}
+          {hiddenProjectsList.length > 0 && (
+            <div className="border-t border-foreground/[0.06] px-4 py-2">
+              <div className="mb-1 text-xs text-muted-foreground">已隐藏项目（在侧栏不显示）</div>
+              {hiddenProjectsList.map((project) => (
+                <div key={project.id} className="flex items-center justify-between gap-2 py-1">
+                  <span className="min-w-0 truncate text-sm text-muted-foreground/70">
+                    <EyeOff size={12} className="mr-1 inline text-muted-foreground" />
+                    {project.label}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => handleToggleHidden(project)}
+                  >
+                    恢复显示
+                  </Button>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </SettingsCard>

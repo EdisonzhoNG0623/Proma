@@ -61,3 +61,12 @@ export async function deleteHermesTarget(id: string): Promise<boolean> {
   const result = await window.electronAPI.hermes.deleteTarget(id)
   return result.ok
 }
+
+/**
+ * 每个 target 隐藏的远端项目 id（Hermes Desktop 式「隐藏项目文件夹」）。
+ * key: targetId → hidden project ids；从 settings.json 加载。
+ */
+export const hermesHiddenProjectsAtom = atom<Record<string, string[]>>({})
+
+/** 侧栏 Hermes 远端区域高度（px，可拖动分割线调整；从 settings.json 加载） */
+export const hermesRemotePanelHeightAtom = atom<number>(220)
