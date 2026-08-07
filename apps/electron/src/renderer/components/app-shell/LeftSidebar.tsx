@@ -78,6 +78,7 @@ import {
 } from '@/atoms/tab-atoms'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { sidebarViewModeAtom } from '@/atoms/sidebar-atoms'
+import { HermesSidebarProjects } from './HermesSidebarProjects'
 import { searchDialogOpenAtom } from '@/atoms/search-atoms'
 import { hasUpdateAtom, updateStatusAtom, type UpdateStatus } from '@/atoms/updater'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
@@ -3033,6 +3034,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
                   />
                 )
               })}
+              <HermesSidebarProjects />
             </div>
           </div>
         </div>
