@@ -1233,6 +1233,8 @@ export interface ElectronAPI {
     listRemoteSessions: (targetId: string, limit?: number) => Promise<import('@proma/shared').HermesRemoteSessionSummary[]>
     /** 从远端会话创建并绑定 Proma Agent 会话 */
     createRemoteSession: (input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) => Promise<import('@proma/shared').AgentSessionMeta>
+    /** 清理重复远端会话，返回删除数量 */
+    dedupeRemoteSessions: () => Promise<number>
   }
 }
 
@@ -2787,6 +2789,8 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_SESSIONS, targetId, limit),
     createRemoteSession: (input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION, input),
+    dedupeRemoteSessions: () =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.DEDUPE_REMOTE_SESSIONS),
   },
 }
 

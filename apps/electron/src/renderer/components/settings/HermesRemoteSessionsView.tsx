@@ -12,8 +12,10 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { SettingsCard } from './primitives/SettingsCard'
 import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
+import { agentSessionsAtom } from '@/atoms/agent-atoms'
 import { appModeAtom } from '@/atoms/app-mode'
 import { activeViewAtom } from '@/atoms/active-view'
+import { settingsOpenAtom } from '@/atoms/settings-tab'
 import type { HermesRemoteProject, HermesRemoteSessionSummary } from '@proma/shared'
 
 /** 单个项目节点 */
@@ -88,36 +90,33 @@ function ProjectRow({
   )
 }
 
-/** 从远端会话打开 Proma Agent 会话（创建并绑定后切到 Agent 模式） */
-async function openRemoteSession(
-  targetId: string,
-  session: HermesRemoteSessionSummary,
-): Promise<void> {
-  await window.electronAPI.hermes.createRemoteSession({
-    targetId,
-    remoteSessionId: session.id,
-    title: session.title || session.id,
-  })
-}
-
 /** 单个会话行（含「打开」按钮） */
 function SessionRow({
   targetId,
   session,
+  onOpened,
 }: {
   targetId: string
   session: HermesRemoteSessionSummary
+  onOpened: () => Promise<void>
 }): React.ReactElement {
   const setAppMode = useSetAtom(appModeAtom)
   const setActiveView = useSetAtom(activeViewAtom)
+  const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const [opening, setOpening] = React.useState(false)
 
   const handleOpen = async (): Promise<void> => {
     setOpening(true)
     try {
-      await openRemoteSession(targetId, session)
-      // 切到 Agent 模式主面板（会话列表会自动包含新会话）
+      await window.electronAPI.hermes.createRemoteSession({
+        targetId,
+        remoteSessionId: session.id,
+        title: session.title || session.id,
+      })
+      // 刷新会话列表（新会话出现在 Agent 侧栏）并切到 Agent 模式
+      await onOpened()
       setAppMode('agent')
+      setSettingsOpen(false)
       setActiveView('conversations')
     } catch (error) {
       console.error('[Hermes] 打开远端会话失败:', error)
@@ -144,10 +143,20 @@ function SessionRow({
 export function HermesRemoteSessionsView(): React.ReactElement {
   const targets = useAtomValue(hermesTargetsAtom)
   const activeTargetId = useAtomValue(activeHermesTargetIdAtom)
+  const setAgentSessions = useSetAtom(agentSessionsAtom)
   const [projects, setProjects] = React.useState<HermesRemoteProject[] | null>(null)
   const [sessions, setSessions] = React.useState<HermesRemoteSessionSummary[] | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+
+  /** 打开会话后刷新 Agent 会话列表（新会话出现在侧栏） */
+  const handleSessionOpened = React.useCallback(async (): Promise<void> => {
+    try {
+      setAgentSessions(await window.electronAPI.listAgentSessions())
+    } catch (error) {
+      console.error('[Hermes] 刷新会话列表失败:', error)
+    }
+  }, [setAgentSessions])
 
   const target = targets.find((t) => t.id === activeTargetId) ?? targets[0]
 
@@ -156,6 +165,16 @@ export function HermesRemoteSessionsView(): React.ReactElement {
     setLoading(true)
     setError(null)
     try {
+      // 自动清理历史重复的远端会话（同一 target+远端会话保留一个）
+      const removed = await window.electronAPI.hermes.dedupeRemoteSessions()
+      if (removed > 0) {
+        // 清理后刷新 Agent 会话列表
+        try {
+          setAgentSessions(await window.electronAPI.listAgentSessions())
+        } catch {
+          // 忽略
+        }
+      }
       const [projectTree, sessionList] = await Promise.all([
         window.electronAPI.hermes.listRemoteProjects(target.id),
         window.electronAPI.hermes.listRemoteSessions(target.id, 50),
@@ -167,7 +186,7 @@ export function HermesRemoteSessionsView(): React.ReactElement {
     } finally {
       setLoading(false)
     }
-  }, [target])
+  }, [target, setAgentSessions])
 
   React.useEffect(() => {
     if (target) void refresh()
@@ -217,7 +236,7 @@ export function HermesRemoteSessionsView(): React.ReactElement {
           <SettingsCard>
             <div className="py-1">
               {sessions.map((session) => (
-                <SessionRow key={session.id} targetId={target.id} session={session} />
+                <SessionRow key={session.id} targetId={target.id} session={session} onOpened={handleSessionOpened} />
               ))}
             </div>
           </SettingsCard>
