@@ -46,6 +46,7 @@ export function HermesSidebarProjects(): React.ReactElement | null {
   const [offset, setOffset] = React.useState(0)
   const [maxOffset, setMaxOffset] = React.useState(0)
   const rootRef = React.useRef<HTMLDivElement | null>(null)
+  const dragStateRef = React.useRef<{ startY: number; startHeight: number; startOffset: number; touchingBottom: boolean } | null>(null)
 
   // 测量可用下移空间：滚动容器高度 - Hermes 区块高度（不含 margin）
   React.useEffect(() => {
@@ -175,7 +176,6 @@ export function HermesSidebarProjects(): React.ReactElement | null {
   }
 
   // 分阶段拖拽：Hermes 未触底时往下拉 → 整体下移（项目区下方留白增加）；触底后 → 压缩内容高度
-  const dragStateRef = React.useRef<{ startY: number; startHeight: number; startOffset: number; touchingBottom: boolean } | null>(null)
   const handleResizePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
     event.preventDefault()
     try {
