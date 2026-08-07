@@ -151,21 +151,22 @@ export function registerHermesIpcHandlers(): void {
     return await hermesIpcService.readRemoteFile(requireString(targetId, 'targetId'), requireString(remotePath, 'remotePath'))
   })
 
-  // 从远端会话创建并绑定 Proma Agent 会话（打开后恢复远端会话）
+  // 从远端会话创建并绑定 Proma Agent 会话（打开后恢复远端会话；或新建远端会话并绑定目录）
   ipcMain.handle(
     HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION,
-    async (_, input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) => {
+    async (_, input: { targetId: string; remoteSessionId?: string; remoteCwd?: string; title?: string; workspaceId?: string }) => {
       if (!input || typeof input !== 'object') throw new Error('input 必填')
       requireString(input.targetId, 'targetId')
-      requireString(input.remoteSessionId, 'remoteSessionId')
 
       // 去重：同一 target + 远端会话已绑定过 Proma 会话时复用，避免重复创建
-      const existing = listAgentSessions().find(
-        (session) =>
-          session.agentRuntime === 'hermes-remote' &&
-          session.hermesTargetId === input.targetId &&
-          session.hermesRemoteSessionId === input.remoteSessionId,
-      )
+      const existing = input.remoteSessionId
+        ? listAgentSessions().find(
+            (session) =>
+              session.agentRuntime === 'hermes-remote' &&
+              session.hermesTargetId === input.targetId &&
+              session.hermesRemoteSessionId === input.remoteSessionId,
+          )
+        : undefined
       if (existing) {
         return existing
       }
@@ -181,14 +182,17 @@ export function registerHermesIpcHandlers(): void {
       updateAgentSessionMeta(session.id, {
         agentRuntime: 'hermes-remote',
         hermesTargetId: input.targetId,
-        hermesRemoteSessionId: input.remoteSessionId,
+        ...(input.remoteSessionId ? { hermesRemoteSessionId: input.remoteSessionId } : {}),
+        ...(input.remoteCwd ? { hermesRemoteCwd: input.remoteCwd } : {}),
       })
-      // 同步拉取远端历史写入会话（打开前完成，确保打开即显示历史）
-      await hermesIpcService
-        .hydrateRemoteSessionHistory(session.id, input.targetId, input.remoteSessionId)
-        .catch((error) => {
-          console.error('[Hermes] 加载远端历史失败:', error instanceof Error ? error.message : String(error))
-        })
+      // 已有远端会话：同步拉取历史写入（打开前完成）；新建会话无历史跳过
+      if (input.remoteSessionId) {
+        await hermesIpcService
+          .hydrateRemoteSessionHistory(session.id, input.targetId, input.remoteSessionId)
+          .catch((error) => {
+            console.error('[Hermes] 加载远端历史失败:', error instanceof Error ? error.message : String(error))
+          })
+      }
       return session
     },
   )

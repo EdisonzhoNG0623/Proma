@@ -6,10 +6,16 @@
  */
 
 import * as React from 'react'
-import { ArrowLeft, File, Folder, FolderPlus, RefreshCw } from 'lucide-react'
+import { ArrowLeft, File, Folder, FolderPlus, MessageSquarePlus, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { SettingsCard } from './primitives/SettingsCard'
+import { useSetAtom } from 'jotai'
+import { agentSessionsAtom } from '@/atoms/agent-atoms'
+import { appModeAtom } from '@/atoms/app-mode'
+import { activeViewAtom } from '@/atoms/active-view'
+import { settingsOpenAtom } from '@/atoms/settings-tab'
+import { useOpenSession } from '@/hooks/useOpenSession'
 import type { HermesTarget, HermesRemoteFileEntry } from '@proma/shared'
 
 const REMOTE_ROOT = '~/proma-projects'
@@ -23,6 +29,33 @@ export function HermesRemoteFileBrowser({ target }: { target: HermesTarget }): R
   const [newProjectName, setNewProjectName] = React.useState('')
   const [creating, setCreating] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setAppMode = useSetAtom(appModeAtom)
+  const setActiveView = useSetAtom(activeViewAtom)
+  const setSettingsOpen = useSetAtom(settingsOpenAtom)
+  const openSession = useOpenSession()
+  const [startingChat, setStartingChat] = React.useState<string | null>(null)
+
+  /** 在指定远端项目目录新建 Hermes 对话（会话 cwd = 该目录） */
+  const handleNewChatInDir = async (dirPath: string, dirName: string): Promise<void> => {
+    setStartingChat(dirPath)
+    try {
+      const created = await window.electronAPI.hermes.createRemoteSession({
+        targetId: target.id,
+        remoteCwd: dirPath,
+        title: `${dirName} 对话`,
+      })
+      setAgentSessions(await window.electronAPI.listAgentSessions())
+      setSettingsOpen(false)
+      setAppMode('agent')
+      setActiveView('conversations')
+      openSession('agent', created.id, created.title, { bypassSettingsGuard: true })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setStartingChat(null)
+    }
+  }
 
   const loadDir = React.useCallback(async (path: string): Promise<void> => {
     setLoading(true)
@@ -133,22 +166,36 @@ export function HermesRemoteFileBrowser({ target }: { target: HermesTarget }): R
             </div>
           ) : (
             entries.map((entry) => (
-              <button
-                key={entry.path}
-                type="button"
-                className="flex w-full items-center gap-2 px-4 py-1.5 text-left text-sm hover:bg-accent/50"
-                onClick={() => void handleOpenEntry(entry)}
-              >
-                {entry.isDirectory ? (
-                  <Folder size={14} className="shrink-0 text-muted-foreground" />
-                ) : (
-                  <File size={14} className="shrink-0 text-muted-foreground" />
+              <div key={entry.path} className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-center gap-2 px-4 py-1.5 text-left text-sm hover:bg-accent/50"
+                  onClick={() => void handleOpenEntry(entry)}
+                >
+                  {entry.isDirectory ? (
+                    <Folder size={14} className="shrink-0 text-muted-foreground" />
+                  ) : (
+                    <File size={14} className="shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                  {!entry.isDirectory && (
+                    <span className="shrink-0 text-xs text-muted-foreground">{formatSize(entry.size)}</span>
+                  )}
+                </button>
+                {entry.isDirectory && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 h-6 px-2 text-xs"
+                    title="在此项目新建 Hermes 对话"
+                    onClick={() => void handleNewChatInDir(entry.path, entry.name)}
+                    disabled={startingChat === entry.path}
+                  >
+                    <MessageSquarePlus size={12} className="mr-1" />
+                    {startingChat === entry.path ? '创建中...' : '新建对话'}
+                  </Button>
                 )}
-                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-                {!entry.isDirectory && (
-                  <span className="shrink-0 text-xs text-muted-foreground">{formatSize(entry.size)}</span>
-                )}
-              </button>
+              </div>
             ))
           )}
         </div>

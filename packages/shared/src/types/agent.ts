@@ -664,6 +664,8 @@ export interface AgentSessionMeta {
   hermesProfile?: string
   /** Hermes 远端持久会话 ID（stored_session_id，REST 与重连使用） */
   hermesRemoteSessionId?: string
+  /** Hermes 远端工作目录（cwd；如 ~/proma-projects/<项目名>，会话在此目录工作） */
+  hermesRemoteCwd?: string
   /** ChatGPT Codex Fast Mode 开关；仅 Pi + ChatGPT OAuth 的受支持模型实际生效。 */
   codexFastMode?: boolean
   /** 本会话的推理深度；未设置时兼容旧版全局思考设置。 */
