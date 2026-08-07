@@ -259,13 +259,15 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
         profile,
         30_000,
       )
+      console.log('[Hermes] 引导指令已提交，等待 turn 完成…')
       // 等待引导 turn 完成（事件进入队列但此处直接消费丢弃）
-      const deadline = Date.now() + 30_000
+      const deadline = Date.now() + 15_000
       while (Date.now() < deadline) {
         const queue = this.turnQueues.get(sessionId) ?? []
         this.turnQueues.set(sessionId, [])
         let terminated = false
         for (const event of queue) {
+          console.log('[Hermes] 引导事件:', event.type)
           if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') {
             terminated = true
           }
@@ -274,8 +276,23 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
         await new Promise((resolve) => setTimeout(resolve, 25))
         if (!this.activeTurns.has(sessionId)) break
       }
-      // 目录已创建，把会话 cwd 指向项目目录（session.cwd.set 要求目录存在）
-      await dashboard.setSessionCwd(sessionId, cwd)
+      // 目录已创建，把会话 cwd 指向项目目录（session.cwd.set 要求目录存在；turn teardown 可能未完成，busy 时重试）
+      const cwdDeadline = Date.now() + 30_000
+      while (true) {
+        try {
+          await dashboard.setSessionCwd(sessionId, cwd)
+          console.log('[Hermes] 引导完成，会话 cwd 已设为:', cwd)
+          return
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (/busy|not ready/i.test(message) && Date.now() < cwdDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 1000))
+            continue
+          }
+          console.warn('[Hermes] cwd.set 失败:', message)
+          return
+        }
+      }
     } catch (error) {
       console.warn('[Hermes] 免 SSH 引导创建项目目录失败:', error instanceof Error ? error.message : String(error))
     }
