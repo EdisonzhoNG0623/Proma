@@ -157,8 +157,8 @@ export function registerHermesIpcHandlers(): void {
         hermesTargetId: input.targetId,
         hermesRemoteSessionId: input.remoteSessionId,
       })
-      // 异步拉取远端历史写入会话（不阻塞创建返回；打开后可见历史）
-      hermesIpcService
+      // 同步拉取远端历史写入会话（打开前完成，确保打开即显示历史）
+      await hermesIpcService
         .hydrateRemoteSessionHistory(session.id, input.targetId, input.remoteSessionId)
         .catch((error) => {
           console.error('[Hermes] 加载远端历史失败:', error instanceof Error ? error.message : String(error))
