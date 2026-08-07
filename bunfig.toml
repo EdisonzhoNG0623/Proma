@@ -1,0 +1,3 @@
+[test]
+# Windows bun 无法解析 electron 具名导出；preload 统一 mock（见 test-electron-mock.preload.ts）
+preload = ["./test-electron-mock.preload.ts"]

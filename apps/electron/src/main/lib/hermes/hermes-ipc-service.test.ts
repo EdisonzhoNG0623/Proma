@@ -5,6 +5,19 @@
  * 通过注入临时目录 store 实例隔离数据，不污染真实配置。
  */
 
+import { mock } from 'bun:test'
+
+// 0.16.10 官方新增 conversation-manager → attachment-service → electron 的 import 链；
+// bun 在 Windows 无法解析 electron 具名导出（BrowserWindow），此处 mock 掉 attachment-service。
+mock.module('../attachment-service', () => ({
+  deleteConversationAttachments: () => {},
+  deleteAttachment: () => {},
+  isImageAttachment: () => false,
+  getMimeType: () => '',
+  saveAttachment: () => ({ id: '', localPath: '' }),
+  readAttachmentAsBase64: () => '',
+}))
+
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
