@@ -16,6 +16,7 @@ import { agentSessionsAtom } from '@/atoms/agent-atoms'
 import { appModeAtom } from '@/atoms/app-mode'
 import { activeViewAtom } from '@/atoms/active-view'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
+import { useOpenSession } from '@/hooks/useOpenSession'
 import type { HermesRemoteProject, HermesRemoteSessionSummary } from '@proma/shared'
 
 /** 单个项目节点 */
@@ -103,21 +104,24 @@ function SessionRow({
   const setAppMode = useSetAtom(appModeAtom)
   const setActiveView = useSetAtom(activeViewAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
+  const openSession = useOpenSession()
   const [opening, setOpening] = React.useState(false)
 
   const handleOpen = async (): Promise<void> => {
     setOpening(true)
     try {
-      await window.electronAPI.hermes.createRemoteSession({
+      const created = await window.electronAPI.hermes.createRemoteSession({
         targetId,
         remoteSessionId: session.id,
         title: session.title || session.id,
       })
-      // 刷新会话列表（新会话出现在 Agent 侧栏）并切到 Agent 模式
+      // 刷新会话列表（新会话出现在 Agent 侧栏）
       await onOpened()
-      setAppMode('agent')
+      // 关闭设置面板并精确定位到刚创建的会话
       setSettingsOpen(false)
+      setAppMode('agent')
       setActiveView('conversations')
+      openSession('agent', created.id, created.title, { bypassSettingsGuard: true })
     } catch (error) {
       console.error('[Hermes] 打开远端会话失败:', error)
       window.alert(`打开远端会话失败：${error instanceof Error ? error.message : String(error)}`)
