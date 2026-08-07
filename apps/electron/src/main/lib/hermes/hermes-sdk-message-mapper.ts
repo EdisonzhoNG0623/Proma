@@ -28,7 +28,7 @@ export type HermesTurnEvent =
       toolName?: string
       toolInput?: Record<string, unknown>
     }
-  | { type: 'clarify.request'; requestId: string; question: string }
+  | { type: 'clarify.request'; requestId: string; question: string; choices?: string[]; multiSelect?: boolean }
   | { type: 'sudo.request'; requestId: string; message: string }
   | { type: 'secret.request'; requestId: string; message: string }
   | { type: 'session.info'; model?: string; status?: string }
@@ -190,6 +190,9 @@ export class HermesSdkMessageMapper {
           : event.type === 'clarify.request' ? 'hermes_clarify_request'
             : event.type === 'sudo.request' ? 'hermes_sudo_request'
               : 'hermes_secret_request'
+        const clarifyChoices = event.type === 'clarify.request'
+          ? { choices: event.choices, multiSelect: event.multiSelect }
+          : {}
         messages.push({
           type: eventType,
           requestId: event.requestId,
@@ -197,6 +200,7 @@ export class HermesSdkMessageMapper {
           session_id: this.options.sessionId,
           tool_name: 'toolName' in event ? event.toolName : undefined,
           tool_input: 'toolInput' in event ? event.toolInput : undefined,
+          ...clarifyChoices,
         } as unknown as SDKMessage)
         return messages
       }

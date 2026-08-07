@@ -126,10 +126,15 @@ export function normalizeDashboardNotification(
     case 'clarify.request': {
       const question = pickString(params, ['question', 'prompt', 'message']) ?? '远端提出问题'
       console.log('[Hermes] 收到 clarify.request:', question)
+      const choices = Array.isArray(params['choices'])
+        ? params['choices'].filter((c): c is string => typeof c === 'string')
+        : undefined
       return {
         type: 'clarify.request',
         requestId: pickString(params, ['request_id', 'requestId']) ?? `clar-${Date.now()}`,
         question,
+        ...(choices && choices.length > 0 ? { choices } : {}),
+        ...(params['multi_select'] === true ? { multiSelect: true } : {}),
       }
     }
     case 'sudo.request': {

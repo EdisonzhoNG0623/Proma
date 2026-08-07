@@ -757,6 +757,8 @@ interface HermesInteractionMessage {
   tool_name?: string
   tool_input?: unknown
   question?: string
+  choices?: string[]
+  multiSelect?: boolean
   error?: { message: string }
 }
 
@@ -765,7 +767,10 @@ function HermesInteractionCard({ message }: { message: HermesInteractionMessage 
   const [done, setDone] = React.useState(false)
   const [expired, setExpired] = React.useState(false)
   const [text, setText] = React.useState('')
+  const [selectedChoices, setSelectedChoices] = React.useState<string[]>([])
   const [error, setError] = React.useState<string | null>(null)
+
+  const hasChoices = Array.isArray(message.choices) && message.choices.length > 0
 
   const kind = message.type === 'hermes_approval_request' ? 'approval'
     : message.type === 'hermes_clarify_request' ? 'clarify'
@@ -827,6 +832,44 @@ function HermesInteractionCard({ message }: { message: HermesInteractionMessage 
               <Button size="sm" variant="ghost" disabled={responding} onClick={() => void respond({ type: 'approval', choice: 'allow', all: true })}>
                 全部批准
               </Button>
+            </div>
+          ) : hasChoices ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {message.choices!.map((choice) => {
+                const selected = selectedChoices.includes(choice)
+                return (
+                  <Button
+                    key={choice}
+                    size="sm"
+                    variant={selected ? 'default' : 'outline'}
+                    disabled={responding}
+                    onClick={() => {
+                      if (message.multiSelect) {
+                        setSelectedChoices((prev) => (
+                          prev.includes(choice) ? prev.filter((c) => c !== choice) : [...prev, choice]
+                        ))
+                      } else {
+                        void respond({ type: 'clarify', answer: choice })
+                      }
+                    }}
+                  >
+                    {choice}
+                  </Button>
+                )
+              })}
+              {message.multiSelect && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={responding || selectedChoices.length === 0}
+                  onClick={() => void respond({ type: 'clarify', answer: selectedChoices.join('; ') })}
+                >
+                  {responding ? '提交中...' : '提交选择'}
+                </Button>
+              )}
+              {!message.multiSelect && (
+                <span className="self-center text-[11px] text-muted-foreground/60">或输入自定义回答：</span>
+              )}
             </div>
           ) : (
             <div className="mt-2 flex gap-2">
