@@ -114,7 +114,7 @@ function ProjectRow({
             <div className="py-1 text-xs text-muted-foreground">加载会话...</div>
           ) : projectSessions && projectSessions.length > 0 ? (
             projectSessions.map((session) => (
-              <SessionRow key={session.id} targetId={targetId} session={session} onOpened={onRefresh} />
+              <SessionRow key={session.id} targetId={targetId} session={session} onOpened={onRefresh} workspaceName={project.label} />
             ))
           ) : (
             <div className="py-1 text-xs text-muted-foreground">该项目暂无会话</div>
@@ -125,15 +125,17 @@ function ProjectRow({
   )
 }
 
-/** 单个会话行（含「打开」按钮） */
+/** 单个会话行（含「打开」按钮）；workspaceName 存在时自动创建/复用同名本地项目文件夹 */
 function SessionRow({
   targetId,
   session,
   onOpened,
+  workspaceName,
 }: {
   targetId: string
   session: HermesRemoteSessionSummary
   onOpened: () => Promise<void>
+  workspaceName?: string
 }): React.ReactElement {
   const setAppMode = useSetAtom(appModeAtom)
   const setActiveView = useSetAtom(activeViewAtom)
@@ -144,10 +146,17 @@ function SessionRow({
   const handleOpen = async (): Promise<void> => {
     setOpening(true)
     try {
+      // 项目上下文存在时：自动创建/复用同名本地项目文件夹，会话挂到其下
+      let workspaceId: string | undefined
+      if (workspaceName) {
+        const workspace = await getOrCreateWorkspaceForProject(workspaceName)
+        workspaceId = workspace.id
+      }
       const created = await window.electronAPI.hermes.createRemoteSession({
         targetId,
         remoteSessionId: session.id,
         title: session.title || session.id,
+        workspaceId,
       })
       // 刷新会话列表（新会话出现在 Agent 侧栏）
       await onOpened()
