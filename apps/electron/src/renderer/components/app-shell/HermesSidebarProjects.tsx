@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { FolderOpen, MessageSquarePlus, Server, RefreshCw } from 'lucide-react'
+import { ChevronRight, FolderOpen, MessageSquare, MessageSquarePlus, Play, Server, RefreshCw } from 'lucide-react'
 import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
 import { agentSessionsAtom } from '@/atoms/agent-atoms'
 import { appModeAtom } from '@/atoms/app-mode'
@@ -8,14 +8,15 @@ import { activeViewAtom } from '@/atoms/active-view'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { getOrCreateWorkspaceForProject } from '@/lib/hermes-workspace-helper'
-import type { HermesRemoteProject } from '@proma/shared'
+import { extractProjectSessions } from '@/lib/hermes-project-sessions'
+import type { HermesRemoteProject, HermesRemoteSessionSummary } from '@proma/shared'
 
 /**
  * 侧栏「Hermes 远端项目」虚拟区块。
  * 列出远端 Hermes 的项目（projects.tree，走协议无需 SSH）：
- * - 点击项目 → 打开 Hermes 设置（远端会话视图）
- * - 「新建对话」→ 创建 cwd 绑定项目目录的 Hermes 会话
- * 目标是多电脑共享远端状态：项目活在远端，Proma 只是前端入口。
+ * - 点击项目 → 展开该项目专属会话（projects.project_sessions），会话行可打开/恢复
+ * - 「✦ 新建对话」→ 创建/复用同名本地项目文件夹，会话挂到其下（cwd 仍为远端项目目录）
+ * - 点击区块标题 → 打开 Hermes 设置（远端会话视图）
  */
 export function HermesSidebarProjects(): React.ReactElement | null {
   const targets = useAtomValue(hermesTargetsAtom)
@@ -30,6 +31,10 @@ export function HermesSidebarProjects(): React.ReactElement | null {
   const [projects, setProjects] = React.useState<HermesRemoteProject[] | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [startingChatId, setStartingChatId] = React.useState<string | null>(null)
+  const [openingSessionId, setOpeningSessionId] = React.useState<string | null>(null)
+  const [expandedProjectId, setExpandedProjectId] = React.useState<string | null>(null)
+  const [projectSessionsMap, setProjectSessionsMap] = React.useState<Record<string, HermesRemoteSessionSummary[] | null>>({})
+  const [loadingProjectId, setLoadingProjectId] = React.useState<string | null>(null)
 
   const target = targets.find((t) => t.id === activeTargetId) ?? targets[0]
 
@@ -55,6 +60,24 @@ export function HermesSidebarProjects(): React.ReactElement | null {
 
   if (!target) return null
 
+  /** 展开/收起项目，首次展开加载该项目专属会话 */
+  const handleToggleProject = async (project: HermesRemoteProject): Promise<void> => {
+    const willExpand = expandedProjectId !== project.id
+    setExpandedProjectId(willExpand ? project.id : null)
+    if (willExpand && projectSessionsMap[project.id] === undefined) {
+      setLoadingProjectId(project.id)
+      try {
+        const detail = await window.electronAPI.hermes.listRemoteProjectSessions(target.id, project.id)
+        setProjectSessionsMap((prev) => ({ ...prev, [project.id]: extractProjectSessions(detail) }))
+      } catch (error) {
+        console.error('[Hermes] 加载项目会话失败:', error)
+        setProjectSessionsMap((prev) => ({ ...prev, [project.id]: [] }))
+      } finally {
+        setLoadingProjectId(null)
+      }
+    }
+  }
+
   /** 在项目目录新建 Hermes 对话：先复用/创建同名本地项目文件夹，会话挂到其下（cwd 仍为远端项目目录） */
   const handleNewChat = async (project: HermesRemoteProject): Promise<void> => {
     setStartingChatId(project.id)
@@ -78,6 +101,28 @@ export function HermesSidebarProjects(): React.ReactElement | null {
       window.alert(`新建对话失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setStartingChatId(null)
+    }
+  }
+
+  /** 打开/恢复远端会话（创建并绑定 Proma 会话，同步历史） */
+  const handleOpenSession = async (session: HermesRemoteSessionSummary): Promise<void> => {
+    setOpeningSessionId(session.id)
+    try {
+      const created = await window.electronAPI.hermes.createRemoteSession({
+        targetId: target.id,
+        remoteSessionId: session.id,
+        title: session.title || session.id,
+      })
+      setAgentSessions(await window.electronAPI.listAgentSessions())
+      setSettingsOpen(false)
+      setAppMode('agent')
+      setActiveView('conversations')
+      openSession('agent', created.id, created.title, { bypassSettingsGuard: true })
+    } catch (error) {
+      console.error('[Hermes] 打开远端会话失败:', error)
+      window.alert(`打开远端会话失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setOpeningSessionId(null)
     }
   }
 
@@ -108,32 +153,79 @@ export function HermesSidebarProjects(): React.ReactElement | null {
         </div>
       ) : (
         <div className="flex flex-col">
-          {projects.map((project) => (
-            <div key={project.id} className="group flex items-center gap-1 px-3 py-1 hover:bg-accent/40">
-              <button
-                type="button"
-                className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12px] text-foreground/70"
-                onClick={handleOpenSettings}
-                title={project.path}
-              >
-                <FolderOpen size={12} className="shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate">{project.label}</span>
-              </button>
-              <button
-                type="button"
-                className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-foreground/10 group-hover:opacity-100"
-                title="在此项目新建 Hermes 对话"
-                onClick={() => void handleNewChat(project)}
-                disabled={startingChatId === project.id}
-              >
-                {startingChatId === project.id ? (
-                  <span className="text-[10px]">创建中</span>
-                ) : (
-                  <MessageSquarePlus size={12} />
+          {projects.map((project) => {
+            const expanded = expandedProjectId === project.id
+            const projectSessions = projectSessionsMap[project.id]
+            const loadingProject = loadingProjectId === project.id
+            return (
+              <div key={project.id} className="group">
+                <div className="flex items-center gap-1 px-3 py-1 hover:bg-accent/40">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12px] text-foreground/70"
+                    onClick={() => void handleToggleProject(project)}
+                    title={project.path}
+                  >
+                    <ChevronRight size={11} className={`shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                    <FolderOpen size={12} className="shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate">{project.label}</span>
+                    {typeof project.sessionCount === 'number' && (
+                      <span className="shrink-0 text-[10px] text-foreground/30">{project.sessionCount}</span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-foreground/10 group-hover:opacity-100"
+                    title="在此项目新建 Hermes 对话"
+                    onClick={() => void handleNewChat(project)}
+                    disabled={startingChatId === project.id}
+                  >
+                    {startingChatId === project.id ? (
+                      <span className="text-[10px]">创建中</span>
+                    ) : (
+                      <MessageSquarePlus size={12} />
+                    )}
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="ml-[18px] border-l border-foreground/[0.06] pl-2 pb-1">
+                    {loadingProject ? (
+                      <div className="px-2 py-1 text-[11px] text-foreground/30">加载会话...</div>
+                    ) : projectSessions && projectSessions.length > 0 ? (
+                      projectSessions.map((session) => (
+                        <div key={session.id} className="group/session flex items-center gap-1 py-0.5 pl-1 hover:bg-accent/30">
+                          <button
+                            type="button"
+                            className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[11px] text-foreground/60"
+                            title={session.preview || session.title}
+                            onClick={() => void handleOpenSession(session)}
+                          >
+                            <MessageSquare size={10} className="shrink-0 text-muted-foreground" />
+                            <span className="min-w-0 flex-1 truncate">{session.title || session.id}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-foreground/10 group-hover/session:opacity-100"
+                            title="打开会话"
+                            onClick={() => void handleOpenSession(session)}
+                            disabled={openingSessionId === session.id}
+                          >
+                            {openingSessionId === session.id ? (
+                              <span className="text-[10px]">打开中</span>
+                            ) : (
+                              <Play size={10} />
+                            )}
+                          </button>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="px-2 py-1 text-[11px] text-foreground/30">该项目暂无会话</div>
+                    )}
+                  </div>
                 )}
-              </button>
-            </div>
-          ))}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
