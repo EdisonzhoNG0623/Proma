@@ -657,6 +657,22 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const suggestion = suggestionsMap.get(sessionId) ?? null
   const setPromptSuggestions = useSetAtom(agentPromptSuggestionsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
+  /** 新会话默认 hermes-remote 但未绑定 target 时，自动绑定当前 active target */
+  React.useEffect(() => {
+    if (!sessionId || !isHermesRemoteSession || sessionMeta?.hermesTargetId) return
+    const targets = store.get(hermesTargetsAtom)
+    const activeId = store.get(activeHermesTargetIdAtom)
+    const target = targets.find((t) => t.id === activeId) ?? targets[0]
+    if (!target) return
+    window.electronAPI
+      .updateSessionAgentRuntime(sessionId, 'hermes-remote', target.id)
+      .then((updated) => {
+        setAgentSessions((prev) => prev.map((item) => (item.id === sessionId ? updated : item)))
+      })
+      .catch((error) => {
+        console.error('[AgentView] 自动绑定 Hermes target 失败:', error)
+      })
+  }, [sessionId, isHermesRemoteSession, sessionMeta?.hermesTargetId, store, setAgentSessions])
   const openSession = useOpenSession()
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
