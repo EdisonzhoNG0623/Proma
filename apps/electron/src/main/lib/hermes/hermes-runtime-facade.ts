@@ -202,13 +202,40 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
         await this.bootstrapRemoteCwd(dashboard, resolvedSession.sessionId, remoteCwd, binding.profile)
       }
 
-      await dashboard.submitPrompt(resolvedSession.sessionId, input.prompt, binding.profile)
+      await this.submitPromptWithRetry(dashboard, resolvedSession.sessionId, input.prompt, binding.profile)
 
       // 等待 turn 结束：poll mapper 输出（notification 已同步进入 mapper）
       // 首版采用同步事件流：notification 处理中直接产出（由 dispatchTurnEvent 缓存后这里消费）
       yield* this.drainTurnMessages(active, input.sessionId)
     } finally {
       off()
+    }
+  }
+
+  /**
+   * 提交 prompt 并容忍 Hermes 会话未就绪（session busy / agent not ready）：
+   * 新会话刚创建时 Agent 异步构建，立即提交会被拒绝，重试直至就绪或超时。
+   */
+  private async submitPromptWithRetry(
+    dashboard: HermesDashboardAdapter,
+    sessionId: string,
+    text: string,
+    profile?: string,
+    deadlineMs = 30_000,
+  ): Promise<void> {
+    const deadline = Date.now() + deadlineMs
+    while (true) {
+      try {
+        await dashboard.submitPrompt(sessionId, text, profile)
+        return
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/busy|not ready|agent/i.test(message) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          continue
+        }
+        throw error
+      }
     }
   }
 
@@ -224,10 +251,13 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     profile?: string,
   ): Promise<void> {
     try {
-      await dashboard.submitPrompt(
+      // 会话刚创建时 Hermes Agent 可能还在异步构建（prompt.submit 会报 session busy），重试直至就绪
+      await this.submitPromptWithRetry(
+        dashboard,
         sessionId,
         `Proma 初始化：请仅执行 bash 命令 mkdir -p ${cwd}，不要做任何其他操作，完成后只回复 OK。`,
         profile,
+        30_000,
       )
       // 等待引导 turn 完成（事件进入队列但此处直接消费丢弃）
       const deadline = Date.now() + 30_000
