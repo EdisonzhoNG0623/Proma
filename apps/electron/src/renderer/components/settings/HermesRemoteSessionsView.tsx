@@ -20,6 +20,9 @@ import { getOrCreateWorkspaceForProject } from '@/lib/hermes-workspace-helper'
 import { extractProjectSessions } from '@/lib/hermes-project-sessions'
 import type { HermesRemoteProject, HermesRemoteSessionSummary } from '@proma/shared'
 
+/** 单项目标专属会话预览上限（repos→groups→sessions 提取后用于展开） */
+const RECENT_SESSION_PREVIEW = 10
+
 /** 单个项目节点 */
 function ProjectRow({
   project,
@@ -225,6 +228,7 @@ export function HermesRemoteSessionsView(): React.ReactElement {
   const [sessions, setSessions] = React.useState<HermesRemoteSessionSummary[] | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const [showAllSessions, setShowAllSessions] = React.useState(false)
 
   /** 打开会话后刷新 Agent 会话列表（新会话出现在侧栏） */
   const handleSessionOpened = React.useCallback(async (): Promise<void> => {
@@ -348,14 +352,27 @@ export function HermesRemoteSessionsView(): React.ReactElement {
 
       {target && sessions && sessions.length > 0 && (
         <div>
-          <h4 className="mb-1 text-xs font-medium text-muted-foreground">最近会话（点「打开」恢复远端会话）</h4>
+          <div className="mb-1 flex items-center justify-between">
+            <h4 className="text-xs font-medium text-muted-foreground">最近会话（点「打开」恢复远端会话）</h4>
+            <span className="text-[11px] text-muted-foreground/50">{sessions.length} 个</span>
+          </div>
           <SettingsCard>
             <div className="py-1">
-              {sessions.map((session) => (
+              {sessions.slice(0, showAllSessions ? undefined : RECENT_SESSION_PREVIEW).map((session) => (
                 <SessionRow key={session.id} targetId={target.id} session={session} onOpened={handleSessionOpened} />
               ))}
             </div>
           </SettingsCard>
+          {sessions.length > RECENT_SESSION_PREVIEW && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-1 w-full text-xs text-muted-foreground"
+              onClick={() => setShowAllSessions((prev) => !prev)}
+            >
+              {showAllSessions ? '收起' : `显示全部 ${sessions.length} 个`}
+            </Button>
+          )}
         </div>
       )}
     </div>
