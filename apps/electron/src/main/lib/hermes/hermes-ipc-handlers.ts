@@ -136,6 +136,21 @@ export function registerHermesIpcHandlers(): void {
     },
   )
 
+  // 创建远端项目（SFTP mkdir ~/proma-projects/<name>）
+  ipcMain.handle(HERMES_IPC_CHANNELS.CREATE_REMOTE_PROJECT, async (_, targetId: string, name: string) => {
+    return await hermesIpcService.createRemoteProject(requireString(targetId, 'targetId'), requireString(name, 'name'))
+  })
+
+  // 列出远端项目文件
+  ipcMain.handle(HERMES_IPC_CHANNELS.LIST_REMOTE_FILES, async (_, targetId: string, remotePath: string) => {
+    return await hermesIpcService.listRemoteProjectFiles(requireString(targetId, 'targetId'), requireString(remotePath, 'remotePath'))
+  })
+
+  // 读取远端文件内容
+  ipcMain.handle(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, async (_, targetId: string, remotePath: string) => {
+    return await hermesIpcService.readRemoteFile(requireString(targetId, 'targetId'), requireString(remotePath, 'remotePath'))
+  })
+
   // 从远端会话创建并绑定 Proma Agent 会话（打开后恢复远端会话）
   ipcMain.handle(
     HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION,

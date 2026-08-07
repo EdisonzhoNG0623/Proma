@@ -1237,6 +1237,12 @@ export interface ElectronAPI {
     dedupeRemoteSessions: () => Promise<number>
     /** 同步本地项目到远端 Hermes（SFTP 增量上传） */
     syncProjectToRemote: (targetId: string, workspaceId: string) => Promise<import('@proma/shared').HermesSyncResult>
+    /** 创建远端项目（SFTP mkdir） */
+    createRemoteProject: (targetId: string, name: string) => Promise<string>
+    /** 列出远端项目文件 */
+    listRemoteFiles: (targetId: string, remotePath: string) => Promise<import('@proma/shared').HermesRemoteFileEntry[]>
+    /** 读取远端文件内容 */
+    readRemoteFile: (targetId: string, remotePath: string) => Promise<string>
   }
 }
 
@@ -2795,6 +2801,12 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.DEDUPE_REMOTE_SESSIONS),
     syncProjectToRemote: (targetId: string, workspaceId: string) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.SYNC_PROJECT_TO_REMOTE, targetId, workspaceId),
+    createRemoteProject: (targetId: string, name: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_REMOTE_PROJECT, targetId, name),
+    listRemoteFiles: (targetId: string, remotePath: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_FILES, targetId, remotePath),
+    readRemoteFile: (targetId: string, remotePath: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, targetId, remotePath),
   },
 }
 
