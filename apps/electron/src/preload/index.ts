@@ -1231,8 +1231,8 @@ export interface ElectronAPI {
     listRemoteProjectSessions: (targetId: string, projectId: string) => Promise<import('@proma/shared').HermesRemoteProject | null>
     /** 获取远端会话列表 */
     listRemoteSessions: (targetId: string, limit?: number) => Promise<import('@proma/shared').HermesRemoteSessionSummary[]>
-    /** 从远端会话创建并绑定 Proma Agent 会话 */
-    createRemoteSession: (input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) => Promise<import('@proma/shared').AgentSessionMeta>
+    /** 从远端会话创建并绑定 Proma Agent 会话；remoteSessionId 缺省时新建远端会话 */
+    createRemoteSession: (input: { targetId: string; remoteSessionId?: string; remoteCwd?: string; title?: string; workspaceId?: string }) => Promise<import('@proma/shared').AgentSessionMeta>
     /** 清理重复远端会话，返回删除数量 */
     dedupeRemoteSessions: () => Promise<number>
     /** 同步本地项目到远端 Hermes（SFTP 增量上传） */
@@ -2795,7 +2795,7 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_PROJECT_SESSIONS, targetId, projectId),
     listRemoteSessions: (targetId: string, limit?: number) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_SESSIONS, targetId, limit),
-    createRemoteSession: (input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) =>
+    createRemoteSession: (input: { targetId: string; remoteSessionId?: string; remoteCwd?: string; title?: string; workspaceId?: string }) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION, input),
     dedupeRemoteSessions: () =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.DEDUPE_REMOTE_SESSIONS),

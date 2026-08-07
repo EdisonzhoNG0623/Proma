@@ -31,6 +31,8 @@ export interface HermesSessionBinding {
   remoteSessionId?: string
   /** 工作区 slug（用于远端 cwd 指向同步目录） */
   workspaceSlug?: string
+  /** 显式远端 cwd（优先于 workspaceSlug 推导；如 ~/proma-projects/<项目名>） */
+  remoteCwd?: string
 }
 
 /** 读取 dashboard-password 凭据的解密结果 */
@@ -143,8 +145,9 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     const dashboard = new HermesDashboardAdapter(client)
     active.dashboard = dashboard
 
-    // create / resume 远端会话（cwd 指向同步目录，Hermes 在同步后的项目目录工作）
-    const remoteCwd = binding.workspaceSlug ? `~/proma-projects/${binding.workspaceSlug}` : undefined
+    // create / resume 远端会话（cwd 优先显式 remoteCwd，否则用同步目录）
+    const remoteCwd = binding.remoteCwd
+      ?? (binding.workspaceSlug ? `~/proma-projects/${binding.workspaceSlug}` : undefined)
     const session = binding.remoteSessionId
       ? await dashboard.resumeSession(binding.remoteSessionId, {
           profile: binding.profile,
