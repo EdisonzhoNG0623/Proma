@@ -154,7 +154,7 @@ describe('Dashboard 完整契约', () => {
   test('Given 新会话无 SSH 且绑定 workspaceSlug When query Then 免 SSH 引导 mkdir + session.cwd.set', async () => {
     const targetId = setupTarget()
     // 无 remoteSessionId（新会话）+ workspaceSlug → remoteCwd 推导为 ~/proma-projects/<slug>
-    bindings.set('sess-bootstrap', { targetId, workspaceSlug: 'my-project' })
+    bindings.set('sess-bootstrap', { targetId, workspaceSlug: 'my-project', title: 'my-project 对话' })
     const facade = createFacade()
     await collect(facade.query({ sessionId: 'sess-bootstrap', prompt: '你好', agentRuntime: 'hermes-remote' }))
 
@@ -171,6 +171,9 @@ describe('Dashboard 完整契约', () => {
       (r) => r.method === 'prompt.submit' && String((r.params as Record<string, unknown>)?.text ?? '').includes('mkdir -p'),
     )
     expect(mkdirSubmit).toBeTruthy()
+    // 新建会话时同步 Proma 标题为 Hermes 标题（session.create title 参数）
+    const createReq = server.wsRequests.find((r) => r.method === 'session.create')
+    expect((createReq?.params as Record<string, unknown>)?.title).toBe('my-project 对话')
   })
 })
 

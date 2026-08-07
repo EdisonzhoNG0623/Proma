@@ -73,6 +73,7 @@ const hermesFacade = new HermesRuntimeFacade({
       remoteSessionId: meta.hermesRemoteSessionId,
       workspaceSlug: workspace?.slug,
       remoteCwd: meta.hermesRemoteCwd,
+      title: meta.title,
     }
   },
   persistRemoteSessionId: (sessionId, remoteSessionId) => {
