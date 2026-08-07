@@ -38,7 +38,7 @@ import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes/her
 import { AgentEventBus } from './agent-event-bus'
 import { AgentOrchestrator } from './agent-orchestrator'
 import { getAgentSessionWorkspacePath } from './config-paths'
-import { getAgentWorkspaceBySlug, getLocalProjectRootStatus, getProjectFilesPath } from './agent-workspace-manager'
+import { getAgentWorkspace, getAgentWorkspaceBySlug, getLocalProjectRootStatus, getProjectFilesPath } from './agent-workspace-manager'
 import { getAgentSessionMeta, updateAgentSessionMeta } from './agent-session-manager'
 import { setAgentStopper, setHeadlessAgentRunner } from './agent-headless-runner-registry'
 import { getHeadlessAgentRunTarget } from './agent-headless-run-target'
@@ -64,10 +64,12 @@ const hermesFacade = new HermesRuntimeFacade({
   getBinding: (sessionId) => {
     const meta = getAgentSessionMeta(sessionId)
     if (!meta?.hermesTargetId) return null
+    const workspace = meta.workspaceId ? getAgentWorkspace(meta.workspaceId) : undefined
     return {
       targetId: meta.hermesTargetId,
       profile: meta.hermesProfile,
       remoteSessionId: meta.hermesRemoteSessionId,
+      workspaceSlug: workspace?.slug,
     }
   },
   persistRemoteSessionId: (sessionId, remoteSessionId) => {

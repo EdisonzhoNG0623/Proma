@@ -29,6 +29,8 @@ export interface HermesSessionBinding {
   targetId: string
   profile?: string
   remoteSessionId?: string
+  /** 工作区 slug（用于远端 cwd 指向同步目录） */
+  workspaceSlug?: string
 }
 
 /** 读取 dashboard-password 凭据的解密结果 */
@@ -141,11 +143,13 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     const dashboard = new HermesDashboardAdapter(client)
     active.dashboard = dashboard
 
-    // create / resume 远端会话
+    // create / resume 远端会话（cwd 指向同步目录，Hermes 在同步后的项目目录工作）
+    const remoteCwd = binding.workspaceSlug ? `~/proma-projects/${binding.workspaceSlug}` : undefined
     const session = binding.remoteSessionId
       ? await dashboard.resumeSession(binding.remoteSessionId, {
           profile: binding.profile,
           cols: 96,
+          ...(remoteCwd ? { cwd: remoteCwd } : {}),
         }).catch((error: unknown) => {
           // session not found 时重新创建
           if (error instanceof Error && /session not found/i.test(error.message)) {
@@ -157,6 +161,7 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     const resolvedSession: HermesSessionResult = session ?? await dashboard.createSession({
       profile: binding.profile,
       cols: 96,
+      ...(remoteCwd ? { cwd: remoteCwd } : {}),
     })
     if (resolvedSession.created) {
       this.deps.persistRemoteSessionId(input.sessionId, resolvedSession.storedSessionId)
