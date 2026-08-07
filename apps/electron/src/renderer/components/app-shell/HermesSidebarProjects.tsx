@@ -42,6 +42,26 @@ export function HermesSidebarProjects(): React.ReactElement | null {
   const [expandedProjectId, setExpandedProjectId] = React.useState<string | null>(null)
   const [projectSessionsMap, setProjectSessionsMap] = React.useState<Record<string, HermesRemoteSessionSummary[] | null>>({})
   const [loadingProjectId, setLoadingProjectId] = React.useState<string | null>(null)
+  // 分阶段拖拽：offset = Hermes 区块下移量（项目区下方留白）；触底后转 panelHeight 压缩
+  const [offset, setOffset] = React.useState(0)
+  const [maxOffset, setMaxOffset] = React.useState(0)
+  const rootRef = React.useRef<HTMLDivElement | null>(null)
+
+  // 测量可用下移空间：滚动容器高度 - Hermes 区块高度（不含 margin）
+  React.useEffect(() => {
+    const measure = (): void => {
+      const el = rootRef.current
+      if (!el) return
+      const container = el.parentElement
+      if (!container) return
+      const containerH = container.clientHeight
+      const elH = el.offsetHeight - offset
+      setMaxOffset(Math.max(0, containerH - elH))
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [panelHeight, offset])
 
   const target = targets.find((t) => t.id === activeTargetId) ?? targets[0]
 
@@ -154,8 +174,8 @@ export function HermesSidebarProjects(): React.ReactElement | null {
     window.electronAPI.updateSettings({ hermesHiddenProjects: next }).catch(console.error)
   }
 
-  // 拖拽分割线调整区块高度
-  const dragStateRef = React.useRef<{ startY: number; startHeight: number } | null>(null)
+  // 分阶段拖拽：Hermes 未触底时往下拉 → 整体下移（项目区下方留白增加）；触底后 → 压缩内容高度
+  const dragStateRef = React.useRef<{ startY: number; startHeight: number; startOffset: number; touchingBottom: boolean } | null>(null)
   const handleResizePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
     event.preventDefault()
     try {
@@ -163,12 +183,31 @@ export function HermesSidebarProjects(): React.ReactElement | null {
     } catch {
       // 捕获失败忽略
     }
-    dragStateRef.current = { startY: event.clientY, startHeight: panelHeight }
+    dragStateRef.current = {
+      startY: event.clientY,
+      startHeight: panelHeight,
+      startOffset: offset,
+      touchingBottom: offset >= maxOffset,
+    }
     const onMove = (moveEvent: PointerEvent): void => {
       if (!dragStateRef.current) return
-      const delta = dragStateRef.current.startY - moveEvent.clientY
-      const nextHeight = Math.min(PANEL_MAX, Math.max(PANEL_MIN, dragStateRef.current.startHeight + delta))
-      store.set(hermesRemotePanelHeightAtom, nextHeight)
+      const start = dragStateRef.current
+      const deltaY = moveEvent.clientY - start.startY // 向下为正
+      if (deltaY > 0) {
+        // 向下拉：未触底先整体下移；触底后压缩内容
+        if (!start.touchingBottom) {
+          setOffset(Math.min(maxOffset, start.startOffset + deltaY))
+        } else {
+          store.set(hermesRemotePanelHeightAtom, Math.max(PANEL_MIN, start.startHeight - deltaY))
+        }
+      } else {
+        // 向上推：先收回下移量；归零后放大内容
+        if (start.startOffset > 0) {
+          setOffset(Math.max(0, start.startOffset + deltaY))
+        } else {
+          store.set(hermesRemotePanelHeightAtom, Math.min(PANEL_MAX, start.startHeight - deltaY))
+        }
+      }
     }
     const onUp = (): void => {
       dragStateRef.current = null
@@ -181,12 +220,16 @@ export function HermesSidebarProjects(): React.ReactElement | null {
   }
 
   return (
-    <div className="sticky bottom-0 z-10 mt-1 flex-shrink-0 border-t border-foreground/[0.06] bg-[hsl(var(--sidebar-surface))] pt-1">
-      {/* 可拖动分割线：调整 Hermes 远端区块高度 */}
+    <div
+      ref={rootRef}
+      className="sticky bottom-0 z-10 mt-1 flex-shrink-0 border-t border-foreground/[0.06] bg-[hsl(var(--sidebar-surface))] pt-1"
+      style={{ marginTop: offset }}
+    >
+      {/* 可拖动分割线：先下移 Hermes（项目下方留白增加），触底后压缩内容 */}
       <div
         className="group/resizer relative -mx-1 mb-0.5 flex h-4 cursor-row-resize touch-none items-center justify-center"
         onPointerDown={handleResizePointerDown}
-        title="拖动调整高度（项目少时也可拉动）"
+        title="拖动：未触底时下移 Hermes，触底后压缩内容"
       >
         <div className="h-1 w-10 rounded-full bg-foreground/[0.12] transition-colors group-hover/resizer:h-1.5 group-hover/resizer:bg-foreground/25" />
       </div>
