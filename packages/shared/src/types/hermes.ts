@@ -237,6 +237,8 @@ export const HERMES_IPC_CHANNELS = {
   LIST_REMOTE_PROJECT_SESSIONS: 'hermes:list-remote-project-sessions',
   /** 获取远端会话列表（session.list） */
   LIST_REMOTE_SESSIONS: 'hermes:list-remote-sessions',
+  /** 从远端会话创建并绑定 Proma Agent 会话 */
+  CREATE_REMOTE_SESSION: 'hermes:create-remote-session',
 } as const
 
 /**

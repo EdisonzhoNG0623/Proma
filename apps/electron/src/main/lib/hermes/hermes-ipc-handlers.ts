@@ -18,6 +18,7 @@ import type {
   HermesSetDashboardPasswordInput,
 } from '@proma/shared'
 import { hermesIpcService } from './hermes-ipc-service'
+import { createAgentSession, updateAgentSessionMeta } from '../agent-session-manager'
 
 /** 校验字符串参数 */
 function requireString(value: unknown, name: string): string {
@@ -118,4 +119,28 @@ export function registerHermesIpcHandlers(): void {
   ipcMain.handle(HERMES_IPC_CHANNELS.LIST_REMOTE_SESSIONS, async (_, targetId: string, limit?: number) => {
     return await hermesIpcService.listRemoteSessions(requireString(targetId, 'targetId'), limit ?? 100)
   })
+
+  // 从远端会话创建并绑定 Proma Agent 会话（打开后恢复远端会话）
+  ipcMain.handle(
+    HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION,
+    async (_, input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) => {
+      if (!input || typeof input !== 'object') throw new Error('input 必填')
+      requireString(input.targetId, 'targetId')
+      requireString(input.remoteSessionId, 'remoteSessionId')
+      // 创建 Hermes Remote 会话（channelId 用占位 'hermes-remote'，runtime 为 hermes-remote）
+      const session = createAgentSession(
+        input.title || 'Hermes 远端会话',
+        'hermes-remote',
+        input.workspaceId,
+        undefined,
+        'hermes-remote',
+      )
+      updateAgentSessionMeta(session.id, {
+        agentRuntime: 'hermes-remote',
+        hermesTargetId: input.targetId,
+        hermesRemoteSessionId: input.remoteSessionId,
+      })
+      return session
+    },
+  )
 }
