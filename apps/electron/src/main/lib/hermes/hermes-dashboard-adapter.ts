@@ -31,6 +31,8 @@ export interface HermesSessionCreateInput {
   model?: string
   /** provider（可选） */
   provider?: string
+  /** 会话标题（可选，Hermes 首条消息后应用到 DB） */
+  title?: string
   /** 断线是否关闭会话（默认 false） */
   closeOnDisconnect?: boolean
 }
@@ -184,6 +186,7 @@ export class HermesDashboardAdapter {
     if (input.profile) params.profile = input.profile
     if (input.model) params.model = input.model
     if (input.provider) params.provider = input.provider
+    if (input.title) params.title = input.title
     if (input.closeOnDisconnect) params.close_on_disconnect = true
     const result = await this.client.request<unknown>('session.create', params)
     return parseSessionResult(result, true)

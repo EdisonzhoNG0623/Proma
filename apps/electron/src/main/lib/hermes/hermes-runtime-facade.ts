@@ -33,6 +33,8 @@ export interface HermesSessionBinding {
   workspaceSlug?: string
   /** 显式远端 cwd（优先于 workspaceSlug 推导；如 ~/proma-projects/<项目名>） */
   remoteCwd?: string
+  /** Proma 会话标题（新建远端会话时同步为 Hermes 标题） */
+  title?: string
 }
 
 /** 读取 dashboard-password 凭据的解密结果 */
@@ -178,6 +180,7 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     const resolvedSession: HermesSessionResult = session ?? await dashboard.createSession({
       profile: binding.profile,
       cols: 96,
+      ...(binding.title ? { title: binding.title } : {}),
       ...(remoteCwd ? { cwd: remoteCwd } : {}),
     })
     if (resolvedSession.created) {
