@@ -49,6 +49,8 @@ export interface HermesRuntimeDeps {
   getTarget(targetId: string): HermesTarget | null
   /** 读取凭据明文（ref → secret） */
   getCredential(ref: string): string | null
+  /** 保存凭据明文（ref → secret；用于持久化 Dashboard Cookie 复用） */
+  saveCredential(ref: string, secret: string): void
   /** 读取 dashboard 密码凭据（ref → { username, password }） */
   readDashboardPassword(ref: string): HermesDashboardPasswordCredential | null
   /** 读取会话绑定 */
@@ -126,7 +128,33 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
 
     // 认证：password-cookie 或 token
     const mode = target.auth.dashboardMode ?? 'password-cookie'
-    if (mode === 'password-cookie' && auth.cookieJarFor(binding.targetId).size === 0) {
+
+    // 1. 复用持久化 Cookie（避免每次 turn 都密码登录触发 429 限流）
+    if (mode === 'password-cookie') {
+      const cookieRef = `hermes-cookie-${binding.targetId}`
+      const persistedCookie = this.deps.getCredential(cookieRef)
+      if (persistedCookie) {
+        try {
+          const jar = JSON.parse(persistedCookie) as Record<string, string>
+          const targetJar = auth.cookieJarFor(binding.targetId)
+          for (const [name, value] of Object.entries(jar)) {
+            targetJar.set(name, value)
+          }
+        } catch {
+          // Cookie 解析失败则忽略，走登录流程
+        }
+      }
+    }
+
+    // 2. 尝试用现有 Cookie 直接 mint ticket；401 再密码登录并持久化 Cookie
+    let ticket: string
+    try {
+      ticket = await auth.mintWsTicket(binding.targetId)
+    } catch (error) {
+      const isAuthError = error instanceof HermesError && error.code === 'unauthorized'
+      if (!isAuthError || mode !== 'password-cookie') {
+        throw error
+      }
       const credential = this.deps.readDashboardPassword(target.auth.dashboardCredentialRef ?? '')
       if (!credential) {
         throw new HermesError('缺少 Hermes 账号密码凭据，请在 Hermes 设置中登录', 'unauthorized')
@@ -142,9 +170,18 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
         username: credential.username,
         password: credential.password,
       })
+      // 持久化 Cookie（含 refresh cookie，供后续复用）
+      const jar = Object.fromEntries(auth.cookieJarFor(binding.targetId).entries())
+      if (Object.keys(jar).length > 0) {
+        try {
+          this.deps.saveCredential(`hermes-cookie-${binding.targetId}`, JSON.stringify(jar))
+        } catch (cookieError) {
+          console.warn('[Hermes] 持久化 Dashboard Cookie 失败:', cookieError instanceof Error ? cookieError.message : String(cookieError))
+        }
+      }
+      ticket = await auth.mintWsTicket(binding.targetId)
     }
 
-    const ticket = await auth.mintWsTicket(binding.targetId)
     const wsUrl = buildTicketWsUrl(transport.baseUrl, ticket)
     const client = new HermesDashboardWsClient((url) => transport.connectWebSocket(url))
     active.dashboardClient = client
