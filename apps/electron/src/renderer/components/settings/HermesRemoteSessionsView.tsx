@@ -279,7 +279,7 @@ export function HermesRemoteSessionsView(): React.ReactElement {
               <ProjectRow
                 key={project.id}
                 project={project}
-                onRefresh={() => void refresh()}
+                onRefresh={() => refresh()}
                 targetId={target.id}
               />
             ))
