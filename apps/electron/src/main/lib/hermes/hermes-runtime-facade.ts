@@ -189,7 +189,6 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     const dashboard = new HermesDashboardAdapter(client)
     active.dashboard = dashboard
 
-    console.log('[Hermes] turn 开始 binding:', JSON.stringify({ remoteSessionId: binding.remoteSessionId, title: binding.title, remoteCwd: binding.remoteCwd, workspaceSlug: binding.workspaceSlug }))
 
     // create / resume 远端会话（cwd 优先显式 remoteCwd，否则用同步目录）
     const remoteCwd = binding.remoteCwd
@@ -230,7 +229,6 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     if (binding.title) {
       try {
         await dashboard.setSessionTitle(resolvedSession.sessionId, binding.title)
-        console.log('[Hermes] 已同步远端标题:', binding.title)
       } catch (error) {
         console.warn('[Hermes] 同步远端标题失败:', error instanceof Error ? error.message : String(error))
       }
@@ -333,7 +331,6 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
       while (true) {
         try {
           await dashboard.setSessionCwd(sessionId, cwd)
-          console.log('[Hermes] 引导完成，会话 cwd 已设为:', cwd)
           return
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
