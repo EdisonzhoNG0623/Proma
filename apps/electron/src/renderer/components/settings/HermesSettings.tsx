@@ -207,11 +207,13 @@ function HermesTargetForm({
     setError(null)
     try {
       const isDirect = form.mode === 'direct'
+      // Direct 模式可选填 SSH 文件访问（远端项目浏览/同步用）；SSH Tunnel 模式必填
+      const hasSshConfig = form.sshHost.trim() !== ''
       const input = {
         name: form.name,
         mode: form.mode,
         ...(isDirect ? { remoteUrl: form.remoteUrl } : {}),
-        ...(!isDirect
+        ...(hasSshConfig
           ? {
               ssh: {
                 host: form.sshHost,
@@ -243,7 +245,7 @@ function HermesTargetForm({
           secret: form.apiServerKey,
         })
       }
-      if (!isDirect && form.sshPassword) {
+      if (form.sshHost.trim() !== '' && form.sshPassword) {
         await window.electronAPI.hermes.setSshPassword({
           targetId: target.id,
           secret: form.sshPassword,
@@ -355,6 +357,32 @@ function HermesTargetForm({
                 />
               </>
             )}
+            {/* Direct 模式也可选填 SSH 文件访问（远端项目浏览/同步用；不用于隧道） */}
+            {form.mode === 'direct' && (
+              <div className="rounded-md border p-2 text-xs text-muted-foreground">
+                <div className="mb-1 font-medium">SSH 文件访问（可选）— 用于远端项目浏览/同步</div>
+                <div className="flex flex-col gap-1.5">
+                  <SettingsInput
+                    label="SSH 主机"
+                    value={form.sshHost}
+                    onChange={(v) => set('sshHost', v)}
+                    placeholder="vps.example.com"
+                  />
+                  <SettingsInput
+                    label="SSH 端口"
+                    value={form.sshPort}
+                    onChange={(v) => set('sshPort', v)}
+                    placeholder="22"
+                  />
+                  <SettingsInput
+                    label="SSH 用户名"
+                    value={form.sshUsername}
+                    onChange={(v) => set('sshUsername', v)}
+                    placeholder="deploy"
+                  />
+                </div>
+              </div>
+            )}
           </SettingsSection>
 
           <SettingsSection title="Dashboard 认证">
@@ -387,7 +415,7 @@ function HermesTargetForm({
             />
           </SettingsSection>
 
-          {form.mode === 'ssh-tunnel' && (
+          {form.sshHost.trim() !== '' && (
             <SettingsSection title="SSH 密码（可选）">
               <SettingsSecretInput
                 label="SSH 密码"
