@@ -171,9 +171,9 @@ describe('Dashboard 完整契约', () => {
       (r) => r.method === 'prompt.submit' && String((r.params as Record<string, unknown>)?.text ?? '').includes('mkdir -p'),
     )
     expect(mkdirSubmit).toBeTruthy()
-    // 新建会话时同步 Proma 标题为 Hermes 标题（session.create title 参数）
-    const createReq = server.wsRequests.find((r) => r.method === 'session.create')
-    expect((createReq?.params as Record<string, unknown>)?.title).toBe('my-project 对话')
+    // 新建会话时同步 Proma 标题为 Hermes 标题（session.create title 参数，取本测试最后一次创建）
+    const createReqs = server.wsRequests.filter((r) => r.method === 'session.create')
+    expect((createReqs.at(-1)?.params as Record<string, unknown>)?.title).toBe('my-project 对话')
   })
 })
 
