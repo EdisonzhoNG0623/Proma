@@ -9,7 +9,6 @@ import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { FolderOpen, MessageSquare, RefreshCw, Play, MessageSquarePlus, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { SettingsCard } from './primitives/SettingsCard'
 import { hermesTargetsAtom, activeHermesTargetIdAtom, hermesHiddenProjectsAtom } from '@/atoms/hermes-atoms'
 import { agentSessionsAtom } from '@/atoms/agent-atoms'
@@ -89,39 +88,49 @@ function ProjectRow({
   }
 
   return (
-    <div>
-      <div className="flex items-center gap-2 px-4 py-2">
-        <Button variant="ghost" className="h-auto p-0 font-medium hover:bg-transparent" onClick={() => void toggle()}>
-          <FolderOpen size={14} className="mr-1.5 text-muted-foreground" />
-          <span>{project.label}</span>
-          <span className="ml-1.5 text-xs text-muted-foreground">{project.path}</span>
-        </Button>
-        {typeof project.sessionCount === 'number' && (
-          <Badge variant="secondary" className="text-xs">{project.sessionCount}</Badge>
-        )}
-        {loadingSessions && <span className="text-xs text-muted-foreground">加载中...</span>}
+    <div className="px-4 py-1.5">
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left hover:opacity-80"
+          onClick={() => void toggle()}
+          title={project.path}
+        >
+          <FolderOpen size={14} className="shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{project.label}</span>
+          {typeof project.sessionCount === 'number' && (
+            <span className="shrink-0 rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[11px] text-muted-foreground">
+              {project.sessionCount}
+            </span>
+          )}
+        </button>
+        {loadingSessions && <span className="shrink-0 text-xs text-muted-foreground">加载中...</span>}
         <Button
           variant="ghost"
-          size="sm"
-          className="h-6 px-2 text-xs text-muted-foreground"
+          size="icon"
+          className="h-6 w-6 shrink-0 text-muted-foreground"
           title={hidden ? '在列表中显示该项目' : '隐藏该项目（侧栏不显示）'}
           onClick={() => onToggleHidden(project)}
         >
-          <EyeOff size={12} className="mr-1" />
-          {hidden ? '恢复' : '隐藏'}
+          <EyeOff size={12} />
         </Button>
         <Button
           variant="ghost"
           size="sm"
-          className="ml-auto h-6 px-2 text-xs"
+          className="h-6 shrink-0 px-2 text-xs"
           title="在此项目目录新建 Hermes 对话（无需 SSH）"
           onClick={() => void handleNewChat()}
           disabled={startingChat}
         >
           <MessageSquarePlus size={12} className="mr-1" />
-          {startingChat ? '创建中...' : '新建对话'}
+          {startingChat ? '创建中' : '新建对话'}
         </Button>
       </div>
+      {project.path && (
+        <div className="truncate pl-5 pr-2 pb-1 text-[11px] text-muted-foreground/50" title={project.path}>
+          {project.path}
+        </div>
+      )}
       {expanded && (
         <div className="ml-6 border-l pl-3 pb-2">
           {loadingSessions ? (
@@ -188,13 +197,18 @@ function SessionRow({
   }
 
   return (
-    <div className="flex items-center gap-2 px-4 py-1.5 text-sm">
+    <div className="flex items-center gap-2 px-4 py-1.5 text-sm hover:bg-accent/40">
       <MessageSquare size={13} className="shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate">{session.title || session.id}</span>
-      <Badge variant="outline" className="shrink-0 text-xs">{session.source}</Badge>
-      <Button variant="ghost" size="sm" className="shrink-0 h-6 px-2 text-xs" onClick={() => void handleOpen()} disabled={opening}>
+      {session.messageCount > 0 && (
+        <span className="shrink-0 text-[11px] text-muted-foreground/50">{session.messageCount} 条</span>
+      )}
+      {session.source && (
+        <span className="shrink-0 text-[11px] text-muted-foreground/50">{session.source}</span>
+      )}
+      <Button variant="ghost" size="sm" className="h-6 shrink-0 px-2 text-xs" onClick={() => void handleOpen()} disabled={opening}>
         <Play size={11} className="mr-1" />
-        {opening ? '打开中...' : '打开'}
+        {opening ? '打开中' : '打开'}
       </Button>
     </div>
   )
