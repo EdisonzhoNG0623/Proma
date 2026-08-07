@@ -6,12 +6,14 @@
  */
 
 import * as React from 'react'
-import { useAtomValue } from 'jotai'
-import { FolderOpen, MessageSquare, RefreshCw } from 'lucide-react'
+import { useAtomValue, useSetAtom } from 'jotai'
+import { FolderOpen, MessageSquare, RefreshCw, Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { SettingsCard } from './primitives/SettingsCard'
 import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
+import { appModeAtom } from '@/atoms/app-mode'
+import { activeViewAtom } from '@/atoms/active-view'
 import type { HermesRemoteProject, HermesRemoteSessionSummary } from '@proma/shared'
 
 /** 单个项目节点 */
@@ -82,6 +84,58 @@ function ProjectRow({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/** 从远端会话打开 Proma Agent 会话（创建并绑定后切到 Agent 模式） */
+async function openRemoteSession(
+  targetId: string,
+  session: HermesRemoteSessionSummary,
+): Promise<void> {
+  await window.electronAPI.hermes.createRemoteSession({
+    targetId,
+    remoteSessionId: session.id,
+    title: session.title || session.id,
+  })
+}
+
+/** 单个会话行（含「打开」按钮） */
+function SessionRow({
+  targetId,
+  session,
+}: {
+  targetId: string
+  session: HermesRemoteSessionSummary
+}): React.ReactElement {
+  const setAppMode = useSetAtom(appModeAtom)
+  const setActiveView = useSetAtom(activeViewAtom)
+  const [opening, setOpening] = React.useState(false)
+
+  const handleOpen = async (): Promise<void> => {
+    setOpening(true)
+    try {
+      await openRemoteSession(targetId, session)
+      // 切到 Agent 模式主面板（会话列表会自动包含新会话）
+      setAppMode('agent')
+      setActiveView('conversations')
+    } catch (error) {
+      console.error('[Hermes] 打开远端会话失败:', error)
+      window.alert(`打开远端会话失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setOpening(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 px-4 py-1.5 text-sm">
+      <MessageSquare size={13} className="shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate">{session.title || session.id}</span>
+      <Badge variant="outline" className="shrink-0 text-xs">{session.source}</Badge>
+      <Button variant="ghost" size="sm" className="shrink-0 h-6 px-2 text-xs" onClick={() => void handleOpen()} disabled={opening}>
+        <Play size={11} className="mr-1" />
+        {opening ? '打开中...' : '打开'}
+      </Button>
     </div>
   )
 }
@@ -157,17 +211,13 @@ export function HermesRemoteSessionsView(): React.ReactElement {
         </div>
       </SettingsCard>
 
-      {sessions && sessions.length > 0 && (
+      {target && sessions && sessions.length > 0 && (
         <div>
-          <h4 className="mb-1 text-xs font-medium text-muted-foreground">最近会话</h4>
+          <h4 className="mb-1 text-xs font-medium text-muted-foreground">最近会话（点「打开」恢复远端会话）</h4>
           <SettingsCard>
             <div className="py-1">
               {sessions.map((session) => (
-                <div key={session.id} className="flex items-center gap-2 px-4 py-1.5 text-sm">
-                  <MessageSquare size={13} className="shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate">{session.title || session.id}</span>
-                  <Badge variant="outline" className="shrink-0 text-xs">{session.source}</Badge>
-                </div>
+                <SessionRow key={session.id} targetId={target.id} session={session} />
               ))}
             </div>
           </SettingsCard>

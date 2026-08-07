@@ -1251,6 +1251,8 @@ export interface ElectronAPI {
     listRemoteProjectSessions: (targetId: string, projectId: string) => Promise<import('@proma/shared').HermesRemoteProject | null>
     /** 获取远端会话列表 */
     listRemoteSessions: (targetId: string, limit?: number) => Promise<import('@proma/shared').HermesRemoteSessionSummary[]>
+    /** 从远端会话创建并绑定 Proma Agent 会话 */
+    createRemoteSession: (input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) => Promise<import('@proma/shared').AgentSessionMeta>
   }
 }
 
@@ -2827,6 +2829,8 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_PROJECT_SESSIONS, targetId, projectId),
     listRemoteSessions: (targetId: string, limit?: number) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_SESSIONS, targetId, limit),
+    createRemoteSession: (input: { targetId: string; remoteSessionId: string; title?: string; workspaceId?: string }) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION, input),
   },
 }
 
