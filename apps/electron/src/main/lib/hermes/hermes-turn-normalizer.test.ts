@@ -5,6 +5,43 @@
 import { describe, expect, test } from 'bun:test'
 import { normalizeApiServerEvent, normalizeDashboardNotification } from './hermes-turn-normalizer'
 
+describe('normalizeDashboardNotification 真实 Hermes 格式（method=event）', () => {
+  const realEvent = (type: string, payload: Record<string, unknown>): unknown => ({
+    type,
+    session_id: 's1',
+    payload,
+  })
+
+  test('Given method=event 且 type=message.delta When 归一化 Then text.delta（取 payload.text）', () => {
+    const event = normalizeDashboardNotification('event', realEvent('message.delta', { text: '真实增量' }))
+    expect(event).toEqual({ type: 'text.delta', text: '真实增量' })
+  })
+
+  test('Given method=event 且 type=message.complete When 归一化 Then turn.completed', () => {
+    const event = normalizeDashboardNotification('event', realEvent('message.complete', { text: 'ok' }))
+    expect(event).toEqual({ type: 'turn.completed' })
+  })
+
+  test('Given method=event 且 type=message.complete status=error When 归一化 Then turn.failed', () => {
+    const event = normalizeDashboardNotification('event', realEvent('message.complete', { text: 'Error: x', status: 'error' }))
+    expect(event).toMatchObject({ type: 'turn.failed' })
+  })
+
+  test('Given method=event 且 type=tool.start When 归一化 Then tool.started（取 payload 字段）', () => {
+    const event = normalizeDashboardNotification('event', realEvent('tool.start', { tool_use_id: 't1', tool_name: 'Bash' }))
+    expect(event).toMatchObject({ type: 'tool.started', toolUseId: 't1', toolName: 'Bash' })
+  })
+
+  test('Given method=event 且 type=approval.request When 归一化 Then approval.request（取 payload 字段）', () => {
+    const event = normalizeDashboardNotification('event', realEvent('approval.request', { request_id: 'r1', message: '允许?', tool_name: 'Bash' }))
+    expect(event).toMatchObject({ type: 'approval.request', requestId: 'r1', toolName: 'Bash' })
+  })
+
+  test('Given method=event 无 type When 归一化 Then null', () => {
+    expect(normalizeDashboardNotification('event', { session_id: 's1' })).toBeNull()
+  })
+})
+
 describe('normalizeDashboardNotification Dashboard 通知归一化', () => {
   test('Given message.delta When 归一化 Then text.delta', () => {
     const event = normalizeDashboardNotification('message.delta', { text: '你好' })

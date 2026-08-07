@@ -181,8 +181,13 @@ export async function startMockHermesServer(
         const reply = (result: unknown): void => {
           ws.send(JSON.stringify({ jsonrpc: '2.0', id, result }))
         }
-        const push = (payload: Record<string, unknown>): void => {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', ...payload }))
+        const push = (type: string, payload: Record<string, unknown> = {}): void => {
+          // 真实 Hermes 格式：method='event'，事件类型在 params.type，数据在 params.payload
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'event',
+            params: { type, session_id: String((msg.params as Record<string, unknown>)?.session_id ?? ''), payload },
+          }))
         }
 
         wsRequests.push({ method, params: msg.params })
@@ -195,7 +200,7 @@ export async function startMockHermesServer(
           // 推送 turn 事件序列（微延迟保证请求响应先到）
           setTimeout(() => {
             for (const event of turnEvents) {
-              push(event)
+              push(event.method, event.params ?? {})
             }
           }, 5)
         } else if (method === 'approval.respond') {
