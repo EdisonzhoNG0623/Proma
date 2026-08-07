@@ -7,12 +7,12 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { FolderOpen, MessageSquare, RefreshCw, Play } from 'lucide-react'
+import { FolderOpen, MessageSquare, RefreshCw, Play, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { SettingsCard } from './primitives/SettingsCard'
 import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
-import { agentSessionsAtom } from '@/atoms/agent-atoms'
+import { agentSessionsAtom, agentWorkspacesAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
 import { appModeAtom } from '@/atoms/app-mode'
 import { activeViewAtom } from '@/atoms/active-view'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
@@ -148,6 +148,10 @@ export function HermesRemoteSessionsView(): React.ReactElement {
   const targets = useAtomValue(hermesTargetsAtom)
   const activeTargetId = useAtomValue(activeHermesTargetIdAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const workspaces = useAtomValue(agentWorkspacesAtom)
+  const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
+  const [syncResult, setSyncResult] = React.useState<import('@proma/shared').HermesSyncResult | null>(null)
+  const [syncing, setSyncing] = React.useState(false)
   const [projects, setProjects] = React.useState<HermesRemoteProject[] | null>(null)
   const [sessions, setSessions] = React.useState<HermesRemoteSessionSummary[] | null>(null)
   const [loading, setLoading] = React.useState(false)
@@ -196,6 +200,23 @@ export function HermesRemoteSessionsView(): React.ReactElement {
     if (target) void refresh()
   }, [target, refresh])
 
+  const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId) ?? workspaces[0]
+
+  /** 同步当前项目到远端（SFTP 增量上传） */
+  const handleSyncProject = React.useCallback(async (): Promise<void> => {
+    if (!target || !currentWorkspace) return
+    setSyncing(true)
+    setSyncResult(null)
+    try {
+      const result = await window.electronAPI.hermes.syncProjectToRemote(target.id, currentWorkspace.id)
+      setSyncResult(result)
+    } catch (error) {
+      window.alert(`同步失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setSyncing(false)
+    }
+  }, [target, currentWorkspace])
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -231,6 +252,39 @@ export function HermesRemoteSessionsView(): React.ReactElement {
               />
             ))
           )}
+        </div>
+      </SettingsCard>
+
+      {/* 项目同步到远端（SFTP 增量上传） */}
+      <SettingsCard>
+        <div className="flex items-center justify-between gap-4 p-4">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">项目同步到远端</div>
+            <div className="mt-0.5 truncate text-xs text-muted-foreground">
+              {currentWorkspace
+                ? `项目：${currentWorkspace.name}（${currentWorkspace.projectRootPath ?? currentWorkspace.slug}）`
+                : '无可用项目'}
+            </div>
+            {target?.mode !== 'ssh-tunnel' && (
+              <div className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">
+                需要 SSH Tunnel 模式连接才能同步文件
+              </div>
+            )}
+            {syncResult && (
+              <div className="mt-1 text-xs text-muted-foreground">
+                同步完成：上传 {syncResult.uploaded} · 跳过 {syncResult.skipped} · 失败 {syncResult.failed}
+                {syncResult.errors.length > 0 && `（${syncResult.errors.length} 个错误）`}
+              </div>
+            )}
+          </div>
+          <Button
+            size="sm"
+            onClick={() => void handleSyncProject()}
+            disabled={syncing || !target || !currentWorkspace || target.mode !== 'ssh-tunnel'}
+          >
+            <Upload size={14} className="mr-1" />
+            {syncing ? '同步中...' : '同步到远端'}
+          </Button>
         </div>
       </SettingsCard>
 

@@ -125,6 +125,17 @@ export function registerHermesIpcHandlers(): void {
     return await hermesIpcService.listRemoteSessions(requireString(targetId, 'targetId'), limit ?? 100)
   })
 
+  // 同步本地项目到远端 Hermes（SFTP 增量上传）
+  ipcMain.handle(
+    HERMES_IPC_CHANNELS.SYNC_PROJECT_TO_REMOTE,
+    async (_, targetId: string, workspaceId: string) => {
+      return await hermesIpcService.syncProjectToRemote(
+        requireString(targetId, 'targetId'),
+        requireString(workspaceId, 'workspaceId'),
+      )
+    },
+  )
+
   // 从远端会话创建并绑定 Proma Agent 会话（打开后恢复远端会话）
   ipcMain.handle(
     HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION,
