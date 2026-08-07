@@ -104,14 +104,18 @@ export function HermesSidebarProjects(): React.ReactElement | null {
     }
   }
 
-  /** 打开/恢复远端会话（创建并绑定 Proma 会话，同步历史） */
-  const handleOpenSession = async (session: HermesRemoteSessionSummary): Promise<void> => {
+  /** 打开/恢复远端会话：自动创建/复用同名本地项目文件夹，会话挂到其下（cwd 仍为远端项目目录） */
+  const handleOpenSession = async (project: HermesRemoteProject, session: HermesRemoteSessionSummary): Promise<void> => {
     setOpeningSessionId(session.id)
     try {
+      // 1. 本地 Agent 项目文件夹：同名已存在则复用，否则创建
+      const workspace = await getOrCreateWorkspaceForProject(project.label)
+      // 2. 在该项目文件夹下打开远端会话（同步历史）
       const created = await window.electronAPI.hermes.createRemoteSession({
         targetId: target.id,
         remoteSessionId: session.id,
         title: session.title || session.id,
+        workspaceId: workspace.id,
       })
       setAgentSessions(await window.electronAPI.listAgentSessions())
       setSettingsOpen(false)
@@ -198,7 +202,7 @@ export function HermesSidebarProjects(): React.ReactElement | null {
                             type="button"
                             className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[11px] text-foreground/60"
                             title={session.preview || session.title}
-                            onClick={() => void handleOpenSession(session)}
+                            onClick={() => void handleOpenSession(project, session)}
                           >
                             <MessageSquare size={10} className="shrink-0 text-muted-foreground" />
                             <span className="min-w-0 flex-1 truncate">{session.title || session.id}</span>
@@ -207,7 +211,7 @@ export function HermesSidebarProjects(): React.ReactElement | null {
                             type="button"
                             className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-foreground/10 group-hover/session:opacity-100"
                             title="打开会话"
-                            onClick={() => void handleOpenSession(session)}
+                            onClick={() => void handleOpenSession(project, session)}
                             disabled={openingSessionId === session.id}
                           >
                             {openingSessionId === session.id ? (
