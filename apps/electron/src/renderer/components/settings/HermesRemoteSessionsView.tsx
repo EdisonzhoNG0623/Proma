@@ -7,7 +7,7 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { FolderOpen, MessageSquare, RefreshCw, Play } from 'lucide-react'
+import { FolderOpen, MessageSquare, RefreshCw, Play, MessageSquarePlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { SettingsCard } from './primitives/SettingsCard'
@@ -24,29 +24,54 @@ function ProjectRow({
   project,
   sessions,
   onRefresh,
+  targetId,
 }: {
   project: HermesRemoteProject
   sessions: HermesRemoteSessionSummary[] | null
   onRefresh: () => void
+  targetId: string
 }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
   const [loadingSessions, setLoadingSessions] = React.useState(false)
-  const activeTargetId = useAtomValue(activeHermesTargetIdAtom)
+  const [startingChat, setStartingChat] = React.useState(false)
+  const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setAppMode = useSetAtom(appModeAtom)
+  const setActiveView = useSetAtom(activeViewAtom)
+  const setSettingsOpen = useSetAtom(settingsOpenAtom)
+  const openSession = useOpenSession()
 
   const toggle = async (): Promise<void> => {
-    if (!expanded && sessions === null && activeTargetId) {
+    if (!expanded && sessions === null) {
       setLoadingSessions(true)
       try {
-        const detail = await window.electronAPI.hermes.listRemoteProjectSessions(activeTargetId, project.id)
-        if (detail?.repos) {
-          // 首版展示项目级会话（previewSessions）；repo/lane 细分后续
-          onRefresh()
-        }
+        await window.electronAPI.hermes.listRemoteProjectSessions(targetId, project.id)
       } finally {
         setLoadingSessions(false)
       }
     }
     setExpanded((prev) => !prev)
+  }
+
+  /** 在此项目目录新建 Hermes 对话（cwd 走 Hermes 协议，无需 SSH） */
+  const handleNewChat = async (): Promise<void> => {
+    setStartingChat(true)
+    try {
+      const created = await window.electronAPI.hermes.createRemoteSession({
+        targetId,
+        remoteCwd: project.path || undefined,
+        title: `${project.label} 对话`,
+      })
+      setAgentSessions(await window.electronAPI.listAgentSessions())
+      setSettingsOpen(false)
+      setAppMode('agent')
+      setActiveView('conversations')
+      openSession('agent', created.id, created.title, { bypassSettingsGuard: true })
+    } catch (error) {
+      console.error('[Hermes] 在项目新建对话失败:', error)
+      window.alert(`新建对话失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setStartingChat(false)
+    }
   }
 
   return (
@@ -61,6 +86,17 @@ function ProjectRow({
           <Badge variant="secondary" className="text-xs">{project.sessionCount}</Badge>
         )}
         {loadingSessions && <span className="text-xs text-muted-foreground">加载中...</span>}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="ml-auto h-6 px-2 text-xs"
+          title="在此项目目录新建 Hermes 对话（无需 SSH）"
+          onClick={() => void handleNewChat()}
+          disabled={startingChat}
+        >
+          <MessageSquarePlus size={12} className="mr-1" />
+          {startingChat ? '创建中...' : '新建对话'}
+        </Button>
       </div>
       {expanded && (
         <div className="ml-6 border-l pl-3 pb-2">
@@ -228,6 +264,7 @@ export function HermesRemoteSessionsView(): React.ReactElement {
                 project={project}
                 sessions={sessions}
                 onRefresh={() => void refresh()}
+                targetId={target.id}
               />
             ))
           )}
