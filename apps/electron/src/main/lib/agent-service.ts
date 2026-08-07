@@ -136,6 +136,19 @@ const orchestrator = new AgentOrchestrator(adapter, eventBus)
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
 export { eventBus as agentEventBus }
 
+/** 响应 Hermes 交互请求（approval/clarify/sudo/secret）；渲染层经 IPC 调用 */
+export function respondHermesInteraction(input: {
+  sessionId: string
+  type: 'approval' | 'clarify' | 'sudo' | 'secret'
+  choice?: 'allow' | 'deny'
+  all?: boolean
+  answer?: string
+  password?: string
+  value?: string
+}): Promise<void> {
+  return hermesFacade.respondInteraction(input)
+}
+
 // 注册协作子会话 EventBus 阻塞事件监听
 import('./agent-collaboration-tools').then(({ registerCollaborationEventBus }) => {
   registerCollaborationEventBus(eventBus)

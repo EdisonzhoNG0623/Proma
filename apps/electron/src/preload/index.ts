@@ -1243,6 +1243,8 @@ export interface ElectronAPI {
     listRemoteFiles: (targetId: string, remotePath: string) => Promise<import('@proma/shared').HermesRemoteFileEntry[]>
     /** 读取远端文件内容 */
     readRemoteFile: (targetId: string, remotePath: string) => Promise<string>
+    /** 响应 Hermes 交互请求（approval/clarify/sudo/secret） */
+    respondInteraction: (input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => Promise<void>
   }
 }
 
@@ -2807,6 +2809,8 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_FILES, targetId, remotePath),
     readRemoteFile: (targetId: string, remotePath: string) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, targetId, remotePath),
+    respondInteraction: (input) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.RESPOND_INTERACTION, input),
   },
 }
 

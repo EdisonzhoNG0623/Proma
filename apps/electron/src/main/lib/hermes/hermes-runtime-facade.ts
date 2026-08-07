@@ -72,6 +72,8 @@ interface ActiveTurn {
   dashboardClient?: HermesDashboardWsClient
   apiServer?: HermesApiServerAdapter
   runId?: string
+  /** Hermes 远端运行时 session id（交互响应使用） */
+  hermesSessionId?: string
   transport: HermesTransport
 }
 
@@ -221,6 +223,7 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
       ...(binding.title ? { title: binding.title } : {}),
       ...(remoteCwd ? { cwd: remoteCwd } : {}),
     })
+    active.hermesSessionId = resolvedSession.sessionId
     console.log('[Hermes] 会话模式:', session ? 'resume' : 'create', 'sid=', resolvedSession.sessionId, 'created=', resolvedSession.created)
     if (resolvedSession.created) {
       this.deps.persistRemoteSessionId(input.sessionId, resolvedSession.storedSessionId)
@@ -436,6 +439,50 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     // 断开连接：dashboard WS close 会 reject pending，SSE handle 由 transport dispose 关闭
     active.dashboardClient?.close()
     this.activeTurns.delete(sessionId)
+  }
+
+  /**
+   * 响应 Hermes 交互请求（approval/clarify/sudo/secret）。
+   * 仅 Dashboard 活跃 turn 中可响应（approval.respond 等需要 live session）。
+   */
+  async respondInteraction(input: {
+    sessionId: string
+    type: 'approval' | 'clarify' | 'sudo' | 'secret'
+    choice?: 'allow' | 'deny'
+    all?: boolean
+    answer?: string
+    password?: string
+    value?: string
+  }): Promise<void> {
+    const active = this.activeTurns.get(input.sessionId)
+    if (!active?.dashboard) {
+      throw new HermesError('会话不在活跃状态（仅 Dashboard 连接中可响应交互）', 'unknown')
+    }
+    if (!active.hermesSessionId) {
+      throw new HermesError('缺少远端会话 ID，无法响应', 'unknown')
+    }
+    const remoteSessionId = active.hermesSessionId
+    switch (input.type) {
+      case 'approval':
+        await active.dashboard.respondApproval({
+          sessionId: remoteSessionId,
+          choice: input.choice ?? 'allow',
+          all: input.all,
+        })
+        break
+      case 'clarify':
+        if (!input.answer) throw new HermesError('缺少回答内容', 'unknown')
+        await active.dashboard.respondClarify({ sessionId: remoteSessionId, answer: input.answer })
+        break
+      case 'sudo':
+        if (!input.password) throw new HermesError('缺少 sudo 密码', 'unknown')
+        await active.dashboard.respondSudo({ sessionId: remoteSessionId, password: input.password })
+        break
+      case 'secret':
+        if (!input.value) throw new HermesError('缺少密钥', 'unknown')
+        await active.dashboard.respondSecret({ sessionId: remoteSessionId, value: input.value })
+        break
+    }
   }
 
   async interruptQuery(sessionId: string): Promise<void> {

@@ -249,6 +249,8 @@ export const HERMES_IPC_CHANNELS = {
   LIST_REMOTE_FILES: 'hermes:list-remote-files',
   /** 读取远端文件内容 */
   READ_REMOTE_FILE: 'hermes:read-remote-file',
+  /** 响应 Hermes 交互请求（approval/clarify/sudo/secret） */
+  RESPOND_INTERACTION: 'hermes:respond-interaction',
 } as const
 
 /**

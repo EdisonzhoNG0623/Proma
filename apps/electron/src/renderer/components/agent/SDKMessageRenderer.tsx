@@ -50,6 +50,7 @@ import { UserAvatar } from '@/components/chat/UserAvatar'
 import { CopyButton } from '@/components/chat/CopyButton'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
@@ -732,7 +733,124 @@ export function SDKMessageRenderer({
     return null
   }
 
+  // Hermes 交互请求（approval/clarify/sudo/secret）：渲染确认/输入卡片，回复走 hermes.respondInteraction
+  if (
+    msgType === 'hermes_approval_request' ||
+    msgType === 'hermes_clarify_request' ||
+    msgType === 'hermes_sudo_request' ||
+    msgType === 'hermes_secret_request'
+  ) {
+    return <HermesInteractionCard message={message as HermesInteractionMessage} />
+  }
+
   return null
+}
+
+// ===== Hermes 交互卡片 =====
+
+/** Hermes 交互请求消息（mapper 透传） */
+interface HermesInteractionMessage {
+  type: string
+  requestId?: string
+  message?: string
+  session_id?: string
+  tool_name?: string
+  tool_input?: unknown
+  question?: string
+  error?: { message: string }
+}
+
+function HermesInteractionCard({ message }: { message: HermesInteractionMessage }): React.ReactElement {
+  const [responding, setResponding] = React.useState(false)
+  const [done, setDone] = React.useState(false)
+  const [text, setText] = React.useState('')
+  const [error, setError] = React.useState<string | null>(null)
+
+  const kind = message.type === 'hermes_approval_request' ? 'approval'
+    : message.type === 'hermes_clarify_request' ? 'clarify'
+      : message.type === 'hermes_sudo_request' ? 'sudo'
+        : 'secret'
+  const label = kind === 'approval' ? '远端请求批准' : kind === 'clarify' ? '远端提问' : kind === 'sudo' ? '远端请求 sudo 密码' : '远端请求密钥'
+  const description = message.message || message.question || '请确认后继续'
+
+  const respond = async (payload: { type: 'approval' | 'clarify' | 'sudo' | 'secret'; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }): Promise<void> => {
+    setResponding(true)
+    setError(null)
+    try {
+      await window.electronAPI.hermes.respondInteraction({
+        sessionId: message.session_id ?? '',
+        ...payload,
+      })
+      setDone(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setResponding(false)
+    }
+  }
+
+  return (
+    <Message from="assistant">
+      <MessageContent>
+        <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-[11px]">{label}</Badge>
+            {message.tool_name && <span className="text-xs text-muted-foreground">工具：{message.tool_name}</span>}
+          </div>
+          <div className="mt-1.5 text-sm">{description}</div>
+          {message.tool_input !== undefined && (
+            <pre className="mt-1.5 max-h-32 overflow-auto rounded bg-background/60 p-2 text-xs text-muted-foreground">
+              {String(JSON.stringify(message.tool_input, null, 2))}
+            </pre>
+          )}
+          {done ? (
+            <div className="mt-2 text-xs text-muted-foreground">✓ 已响应</div>
+          ) : kind === 'approval' ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button size="sm" disabled={responding} onClick={() => void respond({ type: 'approval', choice: 'allow' })}>
+                {responding ? '响应中...' : '批准'}
+              </Button>
+              <Button size="sm" variant="outline" disabled={responding} onClick={() => void respond({ type: 'approval', choice: 'deny' })}>
+                拒绝
+              </Button>
+              <Button size="sm" variant="ghost" disabled={responding} onClick={() => void respond({ type: 'approval', choice: 'allow', all: true })}>
+                全部批准
+              </Button>
+            </div>
+          ) : (
+            <div className="mt-2 flex gap-2">
+              <Input
+                type={kind === 'secret' ? 'password' : 'text'}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder={kind === 'clarify' ? '输入回答...' : kind === 'sudo' ? '输入 sudo 密码' : '输入密钥'}
+                className="h-8 text-sm"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && text.trim()) {
+                    void respond({
+                      type: kind as 'clarify' | 'sudo' | 'secret',
+                      ...(kind === 'clarify' ? { answer: text } : {}),
+                      ...(kind === 'sudo' ? { password: text } : {}),
+                      ...(kind === 'secret' ? { value: text } : {}),
+                    })
+                  }
+                }}
+              />
+              <Button size="sm" disabled={responding || !text.trim()} onClick={() => void respond({
+                type: kind as 'clarify' | 'sudo' | 'secret',
+                ...(kind === 'clarify' ? { answer: text } : {}),
+                ...(kind === 'sudo' ? { password: text } : {}),
+                ...(kind === 'secret' ? { value: text } : {}),
+              })}>
+                {responding ? '提交中...' : '提交'}
+              </Button>
+            </div>
+          )}
+          {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
+        </div>
+      </MessageContent>
+    </Message>
+  )
 }
 
 // ===== 附件解析 =====
