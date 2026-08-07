@@ -2981,8 +2981,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         </Tooltip>
       ),
     }] : []),
-    { key: 'permission-mode', node: <PermissionModeSelector sessionId={sessionId} /> },
-    {
+    ...(isHermesRemoteSession ? [] : [{ key: 'permission-mode', node: <PermissionModeSelector sessionId={sessionId} /> }]),
+    ...(isHermesRemoteSession ? [] : [{
       key: 'thinking',
       node: (
         <AgentThinkingPopover
@@ -3001,9 +3001,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           } : undefined}
         />
       ),
-    },
+    }]),
     { key: 'speech', node: <SpeechButton className={inputToolbarButtonClass} voiceInputId={agentVoiceInputId} /> },
-    {
+    ...(isHermesRemoteSession ? [] : [{
       key: 'attach-content',
       node: (
         <Tooltip>
@@ -3022,7 +3022,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           <TooltipContent side="top"><p>附加文件或文件夹</p></TooltipContent>
         </Tooltip>
       ),
-    },
+    }]),
     {
       key: 'context-usage',
       node: (
