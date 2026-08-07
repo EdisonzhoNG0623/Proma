@@ -1251,6 +1251,10 @@ export class AgentOrchestrator {
     // 4. 读取已有的 SDK session ID（用于 resume）
     let existingSdkSessionId = sessionMeta?.sdkSessionId
 
+    // 4.0 Hermes Remote：远端会话由 hermesRemoteSessionId 管理（Hermes 端自带完整历史），
+    //     已绑定远端会话时不再向 Hermes 回填 Proma 本地上下文（避免每条消息都注入 conversation_history）
+    const isHermesResumed = isHermesRemote && Boolean(sessionMeta?.hermesRemoteSessionId)
+
     // 4.1 检测回退后的 resume 截断点（快照回退功能）
     let rewindResumeAt: string | undefined
     if (sessionMeta?.resumeAtMessageUuid) {
@@ -1459,12 +1463,14 @@ export class AgentOrchestrator {
       const isCompactCommand = userMessage.trim() === '/compact'
       const finalPrompt = isCompactCommand
         ? '/compact'
-        : existingSdkSessionId
+        : (existingSdkSessionId || isHermesResumed)
           ? contextualMessage
           : buildContextPrompt(sessionId, contextualMessage, { agentCwd, workspaceSlug })
 
       if (existingSdkSessionId) {
         console.log(`[Agent 编排] 使用 resume 模式，SDK session ID: ${existingSdkSessionId}`)
+      } else if (isHermesResumed) {
+        console.log('[Agent 编排] Hermes 已恢复远端会话，不注入本地上下文（Hermes 端自带历史）')
       } else if (finalPrompt !== contextualMessage) {
         console.log(`[Agent 编排] 无 resume，已回填历史上下文（最近 ${MAX_CONTEXT_MESSAGES} 条消息）`)
       }

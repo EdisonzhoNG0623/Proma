@@ -86,6 +86,7 @@ export type MessageGroup =
       /** 首次创建该 group 的消息，用于压缩状态原位更新时保持稳定身份。 */
       identityMessage: SDKSystemMessage
     }
+  | { type: 'hermes-interaction'; message: SDKMessage }
   | AssistantTurn
 
 /**
@@ -187,6 +188,15 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
       } else if (currentTurn) {
         currentTurn.turnMessages.push(msg)
       }
+    } else if (
+      msg.type === 'hermes_approval_request' ||
+      msg.type === 'hermes_clarify_request' ||
+      msg.type === 'hermes_sudo_request' ||
+      msg.type === 'hermes_secret_request'
+    ) {
+      // Hermes 交互请求：独立成组渲染（确认/输入卡片），不归入 assistant turn
+      flushTurn()
+      groups.push({ type: 'hermes-interaction', message: msg })
     } else {
       // result, tool_progress 等 → 归入当前 turn
       // prompt_suggestion 不属于对话转录，不入 turn，避免被当作文本附加到助手消息末尾
@@ -280,6 +290,9 @@ export function getGroupPreview(group: MessageGroup): string {
     if (compactStatus === 'failed') return '上下文压缩失败'
     if (compactStatus === 'noop') return group.message.message ?? '当前上下文无需压缩'
     if (group.message.subtype === 'permission_denied') return '权限检查已拒绝操作'
+    return ''
+  }
+  if (group.type === 'hermes-interaction') {
     return ''
   }
   // assistant-turn：收集所有 text 块

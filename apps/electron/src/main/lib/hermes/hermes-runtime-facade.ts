@@ -13,7 +13,7 @@
  * - 会话绑定（targetId/profile/remoteSessionId）由调用方（agent-session-manager）持久化。
  */
 
-import type { AgentProviderAdapter, AgentQueryInput, SDKMessage } from '@proma/shared'
+import type { AgentProviderAdapter, AgentQueryInput, SDKMessage, SDKUserMessageInput } from '@proma/shared'
 import { HermesError } from './hermes-errors'
 import { HermesAuthService, buildTicketWsUrl, canSubmitPasswordTo } from './hermes-auth'
 import { HermesDashboardAdapter, type HermesSessionResult } from './hermes-dashboard-adapter'
@@ -448,6 +448,22 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
    * 响应 Hermes 交互请求（approval/clarify/sudo/secret）。
    * 仅 Dashboard 活跃 turn 中可响应（approval.respond 等需要 live session）。
    */
+  /**
+   * Hermes 会话 turn 中追加消息：Hermes prompt.submit 支持 mid-turn interrupt/排队，
+   * 追加到活跃 turn 的同一 WS 连接。
+   */
+  async sendQueuedMessage(sessionId: string, message: SDKUserMessageInput): Promise<void> {
+    const active = this.activeTurns.get(sessionId)
+    if (!active?.dashboard || !active.hermesSessionId) {
+      throw new HermesError('会话不在活跃状态，无法追加消息', 'unknown')
+    }
+    const text = message?.message?.content
+    if (!text) {
+      throw new HermesError('追加消息为空', 'unknown')
+    }
+    await active.dashboard.submitPrompt(active.hermesSessionId, text)
+  }
+
   async respondInteraction(input: {
     sessionId: string
     type: 'approval' | 'clarify' | 'sudo' | 'secret'

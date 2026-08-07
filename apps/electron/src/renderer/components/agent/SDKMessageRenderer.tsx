@@ -1531,7 +1531,12 @@ export function getGroupId(group: MessageGroup): string {
     }
     return messageIdCache.get(group.identityMessage)!
   }
-  // assistant-turn：取首条 assistant 消息的 uuid
+  // assistant-turn：取首条 assistant 消息的 uuid（hermes-interaction 用消息 uuid）
+  if (group.type === 'hermes-interaction') {
+    const raw = group.message as unknown as { uuid?: string }
+    if (raw.uuid) return raw.uuid
+    return `hermes-interaction-${fallbackIdCounter++}`
+  }
   const first = group.assistantMessages[0]
   if (first?.uuid) return first.uuid
   const stableKey = first ? (first as unknown as Record<string, unknown>)._promaStableKey : undefined
@@ -1565,6 +1570,14 @@ export function MessageGroupRenderer({ group, allMessages, basePath, onFork, onR
     if (getSDKCompactStatus(group.message)) return <div data-message-id={groupId}><CompactStatusNotice message={group.message} /></div>
     if (subtype === 'permission_denied') return <div data-message-id={groupId}><PermissionDeniedNotice message={group.message} /></div>
     return null
+  }
+
+  if (group.type === 'hermes-interaction') {
+    return (
+      <div data-message-id={groupId} data-message-role="assistant">
+        <HermesInteractionCard message={group.message as HermesInteractionMessage} />
+      </div>
+    )
   }
 
   // assistant-turn
