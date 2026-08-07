@@ -1,6 +1,6 @@
 {
   "name": "@proma/electron",
-  "version": "0.16.9-hermes.38",
+  "version": "0.16.10-hermes.1",
   "description": "Proma next gen ai software with general agents - Electron App",
   "main": "dist/main.cjs",
   "author": {
