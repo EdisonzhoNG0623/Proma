@@ -176,7 +176,7 @@ export function HermesSidebarProjects(): React.ReactElement | null {
   }
 
   return (
-    <div className="mt-1 flex-shrink-0 border-t border-foreground/[0.06] pt-1">
+    <div className="sticky bottom-0 z-10 mt-1 flex-shrink-0 border-t border-foreground/[0.06] bg-[hsl(var(--sidebar-surface))] pt-1">
       {/* 可拖动分割线：调整 Hermes 远端区块高度（项目区 flex 自动伸缩） */}
       <div
         className="group/resizer relative -mx-1 mb-0.5 flex h-3 cursor-row-resize items-center justify-center"
