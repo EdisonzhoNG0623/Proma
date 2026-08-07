@@ -13,6 +13,13 @@ directories:
   output: out
   buildResources: resources
 
+# 内置便携 Git（免安装版开箱即用：无系统 Git 也能跑本地 Agent）
+extraResources:
+  - from: resources/mingit
+    to: mingit
+    filter:
+      - "**/*"
+
 # 压缩配置
 compression: normal
 

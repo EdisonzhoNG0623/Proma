@@ -9,6 +9,22 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import type { GitRuntimeStatus, GitRepoStatus } from '@proma/shared'
 import { getGitForWindowsInstallPath } from './windows-env'
+import { getBundledGitDir } from './git-bash-detector'
+
+/**
+ * 获取内置便携 Git 的 git.exe 路径。
+ */
+function getBundledGitPath(): string | null {
+  const dir = getBundledGitDir()
+  if (!dir) return null
+  const candidates = [join(dir, 'cmd', 'git.exe'), join(dir, 'mingw64', 'bin', 'git.exe')]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate
+    }
+  }
+  return null
+}
 
 /**
  * 从系统 PATH 查找 Git
@@ -16,6 +32,12 @@ import { getGitForWindowsInstallPath } from './windows-env'
  * @returns Git 可执行路径，如果未找到返回 null
  */
 function findGitPath(): string | null {
+  // 策略 0：内置便携 Git（随应用打包，优先）
+  const bundledGit = getBundledGitPath()
+  if (bundledGit) {
+    return bundledGit
+  }
+
   try {
     const command = process.platform === 'win32' ? 'where git' : 'which git'
 

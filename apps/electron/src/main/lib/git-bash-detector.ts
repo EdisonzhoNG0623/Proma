@@ -7,6 +7,7 @@
  * - 提供环境可用性状态
  *
  * 检测策略：
+ * 0. 内置便携 Git Bash（随应用打包，优先）
  * 1. 常见安装路径（Program Files）
  * 2. 系统 PATH 查找（where bash）
  * 3. 从注册表读取 Git for Windows 安装路径
@@ -17,6 +18,29 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { GitBashStatus } from '@proma/shared'
 import { getGitForWindowsInstallPath } from './windows-env'
+
+/**
+ * 获取随应用打包的内置 Git 目录（resources/mingit）。
+ *
+ * 优先 process.resourcesPath（打包后），回退开发模式源码 resources 目录。
+ *
+ * @returns 内置 Git 目录路径；未找到返回 null
+ */
+export function getBundledGitDir(): string | null {
+  const candidates: string[] = []
+  if (process.resourcesPath) {
+    candidates.push(join(process.resourcesPath, 'mingit'))
+  }
+  // 开发模式：apps/electron/resources/mingit
+  candidates.push(join(process.cwd(), 'resources', 'mingit'))
+
+  for (const dir of candidates) {
+    if (dir && existsSync(join(dir, 'cmd', 'git.exe')) && existsSync(join(dir, 'bin', 'bash.exe'))) {
+      return dir
+    }
+  }
+  return null
+}
 
 /**
  * 获取 Git for Windows 常见安装路径列表
@@ -133,6 +157,23 @@ export async function detectGitBash(): Promise<GitBashStatus> {
       path: null,
       version: null,
       error: '非 Windows 平台',
+    }
+  }
+
+  // 策略 0：内置便携 Git Bash（随应用打包，开箱即用）
+  const bundledDir = getBundledGitDir()
+  if (bundledDir) {
+    const bundledBash = join(bundledDir, 'bin', 'bash.exe')
+    const version = verifyBashPath(bundledBash)
+    if (version) {
+      console.log(`[Git Bash 检测] 找到内置 Git Bash: ${bundledBash} (${version})`)
+      return {
+        available: true,
+        path: bundledBash,
+        version,
+        error: null,
+        bundled: true,
+      }
     }
   }
 

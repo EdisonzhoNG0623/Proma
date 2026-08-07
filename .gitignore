@@ -63,3 +63,5 @@ hermes-dev.log
 hermes-mock.log
 hermes-mock-port.json
 start-hermes-mock.tmp.ts
+# 内置便携 Git（构建时由本地目录提供，不提交仓库）
+apps/electron/resources/mingit/

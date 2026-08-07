@@ -237,6 +237,8 @@ export interface GitBashStatus {
   version: string | null
   /** 错误信息（如果不可用）*/
   error: string | null
+  /** 是否为随应用打包的内置 Git Bash */
+  bundled?: boolean
 }
 
 /** 系统编辑器应用信息 */
