@@ -18,6 +18,7 @@ import type {
   HermesSetDashboardPasswordInput,
 } from '@proma/shared'
 import { hermesIpcService } from './hermes-ipc-service'
+import { respondHermesInteraction } from '../agent-service'
 import {
   createAgentSession,
   updateAgentSessionMeta,
@@ -150,6 +151,16 @@ export function registerHermesIpcHandlers(): void {
   ipcMain.handle(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, async (_, targetId: string, remotePath: string) => {
     return await hermesIpcService.readRemoteFile(requireString(targetId, 'targetId'), requireString(remotePath, 'remotePath'))
   })
+
+  // 响应 Hermes 交互请求（approval/clarify/sudo/secret）
+  ipcMain.handle(
+    HERMES_IPC_CHANNELS.RESPOND_INTERACTION,
+    async (_, input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => {
+      if (!input || typeof input !== 'object') throw new Error('input 必填')
+      requireString(input.sessionId, 'sessionId')
+      return await respondHermesInteraction(input)
+    },
+  )
 
   // 从远端会话创建并绑定 Proma Agent 会话（打开后恢复远端会话；或新建远端会话并绑定目录）
   ipcMain.handle(
