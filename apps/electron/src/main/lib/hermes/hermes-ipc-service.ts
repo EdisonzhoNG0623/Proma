@@ -29,8 +29,10 @@ import { probeHermesCapabilities } from './hermes-capability-probe'
 import { parseAuthProviders } from './hermes-auth'
 import { HermesError, redactSecrets } from './hermes-errors'
 import { HermesAuthService, buildTicketWsUrl, canSubmitPasswordTo } from './hermes-auth'
-import { HermesDashboardAdapter, type HermesRemoteProject, type HermesRemoteSessionSummary } from './hermes-dashboard-adapter'
+import { HermesDashboardAdapter, type HermesRemoteProject, type HermesRemoteSessionSummary, type HermesHistoryMessage } from './hermes-dashboard-adapter'
 import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
+import { appendSDKMessages } from '../agent-session-manager'
+import type { SDKMessage } from '@proma/shared'
 import type { HermesTransport } from './transport/hermes-transport'
 
 /**
@@ -38,6 +40,33 @@ import type { HermesTransport } from './transport/hermes-transport'
  *
  * 默认使用全局 store 单例；测试可注入临时目录的 store 实例以隔离数据。
  */
+
+/** 将远端历史消息转为 Proma SDKMessage（user/assistant 文本） */
+export function historyToSDKMessage(
+  message: HermesHistoryMessage,
+  promaSessionId: string,
+): SDKMessage {
+  if (message.role === 'user') {
+    return {
+      type: 'user',
+      message: {
+        content: [{ type: 'text', text: message.text }],
+      },
+      parent_tool_use_id: null,
+      session_id: promaSessionId,
+    } as SDKMessage
+  }
+  // assistant / system / tool 统一按 assistant 文本展示（首版简化）
+  return {
+    type: 'assistant',
+    message: {
+      content: [{ type: 'text', text: message.text }],
+    },
+    parent_tool_use_id: null,
+    session_id: promaSessionId,
+  } as SDKMessage
+}
+
 export class HermesIpcService {
   private readonly targetStore: typeof hermesTargetStore
   private readonly credentialStore: typeof hermesCredentialStore
@@ -329,6 +358,45 @@ export class HermesIpcService {
     const session = await this.openDashboardAdapter(target)
     try {
       return await session.adapter.listSessions(limit)
+    } finally {
+      session.close()
+    }
+  }
+
+  /**
+   * 拉取远端会话历史并写入 Proma 会话（打开远端会话后展示历史消息）。
+   *
+   * 流程：resume 远端会话 → session.history → 转 SDKMessage → appendSDKMessages。
+   */
+  async hydrateRemoteSessionHistory(
+    promaSessionId: string,
+    targetId: string,
+    remoteSessionId: string,
+    profile?: string,
+  ): Promise<number> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) {
+      throw new Error('Hermes target 不存在')
+    }
+    const session = await this.openDashboardAdapter(target)
+    try {
+      // resume 远端会话拿 runtime session id
+      const resumed = await session.adapter.resumeSession(remoteSessionId, {
+        profile,
+        cols: 96,
+      }).catch(() => null)
+      if (!resumed) {
+        return 0
+      }
+      const history = await session.adapter.getSessionHistory(resumed.sessionId)
+      if (history.length === 0) {
+        return 0
+      }
+      const sdkMessages: SDKMessage[] = history.map((message) =>
+        historyToSDKMessage(message, promaSessionId),
+      )
+      appendSDKMessages(promaSessionId, sdkMessages)
+      return history.length
     } finally {
       session.close()
     }

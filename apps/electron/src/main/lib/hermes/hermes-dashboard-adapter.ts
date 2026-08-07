@@ -137,6 +137,35 @@ export function parseSessionList(body: unknown): HermesRemoteSessionSummary[] {
   })
 }
 
+/** 远端历史消息（session.history 简化格式） */
+export interface HermesHistoryMessage {
+  role: 'user' | 'assistant' | 'tool' | 'system'
+  text: string
+}
+
+/** 解析 session.history 响应 */
+export function parseHistoryMessages(body: unknown): HermesHistoryMessage[] {
+  if (!body || typeof body !== 'object') {
+    return []
+  }
+  const messages = (body as { messages?: unknown }).messages
+  if (!Array.isArray(messages)) {
+    return []
+  }
+  return messages.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const m = item as { role?: unknown; text?: unknown }
+    if (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'tool' && m.role !== 'system') {
+      return []
+    }
+    const text = typeof m.text === 'string' ? m.text : ''
+    if (!text.trim()) {
+      return []
+    }
+    return [{ role: m.role, text }]
+  })
+}
+
 /**
  * Dashboard Adapter
  */
@@ -249,6 +278,14 @@ export class HermesDashboardAdapter {
   async listSessions(limit = 200): Promise<HermesRemoteSessionSummary[]> {
     const result = await this.client.request<unknown>('session.list', { limit })
     return parseSessionList(result)
+  }
+
+  /** 获取远端会话历史（session.history，需活跃 runtime session） */
+  async getSessionHistory(sessionId: string): Promise<HermesHistoryMessage[]> {
+    const result = await this.client.request<unknown>('session.history', {
+      session_id: sessionId,
+    })
+    return parseHistoryMessages(result)
   }
 }
 

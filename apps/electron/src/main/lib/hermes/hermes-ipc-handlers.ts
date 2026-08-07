@@ -18,7 +18,12 @@ import type {
   HermesSetDashboardPasswordInput,
 } from '@proma/shared'
 import { hermesIpcService } from './hermes-ipc-service'
-import { createAgentSession, updateAgentSessionMeta } from '../agent-session-manager'
+import {
+  createAgentSession,
+  updateAgentSessionMeta,
+  listAgentSessions,
+  deleteAgentSession,
+} from '../agent-session-manager'
 
 /** 校验字符串参数 */
 function requireString(value: unknown, name: string): string {
@@ -127,6 +132,18 @@ export function registerHermesIpcHandlers(): void {
       if (!input || typeof input !== 'object') throw new Error('input 必填')
       requireString(input.targetId, 'targetId')
       requireString(input.remoteSessionId, 'remoteSessionId')
+
+      // 去重：同一 target + 远端会话已绑定过 Proma 会话时复用，避免重复创建
+      const existing = listAgentSessions().find(
+        (session) =>
+          session.agentRuntime === 'hermes-remote' &&
+          session.hermesTargetId === input.targetId &&
+          session.hermesRemoteSessionId === input.remoteSessionId,
+      )
+      if (existing) {
+        return existing
+      }
+
       // 创建 Hermes Remote 会话（channelId 用占位 'hermes-remote'，runtime 为 hermes-remote）
       const session = createAgentSession(
         input.title || 'Hermes 远端会话',
@@ -140,7 +157,41 @@ export function registerHermesIpcHandlers(): void {
         hermesTargetId: input.targetId,
         hermesRemoteSessionId: input.remoteSessionId,
       })
+      // 异步拉取远端历史写入会话（不阻塞创建返回；打开后可见历史）
+      hermesIpcService
+        .hydrateRemoteSessionHistory(session.id, input.targetId, input.remoteSessionId)
+        .catch((error) => {
+          console.error('[Hermes] 加载远端历史失败:', error instanceof Error ? error.message : String(error))
+        })
       return session
+    },
+  )
+
+  // 清理重复的远端会话（同一 target + 远端会话保留最早创建的一个）
+  ipcMain.handle(
+    HERMES_IPC_CHANNELS.DEDUPE_REMOTE_SESSIONS,
+    async (): Promise<number> => {
+      const sessions = listAgentSessions()
+      const seen = new Set<string>()
+      const toDelete: string[] = []
+      for (const session of sessions) {
+        if (session.agentRuntime !== 'hermes-remote') continue
+        if (!session.hermesTargetId || !session.hermesRemoteSessionId) continue
+        const key = `${session.hermesTargetId}:${session.hermesRemoteSessionId}`
+        if (seen.has(key)) {
+          toDelete.push(session.id)
+        } else {
+          seen.add(key)
+        }
+      }
+      for (const id of toDelete) {
+        try {
+          deleteAgentSession(id)
+        } catch (error) {
+          console.error(`[Hermes] 清理重复会话失败: ${id}`, error)
+        }
+      }
+      return toDelete.length
     },
   )
 }

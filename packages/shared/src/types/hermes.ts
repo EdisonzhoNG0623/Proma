@@ -239,6 +239,8 @@ export const HERMES_IPC_CHANNELS = {
   LIST_REMOTE_SESSIONS: 'hermes:list-remote-sessions',
   /** 从远端会话创建并绑定 Proma Agent 会话 */
   CREATE_REMOTE_SESSION: 'hermes:create-remote-session',
+  /** 清理重复的远端会话（返回删除数量） */
+  DEDUPE_REMOTE_SESSIONS: 'hermes:dedupe-remote-sessions',
 } as const
 
 /**

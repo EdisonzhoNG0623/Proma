@@ -12,6 +12,7 @@ import {
   parseSessionResult,
   parseProjectTree,
   parseSessionList,
+  parseHistoryMessages,
 } from './hermes-dashboard-adapter'
 import { HermesError } from './hermes-errors'
 
@@ -301,6 +302,21 @@ describe('parseProjectTree / parseSessionList 项目视图解析', () => {
   test('Given 畸形 session.list When 解析 Then 返回空列表', () => {
     expect(parseSessionList(null)).toEqual([])
     expect(parseSessionList({})).toEqual([])
+  })
+
+  test('Given session.history 响应 When 解析 Then 返回消息列表', () => {
+    const messages = parseHistoryMessages({
+      count: 2,
+      messages: [
+        { role: 'user', text: '你好' },
+        { role: 'assistant', text: '你好！' },
+        { role: 'tool', text: '' }, // 空文本过滤
+        { role: 'unknown', text: 'x' }, // 非法角色过滤
+      ],
+    })
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toEqual({ role: 'user', text: '你好' })
+    expect(messages[1]).toEqual({ role: 'assistant', text: '你好！' })
   })
 })
 
