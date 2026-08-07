@@ -231,6 +231,12 @@ export const HERMES_IPC_CHANNELS = {
   DELETE_CREDENTIAL: 'hermes:delete-credential',
   /** 探测 target 的登录 provider 列表（supports_password） */
   GET_AUTH_PROVIDERS: 'hermes:get-auth-providers',
+  /** 获取远端项目树（projects.tree） */
+  LIST_REMOTE_PROJECTS: 'hermes:list-remote-projects',
+  /** 获取某项目完整会话分组（projects.project_sessions） */
+  LIST_REMOTE_PROJECT_SESSIONS: 'hermes:list-remote-project-sessions',
+  /** 获取远端会话列表（session.list） */
+  LIST_REMOTE_SESSIONS: 'hermes:list-remote-sessions',
 } as const
 
 /**
@@ -286,4 +292,34 @@ export interface HermesConnectionTestResult {
   supportsPassword: boolean
   version: string | null
   error: string | null
+}
+
+/** 远端项目（projects.tree 中的项目节点） */
+export interface HermesRemoteProject {
+  id: string
+  label: string
+  path: string
+  isAuto?: boolean
+  isNoProject?: boolean
+  sessionCount?: number
+  lastActive?: number
+  repos?: unknown[]
+  previewSessions?: unknown[]
+}
+
+/** projects.tree 响应 */
+export interface HermesProjectTree {
+  projects: HermesRemoteProject[]
+  activeId: string | null
+  scopedSessionIds: string[]
+}
+
+/** session.list 会话摘要 */
+export interface HermesRemoteSessionSummary {
+  id: string
+  title: string
+  preview: string
+  startedAt: number
+  messageCount: number
+  source: string
 }

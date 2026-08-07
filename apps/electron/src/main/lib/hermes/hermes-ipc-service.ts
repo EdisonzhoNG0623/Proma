@@ -24,10 +24,14 @@ import type {
 } from '@proma/shared'
 import { hermesTargetStore } from './hermes-target-store'
 import { hermesCredentialStore, type HermesCredentialKind } from './hermes-credential-store'
-import { buildHermesTransport } from './hermes-connection'
+import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes-connection'
 import { probeHermesCapabilities } from './hermes-capability-probe'
 import { parseAuthProviders } from './hermes-auth'
 import { redactSecrets } from './hermes-errors'
+import { HermesAuthService, buildTicketWsUrl, canSubmitPasswordTo } from './hermes-auth'
+import { HermesDashboardAdapter, type HermesRemoteProject, type HermesRemoteSessionSummary } from './hermes-dashboard-adapter'
+import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
+import type { HermesTransport } from './transport/hermes-transport'
 
 /**
  * Hermes IPC 服务
@@ -199,6 +203,100 @@ export class HermesIpcService {
       return []
     } finally {
       transport.dispose()
+    }
+  }
+
+  /**
+   * 打开临时 Dashboard WS 连接（用于项目/会话视图 RPC）。
+   *
+   * 复用认证链路：password-cookie 登录 → WS ticket → 连接。
+   * 返回 adapter 与关闭函数；调用方负责 finally close。
+   */
+  private async openDashboardAdapter(target: HermesTarget): Promise<{
+    adapter: HermesDashboardAdapter
+    transport: HermesTransport
+    close: () => void
+  }> {
+    const transport = await buildHermesTransport(target)
+    try {
+      const auth = new HermesAuthService(transport)
+      const mode = target.auth.dashboardMode ?? 'password-cookie'
+      if (mode === 'password-cookie' && auth.cookieJarFor(target.id).size === 0) {
+        const secret = target.auth.dashboardCredentialRef
+          ? this.credentialStore.getCredential(target.auth.dashboardCredentialRef)
+          : null
+        if (!secret) {
+          throw new Error('缺少 Hermes 账号密码凭据，请在 Hermes 设置中登录')
+        }
+        const credential = parseDashboardPasswordSecret(secret)
+        if (!canSubmitPasswordTo(transport.baseUrl)) {
+          throw new Error('http 非 loopback 地址不允许提交 Hermes 密码（请使用 HTTPS 或 SSH Tunnel）')
+        }
+        await auth.passwordLogin(target.id, {
+          provider: target.auth.dashboardProvider ?? 'basic',
+          username: credential.username,
+          password: credential.password,
+        })
+      }
+      const ticket = await auth.mintWsTicket(target.id)
+      const wsUrl = buildTicketWsUrl(transport.baseUrl, ticket)
+      const client = new HermesDashboardWsClient((url) => transport.connectWebSocket(url))
+      await client.connect(wsUrl)
+      const adapter = new HermesDashboardAdapter(client)
+      return {
+        adapter,
+        transport,
+        close: () => {
+          client.close()
+          transport.dispose()
+        },
+      }
+    } catch (error) {
+      transport.dispose()
+      throw error
+    }
+  }
+
+  /** 获取远端项目树（projects.tree） */
+  async listRemoteProjects(targetId: string): Promise<HermesRemoteProject[]> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) {
+      throw new Error('Hermes target 不存在')
+    }
+    const session = await this.openDashboardAdapter(target)
+    try {
+      const tree = await session.adapter.listProjects()
+      return tree.projects
+    } finally {
+      session.close()
+    }
+  }
+
+  /** 获取某项目的完整会话分组（projects.project_sessions） */
+  async listRemoteProjectSessions(targetId: string, projectId: string): Promise<HermesRemoteProject | null> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) {
+      throw new Error('Hermes target 不存在')
+    }
+    const session = await this.openDashboardAdapter(target)
+    try {
+      return await session.adapter.listProjectSessions(projectId)
+    } finally {
+      session.close()
+    }
+  }
+
+  /** 获取远端会话列表（session.list） */
+  async listRemoteSessions(targetId: string, limit = 100): Promise<HermesRemoteSessionSummary[]> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) {
+      throw new Error('Hermes target 不存在')
+    }
+    const session = await this.openDashboardAdapter(target)
+    try {
+      return await session.adapter.listSessions(limit)
+    } finally {
+      session.close()
     }
   }
 }
