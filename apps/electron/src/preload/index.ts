@@ -1245,6 +1245,8 @@ export interface ElectronAPI {
     readRemoteFile: (targetId: string, remotePath: string) => Promise<string>
     /** 响应 Hermes 交互请求（approval/clarify/sudo/secret） */
     respondInteraction: (input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; requestId?: string; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => Promise<void>
+    /** 附加图片/文件到会话（Proma → Hermes 发送） */
+    attachToSession: (sessionId: string, input: { kind: 'image' | 'file'; data: string; name?: string }) => Promise<void>
   }
 }
 
@@ -2811,6 +2813,8 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, targetId, remotePath),
     respondInteraction: (input) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.RESPOND_INTERACTION, input),
+    attachToSession: (sessionId, input) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.ATTACH_TO_SESSION, sessionId, input),
   },
 }
 

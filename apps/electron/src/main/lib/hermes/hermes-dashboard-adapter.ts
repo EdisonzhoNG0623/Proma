@@ -245,6 +245,24 @@ export class HermesDashboardAdapter {
     await this.client.request<unknown>('session.title', { session_id: sessionId, title })
   }
 
+  /** 附加图片到会话（image.attach_bytes：base64 上传，Agent 可视觉分析） */
+  async attachImageBytes(sessionId: string, base64: string, filename?: string): Promise<unknown> {
+    return await this.client.request<unknown>('image.attach_bytes', {
+      session_id: sessionId,
+      content_base64: base64,
+      ...(filename ? { filename } : {}),
+    })
+  }
+
+  /** 附加文件到会话（file.attach：data_url 上传到工作区，Agent 可读取） */
+  async attachFile(sessionId: string, dataUrl: string, name?: string): Promise<unknown> {
+    return await this.client.request<unknown>('file.attach', {
+      session_id: sessionId,
+      data_url: dataUrl,
+      ...(name ? { name } : {}),
+    })
+  }
+
   /** 响应 clarify（Hermes 用 request_id 匹配 pending） */
   async respondClarify(input: HermesClarifyResponseInput): Promise<unknown> {
     return await this.client.request<unknown>('clarify.respond', {

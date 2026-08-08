@@ -498,6 +498,27 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     await active.dashboard.submitPrompt(active.hermesSessionId, text)
   }
 
+  /**
+   * 附加图片/文件到 Hermes 会话（Proma → Hermes 发送）。
+   * 需要活跃 turn（attach RPC 作用于 live session）。
+   */
+  async attachToSession(sessionId: string, input: {
+    kind: 'image' | 'file'
+    /** 图片：base64；文件：data URL（data:<mime>;base64,<b64>） */
+    data: string
+    name?: string
+  }): Promise<void> {
+    const active = this.activeTurns.get(sessionId)
+    if (!active?.dashboard || !active.hermesSessionId) {
+      throw new HermesError('会话不在活跃状态，无法附加文件', 'unknown')
+    }
+    if (input.kind === 'image') {
+      await active.dashboard.attachImageBytes(active.hermesSessionId, input.data, input.name)
+    } else {
+      await active.dashboard.attachFile(active.hermesSessionId, input.data, input.name)
+    }
+  }
+
   async respondInteraction(input: {
     sessionId: string
     type: 'approval' | 'clarify' | 'sudo' | 'secret'

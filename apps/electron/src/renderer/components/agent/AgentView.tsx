@@ -533,6 +533,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const [todoSourceText, setTodoSourceText] = React.useState('')
   const [todoGroupId, setTodoGroupId] = React.useState('__none__')
   const [creatingTodo, setCreatingTodo] = React.useState(false)
+  const [hermesAttaching, setHermesAttaching] = React.useState(false)
   React.useEffect(() => window.electronAPI.onPlanningAgentOperation((operation) => {
     if (operation.sessionId !== sessionId) return
     const target = operation.target === 'todo' ? 'Todo' : '日程'
@@ -1761,6 +1762,33 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [addLargeDialogFilesAsReferences, setPendingFiles])
 
   /** 打开混合选择器：文件作为附件，文件夹仅授权给当前会话。 */
+  /** Hermes 会话：发送图片/文件到远端（image.attach_bytes / file.attach） */
+  const handleHermesAttach = React.useCallback(async (): Promise<void> => {
+    try {
+      const result = await window.electronAPI.openFileDialog()
+      const files = result?.files ?? []
+      if (files.length === 0) return
+      setHermesAttaching(true)
+      const names: string[] = []
+      for (const file of files) {
+        const isImage = (file.mediaType ?? '').startsWith('image/')
+        await window.electronAPI.hermes.attachToSession(sessionId, {
+          kind: isImage ? 'image' : 'file',
+          // 图片：image.attach_bytes 收 base64；文件：file.attach 收 data URL
+          data: isImage ? file.data : `data:${file.mediaType || 'application/octet-stream'};base64,${file.data}`,
+          name: file.filename,
+        })
+        names.push(file.filename)
+      }
+      toast.success('已发送到 Hermes 远端', { description: names.join('、') })
+    } catch (error) {
+      console.error('[Hermes] 发送附件失败:', error)
+      toast.error('发送附件失败', { description: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setHermesAttaching(false)
+    }
+  }, [sessionId])
+
   const handleAttachContent = React.useCallback(async (): Promise<void> => {
     try {
       const result = await window.electronAPI.openFileOrFolderDialog()
@@ -3024,6 +3052,27 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       ),
     }]),
     { key: 'speech', node: <SpeechButton className={inputToolbarButtonClass} voiceInputId={agentVoiceInputId} /> },
+    ...(isHermesRemoteSession ? [{
+      key: 'hermes-attach',
+      node: (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className={inputToolbarButtonClass}
+              onClick={() => void handleHermesAttach()}
+              disabled={hermesAttaching}
+              aria-label="发送图片/文件到 Hermes 远端"
+            >
+              <Paperclip className="size-[17px]" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top"><p>发送图片/文件到 Hermes 远端</p></TooltipContent>
+        </Tooltip>
+      ),
+    }] : []),
     ...(isHermesRemoteSession ? [] : [{
       key: 'attach-content',
       node: (

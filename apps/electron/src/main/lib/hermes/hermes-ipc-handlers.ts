@@ -18,7 +18,7 @@ import type {
   HermesSetDashboardPasswordInput,
 } from '@proma/shared'
 import { hermesIpcService } from './hermes-ipc-service'
-import { respondHermesInteraction } from '../agent-service'
+import { respondHermesInteraction, attachToHermesSession } from '../agent-service'
 import {
   createAgentSession,
   updateAgentSessionMeta,
@@ -151,6 +151,18 @@ export function registerHermesIpcHandlers(): void {
   ipcMain.handle(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, async (_, targetId: string, remotePath: string) => {
     return await hermesIpcService.readRemoteFile(requireString(targetId, 'targetId'), requireString(remotePath, 'remotePath'))
   })
+
+  // 附加图片/文件到会话（Proma → Hermes 发送）
+  ipcMain.handle(
+    HERMES_IPC_CHANNELS.ATTACH_TO_SESSION,
+    async (_, sessionId: string, input: { kind: 'image' | 'file'; data: string; name?: string }) => {
+      requireString(sessionId, 'sessionId')
+      if (!input || typeof input !== 'object') throw new Error('input 必填')
+      if (input.kind !== 'image' && input.kind !== 'file') throw new Error('kind 必须为 image 或 file')
+      if (!input.data) throw new Error('data 必填')
+      return await attachToHermesSession(sessionId, input)
+    },
+  )
 
   // 响应 Hermes 交互请求（approval/clarify/sudo/secret）
   ipcMain.handle(

@@ -136,6 +136,15 @@ const orchestrator = new AgentOrchestrator(adapter, eventBus)
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
 export { eventBus as agentEventBus }
 
+/** 附加图片/文件到 Hermes 会话（Proma → Hermes 发送） */
+export function attachToHermesSession(sessionId: string, input: {
+  kind: 'image' | 'file'
+  data: string
+  name?: string
+}): Promise<void> {
+  return hermesFacade.attachToSession(sessionId, input)
+}
+
 /** 响应 Hermes 交互请求（approval/clarify/sudo/secret）；渲染层经 IPC 调用 */
 export function respondHermesInteraction(input: {
   sessionId: string

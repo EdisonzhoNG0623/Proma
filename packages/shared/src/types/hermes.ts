@@ -251,6 +251,8 @@ export const HERMES_IPC_CHANNELS = {
   READ_REMOTE_FILE: 'hermes:read-remote-file',
   /** 响应 Hermes 交互请求（approval/clarify/sudo/secret） */
   RESPOND_INTERACTION: 'hermes:respond-interaction',
+  /** 附加图片/文件到会话（Proma → Hermes 发送） */
+  ATTACH_TO_SESSION: 'hermes:attach-to-session',
 } as const
 
 /**
