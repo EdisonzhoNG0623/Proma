@@ -26,10 +26,12 @@ import { useSmoothStream } from '@proma/ui'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
+import { agentSessionsAtom } from '@/atoms/agent-atoms'
 import { tabMinimapCacheAtom } from '@/atoms/tab-atoms'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
+import { extractHermesFiles, extractHermesMedia, stripHermesAttachmentDirectives } from '@/lib/hermes-media-extract'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, extractUserText, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, buildTaskProgressDataForTurn, type MessageGroup } from './SDKMessageRenderer'
@@ -41,6 +43,7 @@ import { TaskProgressOverlay, type ContextCompactionProgress } from './TaskProgr
 import type { AgentEventUsage, RetryAttempt, SDKMessage, SDKSystemMessage } from '@proma/shared'
 import { getSDKCompactStatus } from '@proma/shared'
 import type { AgentStreamState } from '@/atoms/agent-atoms'
+import type { SDKUserMessage } from '@proma/shared'
 
 function stableStringify(value: unknown): string {
   if (value == null || typeof value !== 'object') return JSON.stringify(value) ?? String(value)
@@ -498,6 +501,12 @@ function AgentRunningIndicator({ startedAt }: { startedAt?: number }): React.Rea
 
 export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persistedSDKMessages, streaming, streamState, liveMessages, sessionPath, attachedDirs, stoppedByUser, onRetry, onRetryInNewSession, onRelinkProjectRoot, onRestoreProjectRoot, onFork, onRewind, onCreateTodo, onCompact }: AgentMessagesProps): React.ReactElement {
   const userProfile = useAtomValue(userProfileAtom)
+  // Hermes 会话：消息主源是 Hermes 事件/live 流；合并持久化历史时按 user 文本去重（乐观带图 vs 历史纯文本）
+  const hermesSessions = useAtomValue(agentSessionsAtom)
+  const isHermesSession = React.useMemo(
+    () => hermesSessions.some((session) => session.id === sessionId && session.agentRuntime === 'hermes-remote'),
+    [hermesSessions, sessionId],
+  )
   const setMinimapCache = useSetAtom(tabMinimapCacheAtom)
   const channels = useAtomValue(channelsAtom)
   const historySelectionRootRef = React.useRef<HTMLDivElement>(null)
@@ -594,10 +603,15 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
 
   const transitioning = needsInstant || transitioningCooldown
 
-  // 合并持久化 + 实时 SDKMessage（供 ContentBlock 内查找工具结果）
+  // Hermes 会话：单消息通道（Hermes Studio 式）——live 流是唯一主源（乐观 + 回显 + 流式），
+  // persisted 仅作首屏占位（打开瞬间 live 尚未 hydrate 完成时显示），不参与合并去重。
   const allSDKMessages = React.useMemo(() => {
     const persisted = persistedSDKMessages ?? []
     const live = liveMessages ?? []
+    if (isHermesSession) {
+      const chosen = live.length > 0 ? live : persisted
+      return chosen
+    }
     const stampStableKey = (message: SDKMessage): SDKMessage => {
       const key = getSDKMessageStableKey(message)
       ;(message as Record<string, unknown>)._promaStableKey = key
@@ -608,6 +622,7 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
 
     const persistedWithKeys = persisted.map(stampStableKey)
     const liveWithKeys = live.map(stampStableKey)
+
     if (streaming || liveWithKeys.length === 0 || persistedWithKeys.length === 0) {
       return [...persistedWithKeys, ...liveWithKeys]
     }
@@ -664,6 +679,15 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
     [allGroups],
   )
 
+  // 分页渲染：首屏仅挂载最近 20 组。工具密集 turn 中 20 组也可能包含数百条 SDKMessage。
+  const INITIAL_VISIBLE_GROUPS = 20
+  const [visibleGroupLimit, setVisibleGroupLimit] = React.useState(INITIAL_VISIBLE_GROUPS)
+  React.useEffect(() => setVisibleGroupLimit(INITIAL_VISIBLE_GROUPS), [sessionId])
+  const renderedGroups = React.useMemo(
+    () => visibleGroups.slice(-visibleGroupLimit),
+    [visibleGroups, visibleGroupLimit],
+  )
+
   // 标记哪些 group 属于实时流式消息（用于 isStreaming / onFork 差异化渲染）
   const liveGroupSet = React.useMemo(() => {
     return buildLiveGroupSet({
@@ -673,9 +697,9 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
     })
   }, [allGroups, liveMessages, streaming])
 
-  // 迷你地图数据 — 直接使用统一的 allGroups（无需去重）
+  // 迷你地图只索引实际挂载的分组；未渲染历史本来也没有可滚动 DOM 锚点。
   const minimapItems: MinimapItem[] = React.useMemo(
-    () => visibleGroups.map((group) => ({
+    () => renderedGroups.map((group) => ({
       id: getGroupId(group),
       role: group.type === 'user' ? 'user' as const
         : group.type === 'system' ? 'status' as const
@@ -684,7 +708,7 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
       avatar: group.type === 'user' ? userProfile.avatar : undefined,
       model: group.type === 'assistant-turn' ? group.model : undefined,
     })),
-    [visibleGroups, userProfile.avatar]
+    [renderedGroups, userProfile.avatar]
   )
 
   // 同步 minimap 缓存到 Tab 级别（供 Tab hover 预览使用）
@@ -700,18 +724,30 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
 
   // 所有用户消息的数据 — 供 StickyUserMessage 使用
   const allUserMessagesData = React.useMemo(() => {
-    return visibleGroups
+    return renderedGroups
       .filter((g): g is MessageGroup & { type: 'user' } => g.type === 'user')
       .map((g) => {
         const rawText = extractUserText(g.message) ?? ''
-        const { files, text } = sdkParseAttachedFiles(rawText)
+        const { files, text } = sdkParseAttachedFiles(stripHermesAttachmentDirectives(rawText))
+        const hermesFiles = extractHermesFiles(rawText).map((file) => ({ filename: file.name, isImage: false }))
+        const hermesImages = extractHermesMedia(rawText).map((media) => {
+          const remoteName = media.remotePath?.replace(/\\/g, '/').split('/').pop()
+          return { filename: remoteName || `image.${media.ext ?? 'png'}`, isImage: true }
+        })
+        const attachments = [
+          ...files.map((file) => ({ filename: file.filename, isImage: sdkIsImageFile(file.filename) })),
+          ...hermesFiles,
+          ...hermesImages,
+        ].filter((attachment, index, all) => (
+          all.findIndex((candidate) => candidate.filename === attachment.filename && candidate.isImage === attachment.isImage) === index
+        ))
         return {
           id: getGroupId(g),
           text,
-          attachments: files.map((f) => ({ filename: f.filename, isImage: sdkIsImageFile(f.filename) })),
+          attachments,
         }
       })
-  }, [visibleGroups])
+  }, [renderedGroups])
 
   // 实时消息中是否已有可渲染的助手内容
   // 流式中：通过 liveGroupSet 精确判断（只有 streaming 时 liveGroupSet 才非空）
@@ -737,15 +773,27 @@ export function AgentMessages({ sessionId, sessionModelId, messagesLoaded, persi
           ) : (
             <>
               {/* 统一消息渲染（持久化 + 实时合并为一个列表，确保 system 消息位置正确） */}
-              {visibleGroups.map((group, idx) => {
+              {visibleGroups.length > renderedGroups.length && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    className="rounded-full border border-border bg-background/70 px-3 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground transition-colors"
+                    onClick={() => setVisibleGroupLimit((prev) => prev + INITIAL_VISIBLE_GROUPS)}
+                  >
+                    ↑ 显示更早消息（还有 {visibleGroups.length - renderedGroups.length} 组）
+                  </button>
+                </div>
+              )}
+              {renderedGroups.map((group, idx) => {
                 const isLive = liveGroupSet.has(group)
                 const isErrorGroup = group.type === 'assistant-turn'
                   && group.assistantMessages.some((m) => !!m.error)
                 const shouldDisableActions = isLive && !isErrorGroup
-                // 仅在最后一个 assistant-turn 上显示"已被用户中断" badge
+                // 仅在最后一个 assistant-turn 上显示"已被用户中断" badge（用 group 引用判断，不受分页 idx 影响）
                 const isLastAssistantTurn = !streaming && stoppedByUser
                   && group.type === 'assistant-turn'
-                  && idx === visibleGroups.findLastIndex((g) => g.type === 'assistant-turn')
+                  && visibleGroups.findLastIndex((g) => g.type === 'assistant-turn') >= 0
+                  && group === visibleGroups[visibleGroups.findLastIndex((g) => g.type === 'assistant-turn')]
                 return (
                   <MessageGroupRenderer
                     key={getGroupId(group)}

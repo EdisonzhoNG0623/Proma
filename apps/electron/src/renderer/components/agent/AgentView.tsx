@@ -18,8 +18,9 @@ import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { hermesTargetsAtom, activeHermesTargetIdAtom } from '@/atoms/hermes-atoms'
 import { toast } from 'sonner'
-import { Box, CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ChevronDown, ListTodo, Paperclip, Server } from 'lucide-react'
+import { Box, CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ChevronDown, ListTodo, Paperclip, Server, FileText } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
+// Hermes media is restored from remote snapshot/@image identity, not a text-keyed local cache.
 import { AgentHeader } from './AgentHeader'
 import { AgentMessageQueue } from './AgentMessageQueue'
 import { ContextUsageBadge } from './ContextUsageBadge'
@@ -119,7 +120,7 @@ import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
-import type { AgentRuntime, AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, ModelOption, ReasoningCapability, SDKMessage, SDKUserMessage, ProviderType } from '@proma/shared'
+import type { AgentRuntime, AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, ModelOption, ReasoningCapability, SDKContentBlock, SDKMessage, SDKUserMessage, ProviderType } from '@proma/shared'
 import { inferAgentSdkContextWindow, inferContextWindow, inferReasoningTransport, isCodexFastModeSupportedModel, MAX_ATTACHMENT_SIZE, normalizeReasoningCapabilityLevel, normalizeReasoningLevel, resolveReasoningCapability, resolveReasoningProfile } from '@proma/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
 import { getFilePanelDragData, INSERT_FILE_MENTION_EVENT, type FilePanelDragItem } from '@/lib/file-panel-drag'
@@ -136,6 +137,7 @@ import {
   restoreQueuedMessageToFront,
 } from '@/lib/agent-message-queue'
 import type { AgentQueuedAttachment, AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message-queue'
+import { findLastStableSDKMessageUuid, reconcileSDKMessagesAfterBoundary } from '@/lib/agent-message-reconcile'
 
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
 const EMPTY_SDK_MESSAGES: SDKMessage[] = []
@@ -149,6 +151,12 @@ function endOfToday(): number {
 
 interface OptimisticSDKUserMessage extends SDKUserMessage {
   _createdAt: number
+}
+
+interface HermesAttachmentPreview {
+  name: string
+  kind: 'image' | 'file'
+  dataUrl: string
 }
 
 interface PreparedAgentAttachment {
@@ -534,6 +542,32 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const [todoGroupId, setTodoGroupId] = React.useState('__none__')
   const [creatingTodo, setCreatingTodo] = React.useState(false)
   const [hermesAttaching, setHermesAttaching] = React.useState(false)
+  /** attach+submit 未确认事务；rejected 时精确恢复预览与乐观消息。 */
+  const pendingHermesTurnsRef = React.useRef(new Map<string, { previews: HermesAttachmentPreview[]; userMessageUuid: string }>())
+  /** 附件选择刚完成（防文件对话框关闭后的 Enter 事件泄漏触发误发送） */
+  const hermesAttachGuardRef = React.useRef(0)
+  /** Hermes 附件预览（输入区显示缩略图/文件名，聊天式体验） */
+  const [hermesAttachmentPreviews, setHermesAttachmentPreviews] = React.useState<HermesAttachmentPreview[]>([])
+  React.useEffect(() => window.electronAPI.hermes.onTurnSubmitState((state) => {
+    const pending = pendingHermesTurnsRef.current.get(state.clientMessageId)
+    if (!pending) return
+    pendingHermesTurnsRef.current.delete(state.clientMessageId)
+    if (state.status === 'accepted') return
+    setHermesAttachmentPreviews((current) => [...pending.previews, ...current])
+    setLiveMessagesMap((previous) => {
+      const next = new Map(previous)
+      next.set(sessionId, (next.get(sessionId) ?? []).filter((message) => !('uuid' in message) || message.uuid !== pending.userMessageUuid))
+      return next
+    })
+    setStreamingStates((previous) => {
+      const current = previous.get(sessionId)
+      if (!current) return previous
+      const next = new Map(previous)
+      next.set(sessionId, { ...current, running: false })
+      return next
+    })
+    toast.error('Hermes 发送失败', { description: state.error })
+  }), [sessionId, setLiveMessagesMap, setStreamingStates])
   React.useEffect(() => window.electronAPI.onPlanningAgentOperation((operation) => {
     if (operation.sessionId !== sessionId) return
     const target = operation.target === 'todo' ? 'Todo' : '日程'
@@ -549,9 +583,10 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const hasSessionMeta = Boolean(sessionMeta)
   /** Hermes Remote 绑定 target 名称（远端位置标识） */
   const hermesTargets = useAtomValue(hermesTargetsAtom)
-  const hermesTargetName = sessionMeta?.hermesTargetId
-    ? hermesTargets.find((t) => t.id === sessionMeta.hermesTargetId)?.name ?? null
+  const hermesTarget = sessionMeta?.hermesTargetId
+    ? hermesTargets.find((t) => t.id === sessionMeta.hermesTargetId) ?? null
     : null
+  const hermesTargetName = hermesTarget?.name ?? null
   /** Hermes 远程会话不依赖 Proma 渠道/模型（模型在远端 Hermes 配置），占位渠道避免显示本地 DeepSeek 等 */
   const isHermesRemoteSessionForChannel = hasSessionMeta
     ? sessionMeta?.agentRuntime === 'hermes-remote'
@@ -676,7 +711,12 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     const target = targets.find((t) => t.id === activeId) ?? targets[0]
     if (!target) return
     window.electronAPI
-      .updateSessionAgentRuntime(sessionId, 'hermes-remote', target.id)
+      .updateSessionAgentRuntime(
+        sessionId,
+        'hermes-remote',
+        target.id,
+        target.endpoints?.dashboard ? 'dashboard' : 'api-server',
+      )
       .then((updated) => {
         setAgentSessions((prev) => prev.map((item) => (item.id === sessionId ? updated : item)))
       })
@@ -1052,7 +1092,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const appendOptimisticPersistedMessage = React.useCallback((message: SDKMessage) => {
     // 切会话时优先命中内存缓存，因此乐观插入的用户消息也要同步写入缓存，
     // 否则“发送后立刻切走再切回”会短暂回退到旧消息数组。
-    const next = [...persistedSDKMessagesRef.current, message]
+    const optimisticMessage = { ...message, _promaOptimistic: true } as SDKMessage
+    const next = [...persistedSDKMessagesRef.current, optimisticMessage]
     persistedSDKMessagesRef.current = next
     setPersistedSDKMessages(next)
     setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, next))
@@ -1270,7 +1311,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     messagesRefreshingRef.current = true
     setMessagesRefreshing(true)
     let cancelled = false
-    window.electronAPI.getAgentSessionSDKMessages(sessionId)
+    const previousMessages = persistedSDKMessagesRef.current
+    const boundaryUuid = isSessionSwitch ? null : findLastStableSDKMessageUuid(previousMessages)
+    const loadMessages = async (): Promise<SDKMessage[]> => {
+      if (boundaryUuid) {
+        const canonicalTail = await window.electronAPI.getAgentSessionSDKMessagesAfter(sessionId, boundaryUuid)
+        if (canonicalTail !== null) {
+          const reconciled = reconcileSDKMessagesAfterBoundary(previousMessages, boundaryUuid, canonicalTail)
+          if (reconciled) return reconciled
+        }
+      }
+      return window.electronAPI.getAgentSessionSDKMessages(sessionId)
+    }
+    void loadMessages()
       .then((sdkMsgs) => {
         if (cancelled) return
         // 写入缓存（含 LRU 淘汰，防止会话数增长导致内存无限膨胀）
@@ -1324,11 +1377,21 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             return map
           })
           setLiveMessagesMap((prev) => {
+            const map = new Map(prev)
+            // Hermes 会话：单消息通道（Hermes Studio 式）——live 是唯一主源。
+            // live 为空（首次打开/重启后）用持久化消息初始化；非空保留（乐观附件/流式不丢）。
+            const sessionMeta = store.get(agentSessionsAtom).find((session) => session.id === sessionId)
+            if (sessionMeta?.agentRuntime === 'hermes-remote') {
+              const current = prev.get(sessionId)
+              if (!current || current.length === 0) {
+                map.set(sessionId, sdkMsgs)
+              }
+              return map
+            }
             if (!prev.has(sessionId)) return prev
             // 仍在运行中，不清除实时消息（与 streamingStates 保护逻辑一致）
             const streamingState = store.get(agentStreamingStatesAtom).get(sessionId)
             if (streamingState?.running) return prev
-            const map = new Map(prev)
             map.delete(sessionId)
             return map
           })
@@ -1766,24 +1829,28 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const handleHermesAttach = React.useCallback(async (): Promise<void> => {
     try {
       const result = await window.electronAPI.openFileDialog()
+      // 文件对话框刚关闭：屏蔽随后可能泄漏到输入框的 Enter，避免误发送（400ms 足够覆盖泄漏事件）
+      hermesAttachGuardRef.current = Date.now() + 400
       const files = result?.files ?? []
       if (files.length === 0) return
       setHermesAttaching(true)
-      const names: string[] = []
-      for (const file of files) {
-        const isImage = (file.mediaType ?? '').startsWith('image/')
-        await window.electronAPI.hermes.attachToSession(sessionId, {
-          kind: isImage ? 'image' : 'file',
-          // 图片：image.attach_bytes 收 base64；文件：file.attach 收 data URL
-          data: isImage ? file.data : `data:${file.mediaType || 'application/octet-stream'};base64,${file.data}`,
-          name: file.filename,
-        })
-        names.push(file.filename)
-      }
-      toast.success('已发送到 Hermes 远端', { description: names.join('、') })
+      // 只暂存本地预览（微信式：先选图、可移除，按发送时才 attach 到 Hermes + 发消息）
+      setHermesAttachmentPreviews((prev) => [
+        ...prev,
+        ...files.map((file) => {
+          const isImage = (file.mediaType ?? '').startsWith('image/')
+          return {
+            name: file.filename,
+            kind: isImage ? ('image' as const) : ('file' as const),
+            dataUrl: isImage
+              ? `data:${file.mediaType};base64,${file.data}`
+              : `data:${file.mediaType || 'application/octet-stream'};base64,${file.data}`,
+          }
+        }),
+      ])
     } catch (error) {
-      console.error('[Hermes] 发送附件失败:', error)
-      toast.error('发送附件失败', { description: error instanceof Error ? error.message : String(error) })
+      console.error('[Hermes] 读取附件失败:', error)
+      toast.error('读取附件失败', { description: error instanceof Error ? error.message : String(error) })
     } finally {
       setHermesAttaching(false)
     }
@@ -2173,6 +2240,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
     // Hermes Remote 需要先确定绑定的 target
     let hermesTargetId: string | undefined
+    let hermesProtocol: 'dashboard' | 'api-server' | undefined
     if (runtime === 'hermes-remote') {
       const targets = store.get(hermesTargetsAtom)
       const activeId = store.get(activeHermesTargetIdAtom)
@@ -2184,6 +2252,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return
       }
       hermesTargetId = target.id
+      hermesProtocol = target.endpoints?.dashboard ? 'dashboard' : 'api-server'
     }
 
     const runtimeSwitchDeferred = streaming || backgroundWaiting
@@ -2199,7 +2268,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             sdkSessionId: undefined,
             piSessionFile: undefined,
             piEntryBindings: undefined,
-            ...(hermesTargetId ? { hermesTargetId } : {}),
+            ...(hermesTargetId ? { hermesTargetId, hermesProtocol } : {}),
             updatedAt: Date.now(),
           }
           : item
@@ -2207,7 +2276,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
 
     try {
-      const updated = await window.electronAPI.updateSessionAgentRuntime(sessionId, runtime, hermesTargetId)
+      const updated = await window.electronAPI.updateSessionAgentRuntime(sessionId, runtime, hermesTargetId, hermesProtocol)
       setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? updated : item))
       window.electronAPI.updateSettings({ agentRuntime: runtime }).catch((error) => {
         console.error('[AgentView] 保存 Agent Runtime 默认值失败:', error)
@@ -2298,10 +2367,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   /** 发送消息 */
   const handleSend = React.useCallback(async (overrideText?: string): Promise<void> => {
     const text = (overrideText ?? inputContent).trim()
-    // 如果输入为空但有建议，使用建议内容
+    const hermesPreviewsSnapshot = isHermesRemoteSession ? hermesAttachmentPreviews : []
+    // 如果输入为空但有建议，使用建议内容；附件由 main 原子 attach+submit，不先拼伪引用。
     const effectiveText = text || suggestion || ''
     const pendingFilesSnapshot = pendingFilesRef.current
-    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || (!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel))) return
+    // 附件选择刚完成：忽略文件对话框泄漏的 Enter，避免误发送
+    if (Date.now() < hermesAttachGuardRef.current) {
+      return
+    }
+    // 仅 Hermes 附件（如只发图片不写字）也算可发送
+    const hasHermesAttachment = hermesPreviewsSnapshot.length > 0
+    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0 && !hasHermesAttachment) || (!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel))) return
     if (!streaming && messagesRefreshingRef.current) {
       toast.info('上一轮消息正在同步', {
         description: '请稍等片刻再发送；队列会在同步完成后继续。',
@@ -2424,8 +2500,23 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       fileReferences = fileReferences + buildQuotedSelectionBlock(quotedSelection)
     }
 
-    // 2. 构建最终消息
+    // 2. 构建 main-only Hermes turn 附件 DTO；仅图片时文本保持为空，不自动补问句。
+    const hermesTurnAttachments = isHermesRemoteSession
+      ? hermesPreviewsSnapshot.map((attachment) => {
+          const comma = attachment.dataUrl.indexOf(',')
+          const meta = comma >= 0 ? attachment.dataUrl.slice(0, comma) : ''
+          return {
+            id: crypto.randomUUID(),
+            kind: attachment.kind,
+            name: attachment.name,
+            mimeType: /^data:([^;,]+)/.exec(meta)?.[1] ?? (attachment.kind === 'image' ? 'image/png' : 'application/octet-stream'),
+            base64: comma >= 0 ? attachment.dataUrl.slice(comma + 1) : attachment.dataUrl,
+          }
+        })
+      : []
     const finalMessage = fileReferences + effectiveText
+    const clientMessageId = crypto.randomUUID()
+    const optimisticUserMessageUuid = crypto.randomUUID()
     const mentions = parseQueuedMessageMentions(effectiveText)
     // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径，Agent 可读取）；
     // 气泡展示/持久化使用编码原文（remarkMentions 解码显示），与排队路径 rawText/sdkText 分离语义一致。
@@ -2464,21 +2555,40 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return map
     })
 
-    // 乐观更新：SDKMessage 格式的用户消息（Phase 4）
+    // 乐观更新：SDKMessage 格式的用户消息（Phase 4）；Hermes 附件图片一并显示
     const tempUserSDKMsg: SDKMessage = {
       type: 'user',
+      uuid: optimisticUserMessageUuid,
       message: {
-        content: [{ type: 'text', text: finalMessage }],
+        content: [
+          ...(hermesPreviewsSnapshot.filter((p) => p.kind === 'image').map((p) => ({ type: 'image', dataUrl: p.dataUrl })) as SDKContentBlock[]),
+          ...(hermesPreviewsSnapshot.filter((p) => p.kind === 'file').map((p) => ({ type: 'file', name: p.name })) as SDKContentBlock[]),
+          { type: 'text', text: finalMessage },
+        ],
       },
       parent_tool_use_id: null,
       _createdAt: Date.now(),
     } as unknown as SDKMessage
-    appendOptimisticPersistedMessage(tempUserSDKMsg)
+    // Hermes 会话：乐观消息进 live（单通道主源，图片随消息显示）；其他会话进 persisted 缓存
+    if (isHermesRemoteSession) {
+      appendLiveUserMessage(tempUserSDKMsg)
+      pendingHermesTurnsRef.current.set(clientMessageId, {
+        previews: hermesPreviewsSnapshot,
+        userMessageUuid: optimisticUserMessageUuid,
+      })
+      setHermesAttachmentPreviews([])
+    } else {
+      appendOptimisticPersistedMessage(tempUserSDKMsg)
+    }
 
     const input: AgentSendInput = {
       sessionId,
       userMessage: sdkMessage,
       rawUserMessage: finalMessage,
+      clientMessageId,
+      ...(isHermesRemoteSession ? {
+        hermesTurn: { clientMessageId, attachments: hermesTurnAttachments },
+      } : {}),
       channelId: effectiveChannelId,
       modelId: agentModelId || undefined,
       agentRuntime: sessionAgentRuntime,
@@ -2503,6 +2613,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
     window.electronAPI.sendAgentMessage(input).catch((error) => {
       console.error('[AgentView] 发送消息失败:', error)
+      const pending = pendingHermesTurnsRef.current.get(clientMessageId)
+      if (pending) {
+        pendingHermesTurnsRef.current.delete(clientMessageId)
+        setHermesAttachmentPreviews((current) => [...pending.previews, ...current])
+        setLiveMessagesMap((previous) => {
+          const next = new Map(previous)
+          next.set(sessionId, (next.get(sessionId) ?? []).filter((message) => !('uuid' in message) || message.uuid !== pending.userMessageUuid))
+          return next
+        })
+      }
       setStreamingStates((prev) => {
         const current = prev.get(sessionId)
         if (!current) return prev
@@ -3005,7 +3125,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [togglePreviewPanel])
 
   const hasTextInput = inputContent.trim().length > 0
-  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && (isHermesRemoteSession || (agentChannelId !== null && hasAvailableModel)) && (!streaming || hasTextInput)
+  // 仅 Hermes 附件（图片/文件）也可发送（微信式：只发图不写字）
+  const hasHermesAttachment = isHermesRemoteSession && hermesAttachmentPreviews.length > 0
+  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || hasHermesAttachment || !!suggestion) && (isHermesRemoteSession || (agentChannelId !== null && hasAvailableModel)) && (!streaming || hasTextInput)
 
   const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => [
     ...(isCodexFastModeAvailable ? [{
@@ -3181,6 +3303,26 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     </>
   ) : sendButton
 
+  const handleHermesProtocolToggle = React.useCallback(async (): Promise<void> => {
+    if (!sessionMeta?.hermesTargetId || !hermesTarget || streaming) return
+    const hasDashboard = Boolean(hermesTarget.endpoints?.dashboard)
+    const hasApi = Boolean(hermesTarget.endpoints?.apiServer)
+    if (!hasDashboard || !hasApi) return
+    const nextProtocol = (sessionMeta.hermesProtocol ?? 'dashboard') === 'dashboard' ? 'api-server' : 'dashboard'
+    try {
+      const updated = await window.electronAPI.updateSessionAgentRuntime(
+        sessionId,
+        'hermes-remote',
+        sessionMeta.hermesTargetId,
+        nextProtocol,
+      )
+      setAgentSessions((previous) => previous.map((item) => item.id === sessionId ? updated : item))
+      toast.info(`Hermes 协议已切换为 ${nextProtocol === 'dashboard' ? 'Dashboard' : 'API Server'}；远端会话绑定已重置`)
+    } catch (error) {
+      toast.error('切换 Hermes 协议失败', { description: error instanceof Error ? error.message : String(error) })
+    }
+  }, [hermesTarget, sessionId, sessionMeta?.hermesProtocol, sessionMeta?.hermesTargetId, setAgentSessions, streaming])
+
   const inputTrailingNode = (
     <>
       <div className="flex min-w-0 items-center gap-1 [&_.model-selector-trigger>span]:max-w-[min(12rem,30vw)]">
@@ -3198,13 +3340,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           onChange={handleAgentRuntimeChange}
         />
         {sessionAgentRuntime === 'hermes-remote' && (
-          <span
-            title={`远端执行：${hermesTargetName ?? '未绑定 target'}`}
-            className="flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-primary/80"
+          <button
+            type="button"
+            title={`远端执行：${hermesTargetName ?? '未绑定 target'} · ${sessionMeta?.hermesProtocol ?? 'dashboard'}${hermesTarget?.endpoints?.dashboard && hermesTarget?.endpoints?.apiServer ? '（点击切换协议）' : ''}`}
+            className="flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-primary/80 disabled:cursor-default"
+            onClick={handleHermesProtocolToggle}
+            disabled={streaming || !(hermesTarget?.endpoints?.dashboard && hermesTarget?.endpoints?.apiServer)}
           >
             <Server className="size-3.5" />
-            <span className="max-w-[10rem] truncate">{hermesTargetName ?? '未绑定'}</span>
-          </span>
+            <span className="max-w-[10rem] truncate">{hermesTargetName ?? '未绑定'} · {(sessionMeta?.hermesProtocol ?? 'dashboard') === 'dashboard' ? 'D' : 'API'}</span>
+          </button>
         )}
       </div>
       {sendControl}
@@ -3352,6 +3497,32 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                     }}
                   />
                 </button>
+              </div>
+            )}
+
+            {/* Hermes 附件预览条（聊天式：图片缩略图 / 文件名称，可移除） */}
+            {isHermesRemoteSession && hermesAttachmentPreviews.length > 0 && (
+              <div className="flex flex-wrap gap-2 px-3 pt-1.5">
+                {hermesAttachmentPreviews.map((preview) => (
+                  <div key={preview.name} className="group/preview relative">
+                    {preview.kind === 'image' ? (
+                      <img src={preview.dataUrl} alt={preview.name} className="h-16 w-16 rounded-md border border-border object-cover" />
+                    ) : (
+                      <div className="flex h-16 w-16 items-center justify-center rounded-md border border-border bg-background/60">
+                        <FileText size={20} className="text-muted-foreground" />
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="absolute -right-1.5 -top-1.5 flex size-4 items-center justify-center rounded-full bg-foreground/80 text-background opacity-0 transition-opacity group-hover/preview:opacity-100"
+                      onClick={() => setHermesAttachmentPreviews((prev) => prev.filter((p) => p.name !== preview.name))}
+                      title="移除附件"
+                    >
+                      <X size={10} />
+                    </button>
+                    <span className="mt-0.5 block max-w-16 truncate text-[10px] text-muted-foreground">{preview.name}</span>
+                  </div>
+                ))}
               </div>
             )}
 

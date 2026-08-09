@@ -1,13 +1,17 @@
 import { expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const managerModulePath = join(import.meta.dir, 'planning-manager.ts')
 const repoRoot = dirname(dirname(dirname(dirname(dirname(import.meta.dir)))))
-const electronBinary = createRequire(import.meta.url)('electron') as string
+const nodeRequire = createRequire(import.meta.url)
+const electronPackageDir = dirname(nodeRequire.resolve('electron'))
+// bunfig preloads a renderer-safe `electron` module mock for unit tests, so
+// resolve the installed executable from Electron's path.txt instead of require().
+const electronBinary = join(electronPackageDir, 'dist', readFileSync(join(electronPackageDir, 'path.txt'), 'utf8').trim())
 
 /**
  * planning-manager 的数据库连接是模块级单例，而 node:sqlite 仅由 Electron 的 Node 22 提供。
@@ -113,7 +117,8 @@ test('Given a fresh planning database When planning data changes Then isolation,
 
     const result = spawnSync(electronBinary, [outputPath], {
       cwd: repoRoot,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', HOME: home, PROMA_DEV: '1' },
+      // Node's os.homedir() reads USERPROFILE on Windows and HOME on Unix.
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', HOME: home, USERPROFILE: home, PROMA_DEV: '1' },
       encoding: 'utf8',
     })
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)

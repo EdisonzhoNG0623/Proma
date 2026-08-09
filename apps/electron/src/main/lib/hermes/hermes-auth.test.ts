@@ -8,7 +8,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
   HermesAuthService,
+  buildDashboardRestAuthHeaders,
   buildTicketWsUrl,
+  buildTokenWsUrl,
   canSubmitPasswordTo,
   isLoopbackUrl,
   parseAuthProviders,
@@ -127,6 +129,26 @@ describe('parseWsTicketResponse / buildTicketWsUrl', () => {
       'ws://127.0.0.1:9119/api/ws?ticket=t-1',
     )
   })
+
+  test('Given reverse proxy prefix When 构建 Then ticket/token 都保留 prefix', () => {
+    expect(buildTicketWsUrl('https://h.example.com/hermes/', 't')).toBe(
+      'wss://h.example.com/hermes/api/ws?ticket=t',
+    )
+    expect(buildTokenWsUrl('https://h.example.com/hermes/', 'secret')).toBe(
+      'wss://h.example.com/hermes/api/ws?token=secret',
+    )
+  })
+
+  test('Given token auth When 构建 REST header Then 只发送 X-Hermes-Session-Token', () => {
+    expect(buildDashboardRestAuthHeaders('token', 'abc')).toEqual({
+      'X-Hermes-Session-Token': 'abc',
+    })
+    expect(buildDashboardRestAuthHeaders('password-cookie', 'ignored')).toEqual({})
+  })
+
+  test('Given native-pkce When 构建认证 Then 显式 unsupported 而不降级', () => {
+    expect(() => buildDashboardRestAuthHeaders('native-pkce')).toThrow('暂不支持')
+  })
 })
 
 describe('HermesAuthService 登录与 Cookie', () => {
@@ -227,6 +249,18 @@ describe('HermesAuthService 登录与 Cookie', () => {
     })
     auth.clearCookies('target-a')
     expect(auth.cookieJarFor('target-a').size).toBe(0)
+  })
+
+  test('Given browserCookies When 获取 ticket Then 不人工设置 Cookie header', async () => {
+    let headers: Record<string, string> = {}
+    const transport = fakeTransport((_path, init) => {
+      headers = init?.headers ?? {}
+      return { status: 200, body: { ticket: 'browser-ticket' } }
+    })
+    const auth = new HermesAuthService(transport, { browserCookies: true })
+    auth.cookieJarFor('target-a').set('must-not-send', 'manual')
+    expect(await auth.mintWsTicket('target-a')).toBe('browser-ticket')
+    expect(headers.Cookie).toBeUndefined()
   })
 
   test('Given ticket 请求 401 When 获取 Then 抛 unauthorized', async () => {

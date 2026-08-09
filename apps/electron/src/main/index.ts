@@ -698,6 +698,16 @@ async function bootstrap(): Promise<void> {
   }
 
   // Agent Island 仅在 macOS 26+ 原生 surface 上初始化；Windows/Linux 不注册服务、窗口或事件监听。
+  // 但 renderer 会调用 markSessionViewed（官方 0.16.10 无条件调用），非 macOS 需注册 no-op handler 避免 IPC 报错刷屏。
+  if (!isAgentIslandSupported()) {
+    try {
+      const { ipcMain } = require('electron') as typeof import('electron')
+      const { AGENT_ISLAND_IPC_CHANNELS } = require('@proma/shared') as typeof import('@proma/shared')
+      ipcMain.handle(AGENT_ISLAND_IPC_CHANNELS.MARK_SESSION_VIEWED, () => undefined)
+    } catch {
+      // no-op：注册失败不影响主流程
+    }
+  }
   if (isAgentIslandSupported()) {
     safeRun('initAgentIslandService', () => {
       initAgentIslandService({

@@ -108,10 +108,19 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
     const el = scrollRef.current
     if (!el) return
 
+    let frameId: number | null = null
     const update = (): void => {
+      frameId = null
       const { scrollTop, scrollHeight, clientHeight } = el
-      setCanScroll(scrollHeight > clientHeight + 10)
-      setScrollMetrics({ scrollTop, scrollHeight, clientHeight })
+      const nextCanScroll = scrollHeight > clientHeight + 10
+      setCanScroll((previous) => previous === nextCanScroll ? previous : nextCanScroll)
+      setScrollMetrics((previous) => (
+        previous.scrollTop === scrollTop
+        && previous.scrollHeight === scrollHeight
+        && previous.clientHeight === clientHeight
+          ? previous
+          : { scrollTop, scrollHeight, clientHeight }
+      ))
       if (scrollHeight <= 0) return
 
       const viewportCenter = scrollTop + clientHeight / 2
@@ -129,18 +138,25 @@ export function ScrollMinimap({ items }: ScrollMinimapProps): React.ReactElement
           centerId = node.getAttribute('data-message-id') ?? undefined
         }
       }
-      setVisibleIds(ids)
-      setCenterVisibleId(centerId)
+      setVisibleIds((previous) => (
+        previous.size === ids.size && [...ids].every((id) => previous.has(id)) ? previous : ids
+      ))
+      setCenterVisibleId((previous) => previous === centerId ? previous : centerId)
+    }
+    const scheduleUpdate = (): void => {
+      if (frameId !== null) return
+      frameId = requestAnimationFrame(update)
     }
 
-    update()
-    el.addEventListener('scroll', update, { passive: true })
-    const observer = new ResizeObserver(update)
+    scheduleUpdate()
+    el.addEventListener('scroll', scheduleUpdate, { passive: true })
+    const observer = new ResizeObserver(scheduleUpdate)
     observer.observe(el)
 
     return () => {
-      el.removeEventListener('scroll', update)
+      el.removeEventListener('scroll', scheduleUpdate)
       observer.disconnect()
+      if (frameId !== null) cancelAnimationFrame(frameId)
     }
   }, [scrollRef])
 

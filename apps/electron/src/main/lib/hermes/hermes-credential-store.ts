@@ -1,90 +1,71 @@
-/**
- * Hermes 凭据存储
- *
- * 负责 Hermes 相关秘密（Dashboard token / 用户名密码 / API Server key / SSH 凭据）
- * 的加密持久化。使用 Electron safeStorage（OS 级加密）：
- * - macOS: Keychain
- * - Windows: DPAPI
- * - Linux: Secret Service API
- *
- * 安全约束（来自方案文档）：
- * - 凭据不进入 Renderer、普通日志或项目文件；
- * - 加密不可用时**拒绝持久化**（不静默明文降级），仅允许调用方选择内存态或明确报错；
- * - Target 配置中只保存凭据引用（ref），实际秘密在 credentials.json；
- * - 删除 Target 时应同步删除其关联凭据（由 IPC 层协调）。
- */
-
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { safeStorage } from 'electron'
+import { readJsonWithBackup, writeJsonAtomic } from './hermes-atomic-json-store'
 
-/** 配置文件版本 */
-export const HERMES_CREDENTIALS_CONFIG_VERSION = 1
+export const HERMES_CREDENTIALS_CONFIG_VERSION = 2
 
-/** 凭据类型分类 */
-export type HermesCredentialKind =
+/** 由 main ownership broker 管理的固定凭据槽。 */
+export type HermesCredentialSlot =
   | 'dashboard-token'
   | 'dashboard-password'
   | 'api-server-key'
   | 'ssh-password'
-  | 'ssh-key'
-  /** Dashboard 登录 Cookie 会话（refresh cookie 复用，避免频繁密码登录触发限流） */
-  | 'dashboard-cookie'
+  | 'ssh-private-key'
+  | 'ssh-private-key-passphrase'
 
-/** 凭据条目（仅元数据 + 密文，不含明文） */
+/** legacy kind 仅保留迁移兼容；新代码应使用 HermesCredentialSlot。 */
+export type HermesCredentialKind = HermesCredentialSlot | 'ssh-key' | 'dashboard-cookie'
+
 export interface HermesCredentialEntry {
-  /** 凭据引用 ID（Target.auth.*Ref / ssh.credentialRef 中保存的值） */
   ref: string
-  /** 凭据类型 */
   kind: HermesCredentialKind
-  /** 加密后的 base64 字符串 */
+  /** V2 ownership；legacy V1 条目在被真实 target 引用 claim 前保持为空。 */
+  ownerTargetId?: string
+  slot?: HermesCredentialSlot
   encrypted: string
-  /** 创建时间戳 */
   createdAt: number
-  /** 更新时间戳 */
   updatedAt: number
 }
 
-/** 凭据配置文件格式 */
 export interface HermesCredentialsConfig {
   version: number
   credentials: HermesCredentialEntry[]
 }
 
-/**
- * 加密能力抽象（默认 Electron safeStorage，测试可注入 fake）
- */
 export interface CredentialCrypto {
   isEncryptionAvailable(): boolean
   encryptString(plain: string): Buffer
   decryptString(buffer: Buffer): string
 }
 
-/** Electron safeStorage 适配（主进程默认实现） */
 export function createElectronCredentialCrypto(
   storage: Pick<typeof safeStorage, 'isEncryptionAvailable' | 'encryptString' | 'decryptString'>,
 ): CredentialCrypto {
   return {
     isEncryptionAvailable: () => storage.isEncryptionAvailable(),
-    encryptString: (plain: string) => storage.encryptString(plain),
-    decryptString: (buffer: Buffer) => storage.decryptString(buffer),
+    encryptString: (plain) => storage.encryptString(plain),
+    decryptString: (buffer) => storage.decryptString(buffer),
   }
 }
 
-/** 默认配置文件路径（与 Proma 配置目录一致，开发模式为 .proma-dev） */
 function defaultHermesCredentialsPath(): string {
-  // 惰性 require：避免全量测试并发加载时与 config-paths 的 ESM 解析竞态（Bun Windows）
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getHermesCredentialsPath } = require('../config-paths') as typeof import('../config-paths')
   return getHermesCredentialsPath()
 }
 
-/**
- * Hermes 凭据存储
- *
- * 主进程单实例使用；文件读写为同步 I/O（配置小）。
- */
+function decodeConfig(value: unknown): HermesCredentialsConfig {
+  if (!value || typeof value !== 'object') throw new Error('hermes-credentials.json 结构不合法')
+  const data = value as { version?: unknown; credentials?: unknown }
+  if (!Array.isArray(data.credentials)) {
+    throw new Error('hermes-credentials.json 结构不合法（credentials 必须为数组）')
+  }
+  return {
+    version: typeof data.version === 'number' ? data.version : 1,
+    credentials: data.credentials as HermesCredentialEntry[],
+  }
+}
+
 export class HermesCredentialStore {
   private cryptoImpl: CredentialCrypto | null = null
 
@@ -92,7 +73,6 @@ export class HermesCredentialStore {
     private readonly filePath: string = defaultHermesCredentialsPath(),
     crypto?: CredentialCrypto,
   ) {
-    // 允许测试注入 fake；未注入时延迟加载 Electron safeStorage（避免非 Electron 环境解析失败）
     this.cryptoImpl = crypto ?? null
   }
 
@@ -106,110 +86,159 @@ export class HermesCredentialStore {
   }
 
   private readConfig(): HermesCredentialsConfig {
-    if (!existsSync(this.filePath)) {
-      return { version: HERMES_CREDENTIALS_CONFIG_VERSION, credentials: [] }
+    const config = readJsonWithBackup(this.filePath, decodeConfig)
+    if (!config) return { version: HERMES_CREDENTIALS_CONFIG_VERSION, credentials: [] }
+    if (config.version !== HERMES_CREDENTIALS_CONFIG_VERSION) {
+      const migrated = { version: HERMES_CREDENTIALS_CONFIG_VERSION, credentials: config.credentials }
+      writeJsonAtomic(this.filePath, migrated)
+      return migrated
     }
-    try {
-      const raw = readFileSync(this.filePath, 'utf-8')
-      const parsed = JSON.parse(raw) as HermesCredentialsConfig
-      if (!Array.isArray(parsed.credentials)) {
-        throw new Error('hermes-credentials.json 结构不合法（credentials 必须为数组）')
-      }
-      return { version: HERMES_CREDENTIALS_CONFIG_VERSION, credentials: parsed.credentials }
-    } catch (error) {
-      console.error('[Hermes 凭据] 读取配置文件失败:', error)
-      return { version: HERMES_CREDENTIALS_CONFIG_VERSION, credentials: [] }
-    }
+    return config
   }
 
   private writeConfig(config: HermesCredentialsConfig): void {
+    writeJsonAtomic(this.filePath, {
+      version: HERMES_CREDENTIALS_CONFIG_VERSION,
+      credentials: config.credentials,
+    })
+  }
+
+  private encrypt(secret: string): string {
+    if (!secret) throw new Error('凭据内容不能为空')
+    const crypto = this.getCrypto()
+    if (!crypto.isEncryptionAvailable()) {
+      throw new Error('系统加密不可用，无法安全保存 Hermes 凭据（Hermes 凭据不允许明文落盘）')
+    }
+    return crypto.encryptString(secret).toString('base64')
+  }
+
+  private decrypt(entry: HermesCredentialEntry | undefined): string | null {
+    if (!entry) return null
+    const crypto = this.getCrypto()
+    if (!crypto.isEncryptionAvailable()) return null
     try {
-      const dir = dirname(this.filePath)
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true })
-      }
-      writeFileSync(this.filePath, JSON.stringify(config, null, 2), 'utf-8')
-    } catch (error) {
-      console.error('[Hermes 凭据] 写入配置文件失败:', error)
-      throw new Error('写入 Hermes 凭据配置失败')
+      return crypto.decryptString(Buffer.from(entry.encrypted, 'base64'))
+    } catch {
+      // 不记录 ref 或密文，避免 credential metadata 泄漏到普通日志。
+      return null
     }
   }
 
-  /**
-   * 保存凭据（新建或覆盖）。
-   *
-   * @param kind 凭据类型
-   * @param secret 明文秘密
-   * @param ref 可选显式引用 ID；缺省自动生成
-   * @returns 凭据引用 ID
-   * @throws 加密不可用时抛出明确错误（不静默明文落盘）
-   */
-  setCredential(
-    kind: HermesCredentialKind,
-    secret: string,
-    ref: string = randomUUID(),
-  ): string {
-    if (!secret) {
-      throw new Error('凭据内容不能为空')
-    }
-    const crypto = this.getCrypto()
-    if (!crypto.isEncryptionAvailable()) {
-      throw new Error(
-        '系统加密不可用，无法安全保存 Hermes 凭据（Hermes 凭据不允许明文落盘）',
-      )
-    }
+  /** legacy ref API：只供迁移和内部兼容，新 IPC 不得暴露 ref。 */
+  setCredential(kind: HermesCredentialKind, secret: string, ref: string = randomUUID()): string {
     const config = this.readConfig()
-    const encrypted = crypto.encryptString(secret).toString('base64')
+    const encrypted = this.encrypt(secret)
     const now = Date.now()
-    const existing = config.credentials.findIndex((item) => item.ref === ref)
-    if (existing >= 0) {
-      config.credentials[existing] = { ref, kind, encrypted, createdAt: config.credentials[existing]!.createdAt, updatedAt: now }
-    } else {
-      config.credentials.push({ ref, kind, encrypted, createdAt: now, updatedAt: now })
+    const index = config.credentials.findIndex((item) => item.ref === ref)
+    const previous = index >= 0 ? config.credentials[index] : undefined
+    const entry: HermesCredentialEntry = {
+      ref,
+      kind,
+      encrypted,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+      ownerTargetId: previous?.ownerTargetId,
+      slot: previous?.slot,
     }
+    if (index >= 0) config.credentials[index] = entry
+    else config.credentials.push(entry)
     this.writeConfig(config)
     return ref
   }
 
-  /**
-   * 读取凭据明文。
-   *
-   * @returns 明文秘密；ref 不存在或解密失败时返回 null
-   */
   getCredential(ref: string): string | null {
-    const crypto = this.getCrypto()
-    if (!crypto.isEncryptionAvailable()) {
-      return null
-    }
-    const entry = this.readConfig().credentials.find((item) => item.ref === ref)
-    if (!entry) {
-      return null
-    }
-    try {
-      return crypto.decryptString(Buffer.from(entry.encrypted, 'base64'))
-    } catch (error) {
-      console.error(`[Hermes 凭据] 解密失败 (ref=${ref}):`, error)
-      return null
-    }
+    return this.decrypt(this.readConfig().credentials.find((item) => item.ref === ref))
   }
 
-  /** 删除凭据；返回是否删除成功 */
   deleteCredential(ref: string): boolean {
     const config = this.readConfig()
     const index = config.credentials.findIndex((item) => item.ref === ref)
-    if (index < 0) {
-      return false
-    }
+    if (index < 0) return false
     config.credentials.splice(index, 1)
     this.writeConfig(config)
     return true
   }
 
-  /** 列出全部凭据元数据（不含明文与密文） */
+  setOwnedCredential(targetId: string, slot: HermesCredentialSlot, secret: string): void {
+    if (!targetId.trim()) throw new Error('targetId 不能为空')
+    const config = this.readConfig()
+    const encrypted = this.encrypt(secret)
+    const now = Date.now()
+    const matches = config.credentials
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry.ownerTargetId === targetId && entry.slot === slot)
+    const existing = matches[0]
+    const entry: HermesCredentialEntry = {
+      ref: existing?.entry.ref ?? randomUUID(),
+      kind: slot,
+      ownerTargetId: targetId,
+      slot,
+      encrypted,
+      createdAt: existing?.entry.createdAt ?? now,
+      updatedAt: now,
+    }
+    if (existing) config.credentials[existing.index] = entry
+    else config.credentials.push(entry)
+    // 修复旧版本可能遗留的同 owner/slot 重复项。
+    config.credentials = config.credentials.filter((item) =>
+      item.ref === entry.ref || item.ownerTargetId !== targetId || item.slot !== slot)
+    this.writeConfig(config)
+  }
+
+  getOwnedCredential(targetId: string, slot: HermesCredentialSlot): string | null {
+    return this.decrypt(this.readConfig().credentials.find((item) =>
+      item.ownerTargetId === targetId && item.slot === slot))
+  }
+
+  hasOwnedCredential(targetId: string, slot: HermesCredentialSlot): boolean {
+    return this.readConfig().credentials.some((item) =>
+      item.ownerTargetId === targetId && item.slot === slot)
+  }
+
+  clearOwnedCredential(targetId: string, slot: HermesCredentialSlot): boolean {
+    const config = this.readConfig()
+    const before = config.credentials.length
+    config.credentials = config.credentials.filter((item) =>
+      item.ownerTargetId !== targetId || item.slot !== slot)
+    if (before === config.credentials.length) return false
+    this.writeConfig(config)
+    return true
+  }
+
+  clearTargetCredentials(targetId: string): number {
+    const config = this.readConfig()
+    const before = config.credentials.length
+    config.credentials = config.credentials.filter((item) => item.ownerTargetId !== targetId)
+    const removed = before - config.credentials.length
+    if (removed > 0) this.writeConfig(config)
+    return removed
+  }
+
+  claimLegacyCredential(targetId: string, slot: HermesCredentialSlot, ref: string): boolean {
+    const config = this.readConfig()
+    const index = config.credentials.findIndex((item) => item.ref === ref)
+    if (index < 0) return false
+    const entry = config.credentials[index]!
+    if (entry.ownerTargetId && entry.ownerTargetId !== targetId) {
+      throw new Error('该 legacy 凭据已属于其他 target')
+    }
+    if (entry.slot && entry.slot !== slot) {
+      throw new Error('该 legacy 凭据已绑定其他 slot')
+    }
+    config.credentials = config.credentials.filter((item) =>
+      item.ref === ref || item.ownerTargetId !== targetId || item.slot !== slot)
+    const owned = config.credentials.find((item) => item.ref === ref)!
+    owned.ownerTargetId = targetId
+    owned.slot = slot
+    owned.kind = slot
+    owned.updatedAt = Date.now()
+    this.writeConfig(config)
+    return true
+  }
+
   listCredentials(): Array<Omit<HermesCredentialEntry, 'encrypted'>> {
     return this.readConfig().credentials.map(({ encrypted: _encrypted, ...meta }) => meta)
   }
 }
 
-/** 单例实例（主进程全局复用；加密能力在主进程初始化后生效） */
 export const hermesCredentialStore = new HermesCredentialStore()

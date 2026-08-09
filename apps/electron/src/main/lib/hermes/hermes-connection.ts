@@ -1,26 +1,8 @@
-/**
- * Hermes 连接工厂
- *
- * 为 HermesRuntimeFacade 提供真实依赖：
- * - buildHermesTransport：按 target.mode 构建 Direct 或 SSH Tunnel 传输；
- * - readHermesDashboardPassword：解析 dashboard-password 凭据（约定 JSON 或纯密码）。
- *
- * 安全约束：密码解析后仅存在于调用栈中，不缓存、不入日志。
- */
-
-import type { HermesTarget } from '@proma/shared'
-import { HermesDirectTransport } from './transport/hermes-direct-transport'
-import { HermesSshTunnelManager, type HermesSshTunnelHandle } from './transport/hermes-ssh-tunnel'
-import type { HermesTransport } from './transport/hermes-transport'
+import type { HermesProtocol, HermesTarget } from '@proma/shared'
 import type { HermesDashboardPasswordCredential } from './hermes-runtime-facade'
+import { HermesEndpointManager, hermesEndpointManager } from './hermes-endpoint-manager'
+import type { HermesTransport } from './transport/hermes-transport'
 
-/**
- * 解析 dashboard-password 凭据。
- *
- * 支持两种格式：
- * - JSON：{"username":"...","password":"..."}（推荐）
- * - 纯密码：secret 即密码（历史兼容；username 为空）
- */
 export function parseDashboardPasswordSecret(secret: string): HermesDashboardPasswordCredential {
   const trimmed = secret.trim()
   if (trimmed.startsWith('{')) {
@@ -31,54 +13,37 @@ export function parseDashboardPasswordSecret(secret: string): HermesDashboardPas
         password: typeof parsed.password === 'string' ? parsed.password : '',
       }
     } catch {
-      // 回退到纯密码
+      // legacy pure-password fallback
     }
   }
   return { username: '', password: secret }
 }
 
-/** SSH 隧道句柄容器（生命周期由 transport dispose 管理） */
-export interface HermesTunneledTransport {
-  transport: HermesTransport
-  tunnel?: HermesSshTunnelHandle
-}
-
 /**
- * 构建 target 的 transport。
- *
- * - direct：直接使用 remoteUrl；
- * - ssh-tunnel：先建立隧道，再基于 127.0.0.1 本地端口构建 transport。
- *
- * @returns transport（调用方负责 dispose；SSH 隧道随 dispose 关闭）
+ * Legacy call-site bridge. Protocol selection is explicit and EndpointManager owns lifetime;
+ * dispose() only releases this lease and never directly tears down a shared transport.
  */
 export async function buildHermesTransport(
   target: HermesTarget,
-  sshTunnelManager: HermesSshTunnelManager = new HermesSshTunnelManager(),
+  protocol: HermesProtocol = 'dashboard',
+  manager: HermesEndpointManager = hermesEndpointManager,
 ): Promise<HermesTransport> {
-  if (target.mode === 'direct') {
-    if (!target.remoteUrl) {
-      throw new Error('Direct 模式缺少远端 URL')
-    }
-    return new HermesDirectTransport(target.remoteUrl)
+  const lease = await manager.acquire(target)
+  const shared = protocol === 'dashboard' ? lease.dashboard : lease.apiServer
+  if (!shared) {
+    lease.release()
+    throw new Error(`Hermes target 未配置 ${protocol} endpoint`)
   }
-
-  if (target.mode === 'ssh-tunnel') {
-    if (!target.ssh) {
-      throw new Error('SSH Tunnel 模式缺少 SSH 配置')
-    }
-    const tunnel = await sshTunnelManager.openTunnel(target.ssh, {
-      hostKeyMode: 'confirm',
-    })
-    const dashboardBase = `http://127.0.0.1:${tunnel.localDashboardPort}/`
-    const transport = new HermesDirectTransport(dashboardBase)
-    // 包装 dispose：关闭隧道（不停止远端 Hermes）
-    const originalDispose = transport.dispose.bind(transport)
-    transport.dispose = () => {
-      originalDispose()
-      void tunnel.close()
-    }
-    return transport
+  let released = false
+  return {
+    baseUrl: shared.baseUrl,
+    requestJson: (path, options) => shared.requestJson(path, options),
+    openSse: (path, options) => shared.openSse(path, options),
+    connectWebSocket: (path, options) => shared.connectWebSocket(path, options),
+    dispose: () => {
+      if (released) return
+      released = true
+      lease.release()
+    },
   }
-
-  throw new Error(`未知的 Hermes 连接模式: ${String(target.mode)}`)
 }

@@ -14,7 +14,7 @@ import {
   parseSessionList,
   parseHistoryMessages,
 } from './hermes-dashboard-adapter'
-import { HermesError } from './hermes-errors'
+import { HermesError, HermesRpcError } from './hermes-errors'
 
 /** fake WebSocket（支持 message/close 事件与 send 捕获） */
 class FakeWebSocket extends EventTarget {
@@ -79,7 +79,9 @@ describe('HermesDashboardWsClient JSON-RPC', () => {
       error: { code: 4001, message: 'session not found' },
     })
     const error = await promise.catch((e: unknown) => e)
-    expect(error).toBeInstanceOf(HermesError)
+    expect(error).toBeInstanceOf(HermesRpcError)
+    expect((error as HermesRpcError).rpcCode).toBe(4001)
+    expect((error as HermesRpcError).method).toBe('prompt.submit')
   })
 
   test('Given 无响应 When 请求超时 Then reject timeout', async () => {
@@ -96,12 +98,12 @@ describe('HermesDashboardWsClient JSON-RPC', () => {
     client.onNotification((method, params) => events.push({ method, params }))
     socket.emitMessage({
       jsonrpc: '2.0',
-      method: 'message.delta',
-      params: { text: 'hi' },
+      method: 'event',
+      params: { type: 'message.delta', session_id: 'run-1', payload: { text: 'hi' } },
     })
     expect(events).toHaveLength(1)
-    expect(events[0]?.method).toBe('message.delta')
-    expect((events[0]?.params as { text: string }).text).toBe('hi')
+    expect(events[0]?.method).toBe('event')
+    expect((events[0]?.params as { type: string }).type).toBe('message.delta')
   })
 
   test('Given 取消处理器 When 再收到通知 Then 不再分发', async () => {

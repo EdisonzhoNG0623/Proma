@@ -1,32 +1,23 @@
-/**
- * Hermes Remote SFTP 服务
- *
- * 通过 SSH/SFTP 与远端 Hermes 主机进行文件传输，支持：
- * - 目录/文件浏览与 stat
- * - 文件上传/下载（文本与二进制）
- * - 项目目录递归同步（增量：对比 mtime/size）
- *
- * 凭据安全：SSH 密码/私钥来自 CredentialStore（safeStorage 加密），
- * 不在命令行或日志中出现。
- */
-
-import { Client, type ConnectConfig, type SFTPWrapper } from 'ssh2'
-import { statSync, readFileSync, readdirSync, existsSync } from 'node:fs'
-import { join, basename } from 'node:path'
+import path from 'node:path'
+import type { SFTPWrapper } from 'ssh2'
 import { HermesError } from './hermes-errors'
+import { HermesSshConnection } from './transport/hermes-ssh-connection'
 
-/** SFTP 连接配置 */
+export const HERMES_REMOTE_TEXT_MAX_BYTES = 5 * 1024 * 1024
+const FILE_TYPE_MASK = 0o170000
+const DIRECTORY_MODE = 0o040000
+const REGULAR_MODE = 0o100000
+const SYMLINK_MODE = 0o120000
+
 export interface HermesSftpAuth {
   host: string
   port: number
   username: string
-  /** SSH 密码（可选；与 privateKey 二选一） */
   password?: string
-  /** SSH 私钥内容（可选） */
   privateKey?: string
+  passphrase?: string
 }
 
-/** 远端文件条目 */
 export interface HermesRemoteFileEntry {
   name: string
   path: string
@@ -35,220 +26,149 @@ export interface HermesRemoteFileEntry {
   mtimeMs: number
 }
 
-/** 同步结果 */
-export interface HermesSyncResult {
-  uploaded: number
-  skipped: number
-  failed: number
-  /** 失败的路径 */
-  errors: string[]
+interface SftpAttrs { size: number; mtime: number; mode: number }
+
+export function assertSafeProjectName(name: string): string {
+  const trimmed = name.trim()
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(trimmed) || trimmed === '.' || trimmed === '..') {
+    throw new HermesError('远端项目名仅允许 1-64 位字母、数字、点、下划线和短横线', 'invalid-response')
+  }
+  return trimmed
 }
 
-/**
- * 判断本地文件是否需要上传（增量对比：远端不存在、大小不同、或 mtime 差异 > 1s）。
- * 纯函数，便于测试。
- */
-export function shouldUploadFile(
-  remoteStat: HermesRemoteFileEntry | null,
-  localStat: { size: number; mtimeMs: number },
-): boolean {
-  if (!remoteStat) return true
-  if (remoteStat.size !== localStat.size) return true
-  return Math.abs(remoteStat.mtimeMs - localStat.mtimeMs) > 1000
+export function assertContainedPosixPath(rootPath: string, remotePath: string): string {
+  const root = path.posix.resolve('/', rootPath)
+  const requested = remotePath.startsWith('/')
+    ? path.posix.resolve('/', remotePath)
+    : path.posix.resolve(root, remotePath)
+  if (requested !== root && !requested.startsWith(`${root}/`)) {
+    throw new HermesError('远端路径越出允许的项目根目录', 'invalid-response')
+  }
+  return requested
 }
 
-/**
- * Remote SFTP 服务
- */
+export function decodeUtf8Text(data: Buffer): string {
+  if (data.includes(0)) throw new HermesError('远端文件是二进制文件，拒绝作为文本读取', 'invalid-response')
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(data)
+  } catch {
+    throw new HermesError('远端文件不是有效 UTF-8 文本', 'invalid-response')
+  }
+}
+
+function promisifyAttrs(
+  invoke: (callback: (error: Error | undefined, attrs?: SftpAttrs) => void) => void,
+): Promise<SftpAttrs> {
+  return new Promise((resolve, reject) => invoke((error, attrs) => {
+    if (error || !attrs) reject(error ?? new Error('missing attrs'))
+    else resolve(attrs)
+  }))
+}
+
+/** Hardened explicit SFTP browser. No recursive local-directory synchronization. */
 export class HermesRemoteSftp {
-  private connection: Client | null = null
   private sftp: SFTPWrapper | null = null
+  private ownedConnection: HermesSshConnection | null = null
 
-  /** 建立 SSH + SFTP 连接 */
-  async connect(auth: HermesSftpAuth): Promise<void> {
-    if (this.connection) {
+  constructor(private readonly sharedConnection?: HermesSshConnection) {}
+
+  async connect(auth?: HermesSftpAuth): Promise<void> {
+    if (this.sftp) return
+    if (this.sharedConnection) {
+      this.sftp = await this.sharedConnection.openSftp()
       return
     }
-    await new Promise<void>((resolve, reject) => {
-      const connection = new Client()
-      connection.on('error', (error) => {
-        reject(new HermesError(`SSH 连接失败: ${error.message}`, 'ssh'))
-      })
-      connection.on('ready', () => {
-        connection.sftp((error: Error | undefined, sftp?: SFTPWrapper) => {
-          if (error || !sftp) {
-            reject(new HermesError(`SFTP 初始化失败: ${error?.message ?? 'unknown'}`, 'ssh'))
-            return
-          }
-          this.connection = connection
-          this.sftp = sftp
-          resolve()
-        })
-      })
-      connection.connect({
-        host: auth.host,
-        port: auth.port,
-        username: auth.username,
-        ...(auth.password ? { password: auth.password } : {}),
-        ...(auth.privateKey ? { privateKey: auth.privateKey } : {}),
-        readyTimeout: 10_000,
-      } as ConnectConfig)
-    })
+    if (!auth) throw new HermesError('SFTP 缺少 SSH 认证', 'ssh')
+    this.ownedConnection = await HermesSshConnection.connect(auth, { endpoints: {} })
+    this.sftp = await this.ownedConnection.openSftp()
   }
 
-  /** 列出远端目录 */
-  async listDir(remotePath: string): Promise<HermesRemoteFileEntry[]> {
+  private realpath(remotePath: string): Promise<string> {
     const sftp = this.requireSftp()
-    const entries = await new Promise<Array<{ filename: string; longname: string; attrs: { size: number; mtime: number; mode: number } }>>((resolve, reject) => {
-      sftp.readdir(remotePath, (error, list) => {
-        if (error) reject(error)
-        else resolve(list)
-      })
-    })
-    return entries.map((entry) => ({
-      name: entry.filename,
-      path: join(remotePath, entry.filename),
-      isDirectory: (entry.attrs.mode & 0o170000) === 0o040000,
-      size: entry.attrs.size,
-      mtimeMs: entry.attrs.mtime * 1000,
+    return new Promise((resolve, reject) => sftp.realpath(remotePath, (error, resolved) => {
+      if (error) reject(error)
+      else resolve(path.posix.normalize(resolved))
     }))
   }
 
-  /** stat 远端路径（不存在返回 null） */
-  async stat(remotePath: string): Promise<HermesRemoteFileEntry | null> {
-    const sftp = this.requireSftp()
-    try {
-      const attrs = await new Promise<{ size: number; mtime: number; mode: number }>((resolve, reject) => {
-        sftp.stat(remotePath, (error, stats) => {
-          if (error) reject(error)
-          else resolve(stats)
-        })
-      })
-      return {
-        name: basename(remotePath),
-        path: remotePath,
-        isDirectory: (attrs.mode & 0o170000) === 0o040000,
-        size: attrs.size,
-        mtimeMs: attrs.mtime * 1000,
-      }
-    } catch {
-      return null
-    }
+  private async canonicalRoot(rootPath: string): Promise<string> {
+    // ssh2 realpath expands ~ on the remote host; all later checks use canonical absolute paths.
+    return path.posix.normalize(await this.realpath(rootPath))
   }
 
-  /** 递归创建远端目录 */
-  async mkdirp(remotePath: string): Promise<void> {
-    const sftp = this.requireSftp()
-    const parts = remotePath.split('/').filter(Boolean)
-    let current = ''
-    for (const part of parts) {
-      current = `${current}/${part}`
-      const existing = await this.stat(current)
-      if (existing?.isDirectory) continue
-      await new Promise<void>((resolve, reject) => {
-        sftp.mkdir(current, (error) => {
-          // EEXIST 视为成功
-          if (error && (error as NodeJS.ErrnoException).code !== 'EEXIST') reject(error)
-          else resolve()
-        })
-      })
-    }
+  private async containedExistingPath(rootPath: string, remotePath: string): Promise<{ root: string; resolved: string }> {
+    const root = await this.canonicalRoot(rootPath)
+    const lexical = assertContainedPosixPath(root, remotePath)
+    const resolved = await this.realpath(lexical)
+    assertContainedPosixPath(root, resolved)
+    return { root, resolved }
   }
 
-  /** 上传单个文件（覆盖远端） */
-  async uploadFile(localPath: string, remotePath: string): Promise<void> {
-    const sftp = this.requireSftp()
-    const data = readFileSync(localPath)
+  async listDir(rootPath: string, remotePath: string): Promise<HermesRemoteFileEntry[]> {
+    const { root, resolved } = await this.containedExistingPath(rootPath, remotePath)
+    const attrs = await this.lstat(resolved)
+    if ((attrs.mode & FILE_TYPE_MASK) === SYMLINK_MODE) throw new HermesError('默认拒绝浏览符号链接', 'invalid-response')
+    if ((attrs.mode & FILE_TYPE_MASK) !== DIRECTORY_MODE) throw new HermesError('远端路径不是目录', 'invalid-response')
+    const entries = await new Promise<Array<{ filename: string; attrs: SftpAttrs }>>((resolve, reject) => {
+      this.requireSftp().readdir(resolved, (error, list) => error ? reject(error) : resolve(list))
+    })
+    return entries.flatMap((entry) => {
+      const mode = entry.attrs.mode & FILE_TYPE_MASK
+      if (mode === SYMLINK_MODE) return []
+      const entryPath = assertContainedPosixPath(root, path.posix.join(resolved, entry.filename))
+      return [{
+        name: entry.filename,
+        path: entryPath,
+        isDirectory: mode === DIRECTORY_MODE,
+        size: entry.attrs.size,
+        mtimeMs: entry.attrs.mtime * 1000,
+      }]
+    })
+  }
+
+  async readFile(rootPath: string, remotePath: string, maxBytes = HERMES_REMOTE_TEXT_MAX_BYTES): Promise<string> {
+    const cap = Math.max(1, Math.min(maxBytes, HERMES_REMOTE_TEXT_MAX_BYTES))
+    const { resolved } = await this.containedExistingPath(rootPath, remotePath)
+    const attrs = await this.lstat(resolved)
+    const mode = attrs.mode & FILE_TYPE_MASK
+    if (mode === SYMLINK_MODE) throw new HermesError('默认拒绝读取符号链接', 'invalid-response')
+    if (mode !== REGULAR_MODE) throw new HermesError('远端路径不是普通文件', 'invalid-response')
+    if (attrs.size > cap) throw new HermesError(`远端文件超过 ${cap} 字节读取上限`, 'invalid-response')
+    const data = await new Promise<Buffer>((resolve, reject) => {
+      this.requireSftp().readFile(resolved, (error, buffer) => error ? reject(error) : resolve(buffer))
+    })
+    if (data.length > cap) throw new HermesError(`远端文件超过 ${cap} 字节读取上限`, 'invalid-response')
+    return decodeUtf8Text(data)
+  }
+
+  async createProject(rootPath: string, name: string): Promise<string> {
+    const safeName = assertSafeProjectName(name)
+    const root = await this.canonicalRoot(rootPath)
+    const child = assertContainedPosixPath(root, path.posix.join(root, safeName))
     await new Promise<void>((resolve, reject) => {
-      sftp.writeFile(remotePath, data, (error) => {
-        if (error) reject(error)
+      this.requireSftp().mkdir(child, (error) => {
+        if (error && (error as NodeJS.ErrnoException).code !== 'EEXIST') reject(error)
         else resolve()
       })
     })
+    const resolved = await this.realpath(child)
+    assertContainedPosixPath(root, resolved)
+    return resolved
   }
 
-  /** 读取远端文本文件 */
-  async readFile(remotePath: string): Promise<string> {
-    const sftp = this.requireSftp()
-    const data = await new Promise<Buffer>((resolve, reject) => {
-      sftp.readFile(remotePath, (error, buffer) => {
-        if (error) reject(error)
-        else resolve(buffer)
-      })
-    })
-    return data.toString('utf-8')
+  private lstat(remotePath: string): Promise<SftpAttrs> {
+    return promisifyAttrs((callback) => this.requireSftp().lstat(remotePath, callback))
   }
 
-  /**
-   * 同步本地目录到远端（增量：对比 mtime/size）。
-   *
-   * @param localDir 本地目录
-   * @param remoteDir 远端目标目录
-   * @param options.filter 过滤函数（返回 false 跳过文件）
-   * @param options.skipDelete 是否跳过删除远端多余文件（默认 true 安全）
-   */
-  async syncDir(
-    localDir: string,
-    remoteDir: string,
-    options: { filter?: (relativePath: string) => boolean; skipDelete?: boolean } = {},
-  ): Promise<HermesSyncResult> {
-    await this.mkdirp(remoteDir)
-    const result: HermesSyncResult = { uploaded: 0, skipped: 0, failed: 0, errors: [] }
-
-    const walk = async (localPath: string, remotePath: string, relPath: string): Promise<void> => {
-      if (!existsSync(localPath)) return
-      const localStat = statSync(localPath)
-      if (localStat.isDirectory()) {
-        await this.mkdirp(remotePath)
-        for (const child of readdirSync(localPath)) {
-          const childLocal = join(localPath, child)
-          const childRemote = `${remotePath}/${child}`
-          const childRel = relPath ? `${relPath}/${child}` : child
-          if (options.filter && !options.filter(childRel)) continue
-          await walk(childLocal, childRemote, childRel)
-        }
-        return
-      }
-      // 文件：对比远端 mtime/size，变化才上传
-      const remoteStat = await this.stat(remotePath)
-      const needsUpload = shouldUploadFile(remoteStat, {
-        size: localStat.size,
-        mtimeMs: localStat.mtimeMs,
-      })
-      if (!needsUpload) {
-        result.skipped += 1
-        return
-      }
-      try {
-        await this.uploadFile(localPath, remotePath)
-        result.uploaded += 1
-      } catch (error) {
-        result.failed += 1
-        result.errors.push(relPath)
-        console.error(`[Hermes SFTP] 上传失败 ${relPath}:`, error instanceof Error ? error.message : String(error))
-      }
-    }
-
-    await walk(localDir, remoteDir, '')
-    return result
-  }
-
-  /** 关闭连接 */
   close(): void {
-    try {
-      this.sftp?.end()
-    } catch {
-      // 忽略
-    }
-    this.connection?.end()
-    this.connection = null
+    try { this.sftp?.end() } catch { /* ignore close race */ }
     this.sftp = null
+    if (this.ownedConnection) void this.ownedConnection.close()
+    this.ownedConnection = null
   }
 
   private requireSftp(): SFTPWrapper {
-    if (!this.sftp) {
-      throw new HermesError('SFTP 未连接', 'ssh')
-    }
+    if (!this.sftp) throw new HermesError('SFTP 未连接', 'ssh')
     return this.sftp
   }
 }

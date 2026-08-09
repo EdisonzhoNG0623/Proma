@@ -11,7 +11,7 @@
 import { Type } from 'typebox'
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { AgentToolResult } from '@earendil-works/pi-agent-core'
-import type { AgentRuntime, PromaPermissionMode } from '@proma/shared'
+import type { AgentRuntime, LocalAgentRuntime, PromaPermissionMode } from '@proma/shared'
 import type {
   CreateAutomationInput,
   UpdateAutomationInput,
@@ -28,6 +28,7 @@ import {
   runAutomationNow,
 } from '../automation-scheduler'
 import { getAgentSessionMeta } from '../agent-session-manager'
+import { isLocalAgentRuntime } from '../agent-runtime-policy'
 import { isBuiltinMcpUserEnabled } from '../builtin-mcp/settings'
 import { buildPiCollaborationTools } from '../agent-collaboration-tools'
 import { getVisionRelayRouteLabel, inspectImageWithVisionRelay, isVisionRelayConfigured, isVisionRelayEligibleForModel } from '../vision-relay-service'
@@ -358,7 +359,8 @@ function buildAutomationTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefin
           dayOfMonth: args.dayOfMonth as number | undefined,
           scheduledAt: args.scheduledAt as number | undefined,
           maxRuns: args.maxRuns as number | undefined,
-          agentRuntime: (args.agentRuntime as AgentRuntime | undefined) ?? ctx.agentRuntime,
+          agentRuntime: (args.agentRuntime as LocalAgentRuntime | undefined)
+            ?? (isLocalAgentRuntime(ctx.agentRuntime) ? ctx.agentRuntime : 'pi'),
           channelId: ctx.channelId,
           modelId: ctx.modelId,
           workspaceId: ctx.workspaceId,
@@ -428,7 +430,7 @@ function buildAutomationTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefin
           scheduledAt: args.scheduledAt as number | undefined,
           maxRuns: args.maxRuns as number | undefined,
           active: args.active as boolean | undefined,
-          agentRuntime: args.agentRuntime as AgentRuntime | undefined,
+          agentRuntime: args.agentRuntime as LocalAgentRuntime | undefined,
           sessionMode: args.sessionMode as 'daily' | 'reuse' | undefined,
         }
         if (input.name !== undefined) assertNonBlank(input.name, 'name')

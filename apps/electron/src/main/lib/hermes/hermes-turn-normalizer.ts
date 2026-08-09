@@ -125,7 +125,7 @@ export function normalizeDashboardNotification(
     }
     case 'clarify.request': {
       const question = pickString(params, ['question', 'prompt', 'message']) ?? '远端提出问题'
-      console.log('[Hermes] 收到 clarify.request:', question)
+      // Interaction content is routed to UI; avoid logging potentially sensitive questions.
       const choices = Array.isArray(params['choices'])
         ? params['choices'].filter((c): c is string => typeof c === 'string')
         : undefined

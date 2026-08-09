@@ -130,6 +130,40 @@ describe('Agent 会话 JSONL 读取', () => {
     expect(messages.map((message) => message.type)).toEqual(['user', 'assistant'])
   })
 
+  test('Given 超大工具结果 When 读取 Renderer snapshot Then 只裁剪 IPC 副本且不修改磁盘真源', () => {
+    const hugeResult = 'x'.repeat(100 * 1024)
+    writeAgentSessionJsonl('session-renderer-safe', [
+      JSON.stringify({
+        type: 'user',
+        uuid: 'tool-result-1',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: hugeResult }] },
+      }),
+    ])
+
+    const rawMessages = manager.getAgentSessionSDKMessages('session-renderer-safe')
+    const rendererMessages = manager.getAgentSessionSDKMessagesForRenderer('session-renderer-safe')
+    const rawContent = (rawMessages[0] as { message: { content: Array<{ content: string }> } }).message.content[0]!.content
+    const rendererContent = (rendererMessages[0] as { message: { content: Array<{ content: string }> } }).message.content[0]!.content
+
+    expect(rawContent).toHaveLength(100 * 1024)
+    expect(rendererContent.length).toBeLessThan(10_000)
+    expect(rendererContent).toContain('内容已截断')
+    expect(manager.getAgentSessionSDKMessages('session-renderer-safe')[0]).toEqual(rawMessages[0])
+  })
+
+  test('Given stable UUID boundary When 读取完成尾段 Then 只返回边界后的 canonical 消息', () => {
+    writeAgentSessionJsonl('session-tail-delta', [
+      JSON.stringify({ type: 'assistant', uuid: 'before', message: { content: [{ type: 'text', text: '旧回复' }] } }),
+      JSON.stringify({ type: 'result', subtype: 'success' }),
+      JSON.stringify({ type: 'user', uuid: 'current-user', message: { content: [{ type: 'text', text: '新问题' }] } }),
+      JSON.stringify({ type: 'assistant', uuid: 'current-assistant', message: { content: [{ type: 'text', text: '新回复' }] } }),
+    ])
+
+    const tail = manager.getAgentSessionSDKMessagesAfterForRenderer('session-tail-delta', 'before')
+    expect(tail?.map((message) => message.type)).toEqual(['result', 'user', 'assistant'])
+    expect(manager.getAgentSessionSDKMessagesAfterForRenderer('session-tail-delta', 'missing')).toBeNull()
+  })
+
   test('Given SDK rewind JSONL 存在损坏行 When 从快照恢复文件 Then 严格失败避免误报成功', () => {
     const cwd = join(tempHome, 'workspace')
     mkdirSync(cwd, { recursive: true })

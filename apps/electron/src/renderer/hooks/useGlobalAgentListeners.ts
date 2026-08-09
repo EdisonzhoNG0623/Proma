@@ -65,7 +65,8 @@ import { channelsAtom } from '@/atoms/chat-atoms'
 import { previewFileMapAtom } from '@/atoms/preview-atoms'
 import type { NotificationSoundType } from '@/types/settings'
 import { toast } from 'sonner'
-import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStreamPayload, SDKAssistantMessage, SDKUserMessage, SDKSystemMessage, SDKContentBlock, SDKUserContentBlock, PromaEvent, AgentSessionMeta, ProviderType } from '@proma/shared'
+import { extractUserText } from '@proma/session-core'
+import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStreamPayload, SDKAssistantMessage, SDKMessage, SDKUserMessage, SDKSystemMessage, SDKContentBlock, SDKUserContentBlock, PromaEvent, AgentSessionMeta, ProviderType } from '@proma/shared'
 import { inferAgentSdkContextWindow, inferContextWindow } from '@proma/shared'
 import { buildExternalAgentRunActivation, shouldActivateExternalAgentRun } from '@/lib/external-agent-run'
 import { upsertAgentSession, mergeFetchedAgentSessions } from '@/lib/agent-session-list'
@@ -1227,7 +1228,9 @@ export function useGlobalAgentListeners(): void {
           })
         } else if (!backgroundTasksPending) {
           // 当前聚焦会话已在主应用可见；同步确认，避免灵动岛把这次完成继续当未读。
+          if (window.electronAPI.agentIsland?.markSessionViewed) {
           void window.electronAPI.agentIsland.markSessionViewed(data.sessionId).catch(console.error)
+        }
         }
 
         // 对齐本次会话的主动打断状态，无需借助全量列表刷新重建整个 Set。

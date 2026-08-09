@@ -8,13 +8,13 @@
 
 import { atom } from 'jotai'
 import type {
-  HermesTarget,
+  HermesPublicTarget,
   HermesTargetCreateInput,
   HermesTargetUpdateInput,
 } from '@proma/shared'
 
 /** Hermes target 列表（不含任何明文凭据） */
-export const hermesTargetsAtom = atom<HermesTarget[]>([])
+export const hermesTargetsAtom = atom<HermesPublicTarget[]>([])
 
 /** 是否已加载 */
 export const hermesTargetsLoadedAtom = atom(false)
@@ -23,7 +23,7 @@ export const hermesTargetsLoadedAtom = atom(false)
 export const activeHermesTargetIdAtom = atom<string | null>(null)
 
 /** 当前 active target 对象 */
-export const activeHermesTargetAtom = atom<HermesTarget | null>((get) => {
+export const activeHermesTargetAtom = atom<HermesPublicTarget | null>((get) => {
   const id = get(activeHermesTargetIdAtom)
   if (!id) return null
   return get(hermesTargetsAtom).find((target) => target.id === id) ?? null
@@ -32,7 +32,7 @@ export const activeHermesTargetAtom = atom<HermesTarget | null>((get) => {
 /**
  * 从主进程加载 Hermes target 列表。
  */
-export async function loadHermesTargets(): Promise<HermesTarget[]> {
+export async function loadHermesTargets(): Promise<HermesPublicTarget[]> {
   const targets = await window.electronAPI.hermes.listTargets()
   return targets
 }
@@ -40,7 +40,7 @@ export async function loadHermesTargets(): Promise<HermesTarget[]> {
 /**
  * 创建 Hermes target（通过 IPC）。
  */
-export async function createHermesTarget(input: HermesTargetCreateInput): Promise<HermesTarget> {
+export async function createHermesTarget(input: HermesTargetCreateInput): Promise<HermesPublicTarget> {
   return await window.electronAPI.hermes.createTarget(input)
 }
 
@@ -50,7 +50,7 @@ export async function createHermesTarget(input: HermesTargetCreateInput): Promis
 export async function updateHermesTarget(
   id: string,
   input: HermesTargetUpdateInput,
-): Promise<HermesTarget> {
+): Promise<HermesPublicTarget> {
   return await window.electronAPI.hermes.updateTarget(id, input)
 }
 

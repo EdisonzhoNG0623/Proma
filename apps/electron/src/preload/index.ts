@@ -490,12 +490,14 @@ export interface ElectronAPI {
 
   /** 获取 Agent 会话 SDKMessage（Phase 4 新格式） */
   getAgentSessionSDKMessages: (id: string) => Promise<SDKMessage[]>
+  /** 获取稳定 UUID 后的 canonical 尾段；边界失效时返回 null */
+  getAgentSessionSDKMessagesAfter: (id: string, afterUuid: string) => Promise<SDKMessage[] | null>
 
   /** 更新 Agent 会话标题 */
   updateAgentSessionTitle: (id: string, title: string) => Promise<AgentSessionMeta>
 
   /** 切换 Agent 会话 runtime */
-  updateSessionAgentRuntime: (sessionId: string, runtime: AgentRuntime, hermesTargetId?: string) => Promise<AgentSessionMeta>
+  updateSessionAgentRuntime: (sessionId: string, runtime: AgentRuntime, hermesTargetId?: string, hermesProtocol?: import('@proma/shared').HermesProtocol) => Promise<AgentSessionMeta>
 
   /** 切换当前会话的 ChatGPT Codex Fast Mode */
   updateSessionCodexFastMode: (sessionId: string, enabled: boolean) => Promise<AgentSessionMeta>
@@ -1213,10 +1215,10 @@ export interface ElectronAPI {
 
   /** Hermes Remote 连接管理 */
   hermes: {
-    listTargets: () => Promise<import('@proma/shared').HermesTarget[]>
-    getTarget: (id: string) => Promise<import('@proma/shared').HermesTarget | null>
-    createTarget: (input: import('@proma/shared').HermesTargetCreateInput) => Promise<import('@proma/shared').HermesTarget>
-    updateTarget: (id: string, input: import('@proma/shared').HermesTargetUpdateInput) => Promise<import('@proma/shared').HermesTarget>
+    listTargets: () => Promise<import('@proma/shared').HermesPublicTarget[]>
+    getTarget: (id: string) => Promise<import('@proma/shared').HermesPublicTarget | null>
+    createTarget: (input: import('@proma/shared').HermesTargetCreateInput) => Promise<import('@proma/shared').HermesPublicTarget>
+    updateTarget: (id: string, input: import('@proma/shared').HermesTargetUpdateInput) => Promise<import('@proma/shared').HermesPublicTarget>
     deleteTarget: (id: string) => Promise<import('@proma/shared').HermesDeleteTargetResult>
     probeTarget: (id: string) => Promise<import('@proma/shared').HermesCapabilities>
     testConnection: (id: string) => Promise<import('@proma/shared').HermesConnectionTestResult>
@@ -1224,7 +1226,7 @@ export interface ElectronAPI {
     setDashboardPassword: (input: import('@proma/shared').HermesSetDashboardPasswordInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
     setApiServerKey: (input: import('@proma/shared').HermesSetCredentialInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
     setSshPassword: (input: import('@proma/shared').HermesSetCredentialInput) => Promise<import('@proma/shared').HermesSetCredentialResult>
-    deleteCredential: (ref: string) => Promise<boolean>
+    confirmSshHostKey: (targetId: string, challenge: string) => Promise<boolean>
     /** 获取远端项目树 */
     listRemoteProjects: (targetId: string) => Promise<import('@proma/shared').HermesRemoteProject[]>
     /** 获取某项目完整会话分组 */
@@ -1232,21 +1234,21 @@ export interface ElectronAPI {
     /** 获取远端会话列表 */
     listRemoteSessions: (targetId: string, limit?: number) => Promise<import('@proma/shared').HermesRemoteSessionSummary[]>
     /** 从远端会话创建并绑定 Proma Agent 会话；remoteSessionId 缺省时新建远端会话 */
-    createRemoteSession: (input: { targetId: string; remoteSessionId?: string; remoteCwd?: string; title?: string; workspaceId?: string }) => Promise<import('@proma/shared').AgentSessionMeta>
+    createRemoteSession: (input: { targetId: string; protocol?: import('@proma/shared').HermesProtocol; profile?: string; remoteSessionId?: string; remoteCwd?: string; title?: string; workspaceId?: string }) => Promise<import('@proma/shared').AgentSessionMeta>
     /** 清理重复远端会话，返回删除数量 */
     dedupeRemoteSessions: () => Promise<number>
-    /** 同步本地项目到远端 Hermes（SFTP 增量上传） */
-    syncProjectToRemote: (targetId: string, workspaceId: string) => Promise<import('@proma/shared').HermesSyncResult>
     /** 创建远端项目（SFTP mkdir） */
     createRemoteProject: (targetId: string, name: string) => Promise<string>
     /** 列出远端项目文件 */
-    listRemoteFiles: (targetId: string, remotePath: string) => Promise<import('@proma/shared').HermesRemoteFileEntry[]>
-    /** 读取远端文件内容 */
-    readRemoteFile: (targetId: string, remotePath: string) => Promise<string>
+    listRemoteFiles: (targetId: string, rootPath: string, remotePath: string) => Promise<import('@proma/shared').HermesRemoteFileEntry[]>
+    /** 读取远端 UTF-8 文本文件 */
+    readRemoteFile: (targetId: string, rootPath: string, remotePath: string) => Promise<string>
     /** 响应 Hermes 交互请求（approval/clarify/sudo/secret） */
     respondInteraction: (input: { sessionId: string; type: 'approval' | 'clarify' | 'sudo' | 'secret'; requestId?: string; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }) => Promise<void>
-    /** 附加图片/文件到会话（Proma → Hermes 发送） */
-    attachToSession: (sessionId: string, input: { kind: 'image' | 'file'; data: string; name?: string }) => Promise<void>
+    fetchMedia: (targetId: string, mediaPath: string) => Promise<{ dataUrl?: string } | null>
+    fetchAttachment: (sessionId: string, fileRef: string) => Promise<{ localPath: string; name: string; mimeType: string; size: number } | null>
+    openAttachment: (sessionId: string, fileRef: string) => Promise<boolean>
+    onTurnSubmitState: (callback: (state: import('@proma/shared').HermesTurnSubmitState) => void) => () => void
   }
 }
 
@@ -1673,12 +1675,16 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SDK_MESSAGES, id)
   },
 
+  getAgentSessionSDKMessagesAfter: (id: string, afterUuid: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SDK_MESSAGES_AFTER, id, afterUuid)
+  },
+
   updateAgentSessionTitle: (id: string, title: string) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_TITLE, id, title)
   },
 
-  updateSessionAgentRuntime: (sessionId: string, runtime: AgentRuntime, hermesTargetId?: string) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_SESSION_AGENT_RUNTIME, sessionId, runtime, hermesTargetId)
+  updateSessionAgentRuntime: (sessionId: string, runtime: AgentRuntime, hermesTargetId?: string, hermesProtocol?: import('@proma/shared').HermesProtocol) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_SESSION_AGENT_RUNTIME, sessionId, runtime, hermesTargetId, hermesProtocol)
   },
 
   updateSessionCodexFastMode: (sessionId: string, enabled: boolean) => {
@@ -2792,7 +2798,8 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.SET_API_SERVER_KEY, input),
     setSshPassword: (input: import('@proma/shared').HermesSetCredentialInput) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.SET_SSH_PASSWORD, input),
-    deleteCredential: (ref: string) => ipcRenderer.invoke(HERMES_IPC_CHANNELS.DELETE_CREDENTIAL, ref),
+    confirmSshHostKey: (targetId: string, challenge: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.CONFIRM_SSH_HOST_KEY, targetId, challenge),
     listRemoteProjects: (targetId: string) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_PROJECTS, targetId),
     listRemoteProjectSessions: (targetId: string, projectId: string) =>
@@ -2803,18 +2810,25 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_REMOTE_SESSION, input),
     dedupeRemoteSessions: () =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.DEDUPE_REMOTE_SESSIONS),
-    syncProjectToRemote: (targetId: string, workspaceId: string) =>
-      ipcRenderer.invoke(HERMES_IPC_CHANNELS.SYNC_PROJECT_TO_REMOTE, targetId, workspaceId),
     createRemoteProject: (targetId: string, name: string) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.CREATE_REMOTE_PROJECT, targetId, name),
-    listRemoteFiles: (targetId: string, remotePath: string) =>
-      ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_FILES, targetId, remotePath),
-    readRemoteFile: (targetId: string, remotePath: string) =>
-      ipcRenderer.invoke(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, targetId, remotePath),
+    listRemoteFiles: (targetId: string, rootPath: string, remotePath: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.LIST_REMOTE_FILES, targetId, rootPath, remotePath),
+    readRemoteFile: (targetId: string, rootPath: string, remotePath: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.READ_REMOTE_FILE, targetId, rootPath, remotePath),
     respondInteraction: (input) =>
       ipcRenderer.invoke(HERMES_IPC_CHANNELS.RESPOND_INTERACTION, input),
-    attachToSession: (sessionId, input) =>
-      ipcRenderer.invoke(HERMES_IPC_CHANNELS.ATTACH_TO_SESSION, sessionId, input),
+    fetchMedia: (targetId: string, mediaPath: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.FETCH_MEDIA, targetId, mediaPath),
+    fetchAttachment: (sessionId: string, fileRef: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.FETCH_ATTACHMENT, sessionId, fileRef),
+    openAttachment: (sessionId: string, fileRef: string) =>
+      ipcRenderer.invoke(HERMES_IPC_CHANNELS.OPEN_ATTACHMENT, sessionId, fileRef),
+    onTurnSubmitState: (callback) => {
+      const listener = (_: unknown, state: import('@proma/shared').HermesTurnSubmitState): void => callback(state)
+      ipcRenderer.on(HERMES_IPC_CHANNELS.TURN_SUBMIT_STATE, listener)
+      return () => { ipcRenderer.removeListener(HERMES_IPC_CHANNELS.TURN_SUBMIT_STATE, listener) }
+    },
   },
 }
 

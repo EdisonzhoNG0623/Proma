@@ -14,6 +14,46 @@
  */
 export type HermesConnectionMode = 'direct' | 'ssh-tunnel'
 
+/** 远端会话采用的显式协议；同一会话禁止透明切换协议 */
+export type HermesProtocol = 'dashboard' | 'api-server'
+
+/** 单个 Hermes 服务端点 */
+export interface HermesEndpointConfig {
+  /** Direct 模式的服务根 URL */
+  baseUrl?: string
+  /** SSH Tunnel 模式的远端 loopback 端口 */
+  remotePort?: number
+}
+
+/** Dashboard 与 API Server 必须独立建模 */
+export interface HermesTargetEndpoints {
+  dashboard?: HermesEndpointConfig
+  apiServer?: HermesEndpointConfig
+}
+
+/** Renderer → main 的单个 Hermes turn 附件 */
+export interface HermesTurnAttachment {
+  id: string
+  kind: 'image' | 'file'
+  name: string
+  mimeType: string
+  /** 纯 base64；禁止在 prompt 或 transcript 中持久化 */
+  base64: string
+}
+
+/** 附件与 prompt 的原子提交输入 */
+export interface HermesTurnInput {
+  clientMessageId: string
+  attachments: HermesTurnAttachment[]
+}
+
+/** 主进程通知 Renderer 的提交边界状态 */
+export interface HermesTurnSubmitState {
+  clientMessageId: string
+  status: 'accepted' | 'rejected'
+  error?: string
+}
+
 /**
  * Dashboard 认证模式
  *
@@ -136,7 +176,9 @@ export interface HermesTarget {
   name: string
   /** 连接模式 */
   mode: HermesConnectionMode
-  /** Direct 模式远端 URL（http/https） */
+  /** Dashboard/API Server 独立端点（V2 canonical 字段） */
+  endpoints?: HermesTargetEndpoints
+  /** @deprecated V1 Direct 单 URL；仅读取迁移兼容 */
   remoteUrl?: string
   /** SSH Tunnel 模式配置 */
   ssh?: HermesSshTunnelConfig
@@ -152,15 +194,34 @@ export interface HermesTarget {
   updatedAt: number
 }
 
+/** Renderer 可见的脱敏 target；credential refs 只存在 Electron main。 */
+export type HermesCredentialState = Partial<Record<
+  | 'dashboard-token'
+  | 'dashboard-password'
+  | 'api-server-key'
+  | 'ssh-password'
+  | 'ssh-private-key'
+  | 'ssh-private-key-passphrase',
+  boolean
+>>
+
+export interface HermesPublicTarget extends Omit<HermesTarget, 'auth' | 'ssh'> {
+  auth: Omit<HermesAuthConfig, 'dashboardCredentialRef' | 'apiServerKeyRef'>
+  ssh?: Omit<HermesSshTunnelConfig, 'credentialRef' | 'localDashboardPort' | 'localApiServerPort'>
+  credentialState: HermesCredentialState
+}
+
 /**
  * 创建 Target 的输入（不含 id/createdAt/updatedAt）
  */
 export interface HermesTargetCreateInput {
   name: string
   mode: HermesConnectionMode
+  endpoints?: HermesTargetEndpoints
+  /** @deprecated 旧调用兼容；Store 会迁移到 endpoints */
   remoteUrl?: string
-  ssh?: HermesSshTunnelConfig
-  auth?: HermesAuthConfig
+  ssh?: Omit<HermesSshTunnelConfig, 'credentialRef' | 'localDashboardPort' | 'localApiServerPort'>
+  auth?: Omit<HermesAuthConfig, 'dashboardCredentialRef' | 'apiServerKeyRef'>
   defaultProfile?: string
 }
 
@@ -170,9 +231,11 @@ export interface HermesTargetCreateInput {
 export interface HermesTargetUpdateInput {
   name?: string
   mode?: HermesConnectionMode
+  endpoints?: HermesTargetEndpoints
+  /** @deprecated 旧调用兼容；Store 会迁移到 endpoints */
   remoteUrl?: string
-  ssh?: HermesSshTunnelConfig
-  auth?: HermesAuthConfig
+  ssh?: Omit<HermesSshTunnelConfig, 'credentialRef' | 'localDashboardPort' | 'localApiServerPort'>
+  auth?: Omit<HermesAuthConfig, 'dashboardCredentialRef' | 'apiServerKeyRef'>
   defaultProfile?: string
   lastCapabilitySnapshot?: HermesCapabilities
 }
@@ -227,8 +290,8 @@ export const HERMES_IPC_CHANNELS = {
   SET_API_SERVER_KEY: 'hermes:set-api-server-key',
   /** 保存 SSH 密码凭据（加密存储，返回 ref） */
   SET_SSH_PASSWORD: 'hermes:set-ssh-password',
-  /** 删除指定凭据 */
-  DELETE_CREDENTIAL: 'hermes:delete-credential',
+  /** 用户核对指纹后确认首次 SSH host key challenge。 */
+  CONFIRM_SSH_HOST_KEY: 'hermes:confirm-ssh-host-key',
   /** 探测 target 的登录 provider 列表（supports_password） */
   GET_AUTH_PROVIDERS: 'hermes:get-auth-providers',
   /** 获取远端项目树（projects.tree） */
@@ -241,8 +304,7 @@ export const HERMES_IPC_CHANNELS = {
   CREATE_REMOTE_SESSION: 'hermes:create-remote-session',
   /** 清理重复的远端会话（返回删除数量） */
   DEDUPE_REMOTE_SESSIONS: 'hermes:dedupe-remote-sessions',
-  /** 同步本地项目到远端 Hermes（SFTP 增量上传） */
-  SYNC_PROJECT_TO_REMOTE: 'hermes:sync-project-to-remote',
+  /** 安全边界：不暴露本地目录递归同步 IPC。 */
   /** 创建远端项目（SFTP mkdir） */
   CREATE_REMOTE_PROJECT: 'hermes:create-remote-project',
   /** 列出远端项目文件 */
@@ -251,8 +313,14 @@ export const HERMES_IPC_CHANNELS = {
   READ_REMOTE_FILE: 'hermes:read-remote-file',
   /** 响应 Hermes 交互请求（approval/clarify/sudo/secret） */
   RESPOND_INTERACTION: 'hermes:respond-interaction',
-  /** 附加图片/文件到会话（Proma → Hermes 发送） */
-  ATTACH_TO_SESSION: 'hermes:attach-to-session',
+  /** 附件只允许通过 AgentSendInput.hermesTurn 原子提交，不暴露独立 attach IPC。 */
+  /** 拉取 Hermes 网关本机媒体文件（Hermes → Proma 收图） */
+  FETCH_MEDIA: 'hermes:fetch-media',
+  /** 按远端 session + @file 引用拉取并物化历史附件 */
+  FETCH_ATTACHMENT: 'hermes:fetch-attachment',
+  /** 按远端 session + @file 引用物化后交给系统默认本地程序打开 */
+  OPEN_ATTACHMENT: 'hermes:open-attachment',
+  TURN_SUBMIT_STATE: 'hermes:turn-submit-state',
 } as const
 
 /**
@@ -270,13 +338,9 @@ export interface HermesAuthProviderInfo {
   supportsPassword: boolean
 }
 
-/** 保存凭据输入（UI → IPC） */
+/** 保存凭据输入（UI → IPC）；Renderer 只能指定 target + 固定操作对应的 slot。 */
 export interface HermesSetCredentialInput {
-  /** target id（更新 target 凭据引用时使用） */
-  targetId?: string
-  /** 凭据 ref（缺省自动生成） */
-  ref?: string
-  /** 凭据明文 */
+  targetId: string
   secret: string
 }
 
@@ -288,16 +352,16 @@ export interface HermesSetDashboardPasswordInput extends Omit<HermesSetCredentia
   password: string
 }
 
-/** 保存凭据结果 */
+/** 保存凭据结果不返回内部 ref。 */
 export interface HermesSetCredentialResult {
-  ref: string
+  configured: true
 }
 
-/** 删除 target 结果（含已清理的凭据 ref） */
+/** 删除 target 结果不返回内部 ref。 */
 export interface HermesDeleteTargetResult {
   ok: boolean
   targetId: string
-  removedCredentialRefs: string[]
+  removedCredentialCount: number
 }
 
 /** 连接测试结果 */
@@ -308,6 +372,7 @@ export interface HermesConnectionTestResult {
   supportsPassword: boolean
   version: string | null
   error: string | null
+  sshHostKeyChallenge?: { challenge: string; fingerprint: string }
 }
 
 /** 远端项目（projects.tree 中的项目节点） */

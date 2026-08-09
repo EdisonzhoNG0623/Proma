@@ -14,7 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:p
 import { accessSync, constants, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { BrowserWindow } from 'electron'
 import type { WebContents } from 'electron'
-import { AGENT_IPC_CHANNELS, MAX_ATTACHMENT_SIZE } from '@proma/shared'
+import { AGENT_IPC_CHANNELS, HERMES_IPC_CHANNELS, MAX_ATTACHMENT_SIZE } from '@proma/shared'
 import type {
   AgentSendInput,
   AgentGenerateTitleInput,
@@ -32,11 +32,12 @@ import { ClaudeAgentAdapter, scanAndKillOrphanedClaudeSubprocesses } from './ada
 import { PiAgentAdapter, cleanupPiRuntimeResources } from './adapters/pi-agent-adapter'
 import { RuntimeRoutingAgentAdapter } from './adapters/runtime-routing-agent-adapter'
 import { HermesRuntimeFacade } from './hermes/hermes-runtime-facade'
-import { HermesRemoteSftp } from './hermes/hermes-remote-sftp'
-import type { HermesSftpAuth } from './hermes/hermes-remote-sftp'
 import { hermesTargetStore } from './hermes/hermes-target-store'
 import { hermesCredentialStore } from './hermes/hermes-credential-store'
 import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes/hermes-connection'
+import { hermesCredentialBroker } from './hermes/hermes-credential-broker'
+import { hermesDashboardConnectionBroker } from './hermes/hermes-dashboard-connection-broker'
+import { materializeHermesAttachment, type HermesMaterializedAttachment } from './hermes/hermes-attachment-cache'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentOrchestrator } from './agent-orchestrator'
 import { getAgentSessionWorkspacePath } from './config-paths'
@@ -59,6 +60,8 @@ const eventBus = new AgentEventBus()
 const hermesFacade = new HermesRuntimeFacade({
   getTarget: (targetId) => hermesTargetStore.getTarget(targetId),
   getCredential: (ref) => (ref ? hermesCredentialStore.getCredential(ref) : null),
+  getTargetCredential: (targetId, slot) => hermesCredentialBroker.getSecret(targetId, slot),
+  dashboardBroker: hermesDashboardConnectionBroker,
   saveCredential: (ref, secret) => {
     try {
       hermesCredentialStore.setCredential('dashboard-cookie', secret, ref)
@@ -76,6 +79,7 @@ const hermesFacade = new HermesRuntimeFacade({
     const workspace = meta.workspaceId ? getAgentWorkspace(meta.workspaceId) : undefined
     return {
       targetId: meta.hermesTargetId,
+      protocol: meta.hermesProtocol ?? 'dashboard',
       profile: meta.hermesProfile,
       remoteSessionId: meta.hermesRemoteSessionId,
       workspaceSlug: workspace?.slug,
@@ -83,47 +87,21 @@ const hermesFacade = new HermesRuntimeFacade({
       title: meta.title,
     }
   },
-  persistRemoteSessionId: (sessionId, remoteSessionId) => {
+  persistRemoteSessionId: (sessionId, remoteSessionId, expected) => {
     try {
+      const current = getAgentSessionMeta(sessionId)
+      if (!current || current.hermesTargetId !== expected.targetId) return false
+      if ((current.hermesProtocol ?? 'dashboard') !== (expected.protocol ?? 'dashboard')) return false
+      if ((current.hermesProfile ?? '') !== (expected.profile ?? '')) return false
       updateAgentSessionMeta(sessionId, { hermesRemoteSessionId: remoteSessionId })
+      return true
     } catch {
-      // 会话可能已删除；远端会话仍可通过 Dashboard 会话列表访问
-    }
-  },
-  buildTransport: async (target) => buildHermesTransport(target),
-  ensureRemoteCwd: async (targetId, cwd) => {
-    try {
-      const target = hermesTargetStore.getTarget(targetId)
-      if (!target?.ssh) {
-        // 无 SSH 配置：Hermes 协议无法自动建目录，不阻塞（会话 cwd 落默认）
-        return false
-      }
-      const sshSecret = target.ssh.credentialRef
-        ? hermesCredentialStore.getCredential(target.ssh.credentialRef)
-        : null
-      const auth: HermesSftpAuth = {
-        host: target.ssh.host,
-        port: target.ssh.port,
-        username: target.ssh.username,
-        ...(sshSecret
-          ? sshSecret.includes('PRIVATE KEY') || sshSecret.startsWith('-----BEGIN')
-            ? { privateKey: sshSecret }
-            : { password: sshSecret }
-          : {}),
-      }
-      const sftp = new HermesRemoteSftp()
-      await sftp.connect(auth)
-      try {
-        await sftp.mkdirp(cwd)
-        return true
-      } finally {
-        sftp.close()
-      }
-    } catch (error) {
-      console.warn('[Hermes] 自动创建远端项目目录失败:', error instanceof Error ? error.message : String(error))
       return false
     }
   },
+  buildTransport: async (target, protocol = 'dashboard') => buildHermesTransport(target, protocol),
+  // Hermes 远端项目目录只能由显式 SFTP createProject 操作创建；禁止隐藏 Agent turn/bootstrap。
+  ensureRemoteCwd: async () => false,
 })
 
 const adapter = new RuntimeRoutingAgentAdapter({
@@ -136,13 +114,22 @@ const orchestrator = new AgentOrchestrator(adapter, eventBus)
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
 export { eventBus as agentEventBus }
 
-/** 附加图片/文件到 Hermes 会话（Proma → Hermes 发送） */
-export function attachToHermesSession(sessionId: string, input: {
-  kind: 'image' | 'file'
-  data: string
-  name?: string
-}): Promise<void> {
-  return hermesFacade.attachToSession(sessionId, input)
+/** 拉取 Hermes 网关本机媒体文件（Hermes → Proma 收图）；渲染层经 IPC 调用 */
+export function fetchHermesMedia(
+  targetId: string,
+  mediaPath: string,
+): Promise<{ dataUrl?: string } | null> {
+  return hermesFacade.fetchMedia(targetId, mediaPath)
+}
+
+/** 从远端 session 真源读取附件，并物化为可删除/重建的本地预览缓存。 */
+export async function fetchHermesAttachment(
+  sessionId: string,
+  fileRef: string,
+): Promise<HermesMaterializedAttachment | null> {
+  const remote = await hermesFacade.fetchAttachment(sessionId, fileRef)
+  if (!remote) return null
+  return materializeHermesAttachment(remote)
 }
 
 /** 响应 Hermes 交互请求（approval/clarify/sudo/secret）；渲染层经 IPC 调用 */
@@ -297,11 +284,10 @@ export async function runAgent(
           })
         }
       },
-      onComplete: (messages, opts) => {
+      onComplete: (_messages, opts) => {
         publishRunStopped(input.sessionId, opts?.stoppedByUser, opts?.startedAt)
         if (!webContents.isDestroyed()) {
           sendAgentStreamComplete(webContents, input, {
-            messages,
             stoppedByUser: opts?.stoppedByUser ?? false,
             startedAt: opts?.startedAt,
             resultSubtype: opts?.resultSubtype,
@@ -311,6 +297,10 @@ export async function runAgent(
             session: getSessionMetaForRenderer(input.sessionId),
           })
         }
+      },
+      includeMessagesOnComplete: false,
+      onHermesTurnSubmitState: (state) => {
+        if (!webContents.isDestroyed()) webContents.send(HERMES_IPC_CHANNELS.TURN_SUBMIT_STATE, state)
       },
       onRunStarted: ({ startedAt }) => {
         eventBus.emit(input.sessionId, {
@@ -340,7 +330,6 @@ export async function runAgent(
         error: errorMessage,
       })
       sendAgentStreamComplete(webContents, input, {
-        messages: [],
         stoppedByUser: false,
       })
     }
@@ -393,13 +382,13 @@ export async function runAgentHeadless(
           })
         }
       },
+      includeMessagesOnComplete: true,
       onComplete: (messages, opts) => {
         callbacks.onComplete(messages)
         publishRunStopped(runInput.sessionId, opts?.stoppedByUser, opts?.startedAt)
         // 同步到渲染进程
         if (wc && !wc.isDestroyed()) {
           sendAgentStreamComplete(wc, runInput, {
-            messages,
             stoppedByUser: opts?.stoppedByUser ?? false,
             startedAt: opts?.startedAt,
             resultSubtype: opts?.resultSubtype,
@@ -449,7 +438,6 @@ export async function runAgentHeadless(
     if (wc && !wc.isDestroyed()) {
       wc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: runInput.sessionId, error: errorMessage })
       sendAgentStreamComplete(wc, runInput, {
-        messages: [],
         stoppedByUser: false,
         startedAt,
       })
@@ -471,8 +459,8 @@ export async function generateAgentTitle(input: AgentGenerateTitleInput): Promis
 /**
  * 中止指定会话的 Agent 执行
  */
-export function stopAgent(sessionId: string): void {
-  orchestrator.stop(sessionId)
+export async function stopAgent(sessionId: string): Promise<void> {
+  await orchestrator.stop(sessionId)
 }
 
 setHeadlessAgentRunner(runAgentHeadless)

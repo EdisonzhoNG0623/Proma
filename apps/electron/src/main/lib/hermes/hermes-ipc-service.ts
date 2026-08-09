@@ -18,32 +18,49 @@ import type {
   HermesSetCredentialResult,
   HermesSetDashboardPasswordInput,
   HermesTarget,
+  HermesPublicTarget,
   HermesTargetCreateInput,
   HermesTargetUpdateInput,
   HermesAuthProviderInfo,
 } from '@proma/shared'
 import { hermesTargetStore } from './hermes-target-store'
-import { hermesCredentialStore, type HermesCredentialKind } from './hermes-credential-store'
+import { hermesCredentialStore } from './hermes-credential-store'
+import { HermesCredentialBroker, hermesCredentialBroker, type HermesCredentialState } from './hermes-credential-broker'
+import { HermesCookieSessionManager, hermesCookieSessionManager } from './hermes-cookie-session'
 import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes-connection'
+import { HermesEndpointManager, hermesEndpointManager } from './hermes-endpoint-manager'
+import { HermesDashboardConnectionBroker, hermesDashboardConnectionBroker } from './hermes-dashboard-connection-broker'
+import { HermesSshConnectionBroker, hermesSshConnectionBroker } from './hermes-ssh-connection-broker'
 import { probeHermesCapabilities } from './hermes-capability-probe'
-import { parseAuthProviders } from './hermes-auth'
+import { buildDashboardRestAuthHeaders, parseAuthProviders } from './hermes-auth'
 import { HermesError, redactSecrets } from './hermes-errors'
-import { HermesAuthService, buildTicketWsUrl, canSubmitPasswordTo } from './hermes-auth'
-import { HermesDashboardAdapter, type HermesRemoteProject, type HermesRemoteSessionSummary, type HermesHistoryMessage } from './hermes-dashboard-adapter'
-import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
-import { HermesRemoteSftp, type HermesSyncResult, type HermesSftpAuth } from './hermes-remote-sftp'
-import { appendSDKMessages } from '../agent-session-manager'
-import { getAgentWorkspace } from '../agent-workspace-manager'
-import { existsSync } from 'node:fs'
+import type { HermesRemoteProject, HermesRemoteSessionSummary, HermesHistoryMessage } from './hermes-dashboard-adapter'
+import { HermesRemoteSftp } from './hermes-remote-sftp'
+import { hermesKnownHostStore } from './hermes-known-host-store'
+import { HermesSshHostKeyChallengeError } from './transport/hermes-ssh-connection'
+import { agentEventBus } from '../agent-service'
 import type { SDKMessage } from '@proma/shared'
 import type { HermesRemoteFileEntry } from './hermes-remote-sftp'
-import type { HermesTransport } from './transport/hermes-transport'
 
 /**
  * Hermes IPC 服务
  *
  * 默认使用全局 store 单例；测试可注入临时目录的 store 实例以隔离数据。
  */
+
+/** 提取 SDKMessage 去重 key（user/assistant 文本；其他消息按类型+文本兜底） */
+export function messageTextKey(msg: SDKMessage): string {
+  const type = msg.type
+  const content = (msg as { message?: { content?: unknown } }).message?.content
+  let text = ''
+  if (Array.isArray(content)) {
+    text = content
+      .filter((b): b is { type: string; text?: string } => typeof b === 'object' && b !== null && 'text' in b)
+      .map((b) => (typeof b.text === 'string' ? b.text : ''))
+      .join('\n')
+  }
+  return `${type}:${text.slice(0, 500)}`
+}
 
 /** 将远端历史消息转为 Proma SDKMessage（user/assistant 文本） */
 export function historyToSDKMessage(
@@ -71,107 +88,176 @@ export function historyToSDKMessage(
   } as SDKMessage
 }
 
+function historyRowText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.flatMap((block) => {
+    if (typeof block === 'string') return [block]
+    if (!block || typeof block !== 'object') return []
+    const value = block as { text?: unknown; content?: unknown }
+    if (typeof value.text === 'string') return [value.text]
+    if (typeof value.content === 'string') return [value.content]
+    return []
+  }).join('\n')
+}
+
+function historyRowToSDKMessage(
+  row: unknown,
+  identity: { targetId: string; remoteSessionId: string; promaSessionId: string; offset: number },
+): SDKMessage | null {
+  if (!row || typeof row !== 'object') return null
+  const value = row as Record<string, unknown>
+  const role = value.role
+  // Hermes REST history is an execution transcript: system prompts and tool-result
+  // rows can contain entire Skills/files and must not be flattened into chat bubbles.
+  // Until the dedicated canonical Renderer exists, expose only human-visible turns.
+  if (role !== 'user' && role !== 'assistant') return null
+  const text = historyRowText(value.content ?? value.text)
+  if (!text.trim()) return null
+  const rowId = value.id ?? value.message_id ?? value.ordinal ?? identity.offset
+  const uuid = `hermes:${identity.targetId}:dashboard:${identity.remoteSessionId}:${String(rowId)}`
+  return {
+    type: role === 'user' ? 'user' : 'assistant',
+    uuid,
+    message: { content: [{ type: 'text', text }] },
+    parent_tool_use_id: null,
+    session_id: identity.promaSessionId,
+    _createdAt: typeof value.created_at === 'number' ? value.created_at : undefined,
+  } as SDKMessage
+}
+
 export class HermesIpcService {
   private readonly targetStore: typeof hermesTargetStore
   private readonly credentialStore: typeof hermesCredentialStore
+  private readonly credentialBroker: HermesCredentialBroker
+  private readonly cookieSessions: HermesCookieSessionManager
+  private readonly endpointManager: HermesEndpointManager
+  private readonly dashboardBroker: HermesDashboardConnectionBroker
+  private readonly sshBroker: HermesSshConnectionBroker
 
   constructor(
     stores: {
       targetStore?: typeof hermesTargetStore
       credentialStore?: typeof hermesCredentialStore
+      credentialBroker?: HermesCredentialBroker
+      cookieSessions?: HermesCookieSessionManager
+      endpointManager?: HermesEndpointManager
+      dashboardBroker?: HermesDashboardConnectionBroker
+      sshBroker?: HermesSshConnectionBroker
     } = {},
   ) {
     this.targetStore = stores.targetStore ?? hermesTargetStore
     this.credentialStore = stores.credentialStore ?? hermesCredentialStore
+    this.credentialBroker = stores.credentialBroker
+      ?? (stores.credentialStore ? new HermesCredentialBroker(stores.credentialStore) : hermesCredentialBroker)
+    this.cookieSessions = stores.cookieSessions ?? hermesCookieSessionManager
+    this.endpointManager = stores.endpointManager ?? hermesEndpointManager
+    this.dashboardBroker = stores.dashboardBroker ?? hermesDashboardConnectionBroker
+    this.sshBroker = stores.sshBroker ?? hermesSshConnectionBroker
   }
 
-  listTargets(): HermesTarget[] {
-    return this.targetStore.listTargets()
-  }
-
-  getTarget(id: string): HermesTarget | null {
-    return this.targetStore.getTarget(id)
-  }
-
-  createTarget(input: HermesTargetCreateInput): HermesTarget {
-    return this.targetStore.createTarget(input)
-  }
-
-  updateTarget(id: string, input: HermesTargetUpdateInput): HermesTarget {
-    return this.targetStore.updateTarget(id, input)
-  }
-
-  /** 删除 target 并清理关联凭据（dashboard / api server / ssh） */
-  deleteTarget(id: string): HermesDeleteTargetResult {
-    const removed = this.targetStore.deleteTarget(id)
-    if (!removed) {
-      return { ok: false, targetId: id, removedCredentialRefs: [] }
+  private claimLegacyRefs(target: HermesTarget): void {
+    const dashboardRef = target.auth.dashboardCredentialRef
+    if (dashboardRef) {
+      const slot = target.auth.dashboardMode === 'token' ? 'dashboard-token' : 'dashboard-password'
+      this.credentialBroker.claimLegacyRef(target.id, slot, dashboardRef)
     }
-    const refs: string[] = []
-    if (removed.auth.dashboardCredentialRef) refs.push(removed.auth.dashboardCredentialRef)
-    if (removed.auth.apiServerKeyRef) refs.push(removed.auth.apiServerKeyRef)
-    if (removed.ssh?.credentialRef) refs.push(removed.ssh.credentialRef)
-    for (const ref of refs) {
-      this.credentialStore.deleteCredential(ref)
+    if (target.auth.apiServerKeyRef) {
+      this.credentialBroker.claimLegacyRef(target.id, 'api-server-key', target.auth.apiServerKeyRef)
     }
-    return { ok: true, targetId: id, removedCredentialRefs: refs }
+    if (target.ssh?.credentialRef) {
+      const meta = this.credentialStore.listCredentials().find((item) => item.ref === target.ssh?.credentialRef)
+      const slot = meta?.kind === 'ssh-key' || meta?.kind === 'ssh-private-key' ? 'ssh-private-key' : 'ssh-password'
+      this.credentialBroker.claimLegacyRef(target.id, slot, target.ssh.credentialRef)
+    }
   }
 
-  /** 保存任意类型凭据 */
-  setCredential(kind: HermesCredentialKind, input: HermesSetCredentialInput): HermesSetCredentialResult {
-    const ref = this.credentialStore.setCredential(kind, input.secret, input.ref)
-    return { ref }
+  private publicTarget(target: HermesTarget): HermesPublicTarget {
+    this.claimLegacyRefs(target)
+    const { dashboardCredentialRef: _dashboardRef, apiServerKeyRef: _apiRef, ...auth } = target.auth
+    const ssh = target.ssh
+      ? (({ credentialRef: _credentialRef, localDashboardPort: _dashboardPort, localApiServerPort: _apiPort, ...safe }) => safe)(target.ssh)
+      : undefined
+    return {
+      ...target,
+      auth,
+      ssh,
+      credentialState: this.credentialBroker.credentialState(target.id) as HermesCredentialState,
+    }
   }
 
-  /** 保存 Dashboard 账号密码（JSON 编码）并更新 target 引用 */
+  listTargets(): HermesPublicTarget[] {
+    return this.targetStore.listTargets().map((target) => this.publicTarget(target))
+  }
+
+  getTarget(id: string): HermesPublicTarget | null {
+    const target = this.targetStore.getTarget(id)
+    return target ? this.publicTarget(target) : null
+  }
+
+  createTarget(input: HermesTargetCreateInput): HermesPublicTarget {
+    return this.publicTarget(this.targetStore.createTarget(input))
+  }
+
+  async updateTarget(id: string, input: HermesTargetUpdateInput): Promise<HermesPublicTarget> {
+    const before = this.targetStore.getTarget(id)
+    if (!before) throw new Error(`Hermes Target 不存在: ${id}`)
+    const updated = this.targetStore.updateTarget(id, input)
+    const originChanged = before.endpoints?.dashboard?.baseUrl !== updated.endpoints?.dashboard?.baseUrl
+    const authChanged = before.auth.dashboardMode !== updated.auth.dashboardMode
+    if (originChanged || authChanged) await this.cookieSessions.clear(id)
+    this.dashboardBroker.invalidate(id)
+    this.endpointManager.invalidate(id)
+    this.sshBroker.invalidate(id)
+    return this.publicTarget(updated)
+  }
+
+  /** 删除 target 并清理该 target ownership 下全部凭据。 */
+  async deleteTarget(id: string): Promise<HermesDeleteTargetResult> {
+    const existing = this.targetStore.getTarget(id)
+    if (!existing) return { ok: false, targetId: id, removedCredentialCount: 0 }
+    this.claimLegacyRefs(existing)
+    const removedCredentialCount = this.credentialBroker.clearTarget(id)
+    await this.cookieSessions.clear(id)
+    this.dashboardBroker.invalidate(id)
+    this.endpointManager.invalidate(id)
+    this.sshBroker.invalidate(id)
+    this.targetStore.deleteTarget(id)
+    return { ok: true, targetId: id, removedCredentialCount }
+  }
+
   setDashboardPassword(input: HermesSetDashboardPasswordInput): HermesSetCredentialResult {
+    if (!this.targetStore.getTarget(input.targetId)) throw new Error('Hermes target 不存在')
     const secret = JSON.stringify({ username: input.username, password: input.password })
-    const ref = this.credentialStore.setCredential('dashboard-password', secret, input.ref)
-    if (input.targetId) {
-      const target = this.targetStore.getTarget(input.targetId)
-      if (target) {
-        this.targetStore.updateTarget(input.targetId, {
-          auth: {
-            ...target.auth,
-            dashboardCredentialRef: ref,
-            ...(input.provider ? { dashboardProvider: input.provider } : {}),
-          },
-        })
-      }
-    }
-    return { ref }
+    this.credentialBroker.setSecret(input.targetId, 'dashboard-password', secret)
+    this.dashboardBroker.invalidate(input.targetId)
+    this.endpointManager.invalidate(input.targetId)
+    const target = this.targetStore.getTarget(input.targetId)!
+    this.targetStore.updateTarget(input.targetId, {
+      auth: {
+        dashboardMode: target.auth.dashboardMode ?? 'password-cookie',
+        dashboardProvider: input.provider ?? target.auth.dashboardProvider,
+      },
+    })
+    return { configured: true }
   }
 
-  /** 保存 API Server key 并更新 target 引用 */
   setApiServerKey(input: HermesSetCredentialInput): HermesSetCredentialResult {
-    const ref = this.credentialStore.setCredential('api-server-key', input.secret, input.ref)
-    if (input.targetId) {
-      const target = this.targetStore.getTarget(input.targetId)
-      if (target) {
-        this.targetStore.updateTarget(input.targetId, {
-          auth: { ...target.auth, apiServerKeyRef: ref },
-        })
-      }
-    }
-    return { ref }
+    if (!this.targetStore.getTarget(input.targetId)) throw new Error('Hermes target 不存在')
+    this.credentialBroker.setSecret(input.targetId, 'api-server-key', input.secret)
+    this.dashboardBroker.invalidate(input.targetId)
+    this.endpointManager.invalidate(input.targetId)
+    return { configured: true }
   }
 
-  /** 保存 SSH 密码并更新 target 引用 */
   setSshPassword(input: HermesSetCredentialInput): HermesSetCredentialResult {
-    const ref = this.credentialStore.setCredential('ssh-password', input.secret, input.ref)
-    if (input.targetId) {
-      const target = this.targetStore.getTarget(input.targetId)
-      if (target?.ssh) {
-        this.targetStore.updateTarget(input.targetId, {
-          ssh: { ...target.ssh, credentialRef: ref },
-        })
-      }
-    }
-    return { ref }
-  }
-
-  deleteCredential(ref: string): boolean {
-    return this.credentialStore.deleteCredential(ref)
+    const target = this.targetStore.getTarget(input.targetId)
+    if (!target?.ssh) throw new Error('Hermes SSH target 不存在')
+    this.credentialBroker.setSecret(input.targetId, 'ssh-password', input.secret)
+    this.dashboardBroker.invalidate(input.targetId)
+    this.endpointManager.invalidate(input.targetId)
+    this.sshBroker.invalidate(input.targetId)
+    return { configured: true }
   }
 
   /** 探测 target 能力并缓存快照 */
@@ -180,16 +266,16 @@ export class HermesIpcService {
     if (!target) {
       throw new Error('Hermes target 不存在')
     }
-    const transport = await buildHermesTransport(target)
+    const lease = await this.endpointManager.acquire(target)
     try {
       const snapshot = await probeHermesCapabilities({
-        dashboardTransport: transport,
-        apiServerTransport: transport,
+        dashboardTransport: lease.dashboard,
+        apiServerTransport: lease.apiServer,
       })
       this.targetStore.updateTarget(targetId, { lastCapabilitySnapshot: snapshot })
       return snapshot
     } finally {
-      transport.dispose()
+      lease.release()
     }
   }
 
@@ -213,8 +299,20 @@ export class HermesIpcService {
         supportsPassword: false,
         version: null,
         error: error instanceof Error ? redactSecrets(error.message) : String(error),
+        ...(error instanceof HermesSshHostKeyChallengeError
+          ? { sshHostKeyChallenge: { challenge: error.challenge, fingerprint: error.fingerprint } }
+          : {}),
       }
     }
+  }
+
+  confirmSshHostKey(targetId: string, challenge: string): boolean {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target?.ssh) throw new Error('Hermes SSH target 不存在')
+    hermesKnownHostStore.confirm(challenge, { host: target.ssh.host, port: target.ssh.port })
+    this.sshBroker.invalidate(targetId)
+    this.endpointManager.invalidate(targetId)
+    return true
   }
 
   /** 探测 target 的登录 provider 列表（GET /api/auth/providers，公开接口） */
@@ -239,103 +337,18 @@ export class HermesIpcService {
     }
   }
 
-  /**
-   * 打开临时 Dashboard WS 连接（用于项目/会话视图 RPC）。
-   *
-   * 认证策略：优先复用已持久化的 Cookie 会话（避免频繁密码登录触发限流）；
-   * 401 时回退密码登录并更新 Cookie。
-   */
-  private async openDashboardAdapter(target: HermesTarget): Promise<{
-    adapter: HermesDashboardAdapter
-    transport: HermesTransport
-    close: () => void
-  }> {
-    const transport = await buildHermesTransport(target)
-    const cookieRef = `hermes-cookie-${target.id}`
-    try {
-      const auth = new HermesAuthService(transport)
-      const mode = target.auth.dashboardMode ?? 'password-cookie'
-
-      // 1. 优先复用持久化 Cookie
-      const persistedCookie = this.credentialStore.getCredential(cookieRef)
-      if (mode === 'password-cookie' && persistedCookie) {
-        try {
-          const jar = JSON.parse(persistedCookie) as Record<string, string>
-          for (const [name, value] of Object.entries(jar)) {
-            auth.cookieJarFor(target.id).set(name, value)
-          }
-        } catch {
-          // Cookie 解析失败则忽略，走登录流程
-        }
-      }
-
-      // 2. 尝试用现有 Cookie 直接 mint ticket；失败（401）再密码登录
-      let ticket: string
-      try {
-        ticket = await auth.mintWsTicket(target.id)
-      } catch (error) {
-        const isAuthError = error instanceof HermesError && error.code === 'unauthorized'
-        if (!isAuthError || mode !== 'password-cookie') {
-          throw error
-        }
-        // 3. 密码登录并持久化 Cookie
-        const secret = target.auth.dashboardCredentialRef
-          ? this.credentialStore.getCredential(target.auth.dashboardCredentialRef)
-          : null
-        if (!secret) {
-          throw new Error('缺少 Hermes 账号密码凭据，请在 Hermes 设置中登录')
-        }
-        const credential = parseDashboardPasswordSecret(secret)
-        if (!canSubmitPasswordTo(transport.baseUrl)) {
-          throw new Error('http 非 loopback 地址不允许提交 Hermes 密码（请使用 HTTPS 或 SSH Tunnel）')
-        }
-        await auth.passwordLogin(target.id, {
-          provider: target.auth.dashboardProvider ?? 'basic',
-          username: credential.username,
-          password: credential.password,
-        })
-        // 持久化 Cookie（含 refresh cookie，供后续复用）
-        const jar = Object.fromEntries(auth.cookieJarFor(target.id).entries())
-        if (Object.keys(jar).length > 0) {
-          try {
-            this.credentialStore.setCredential('dashboard-cookie', JSON.stringify(jar), cookieRef)
-          } catch (cookieError) {
-            console.warn('[Hermes] 持久化 Dashboard Cookie 失败:', cookieError instanceof Error ? cookieError.message : String(cookieError))
-          }
-        }
-        ticket = await auth.mintWsTicket(target.id)
-      }
-
-      const wsUrl = buildTicketWsUrl(transport.baseUrl, ticket)
-      const client = new HermesDashboardWsClient((url) => transport.connectWebSocket(url))
-      await client.connect(wsUrl)
-      const adapter = new HermesDashboardAdapter(client)
-      return {
-        adapter,
-        transport,
-        close: () => {
-          client.close()
-          transport.dispose()
-        },
-      }
-    } catch (error) {
-      transport.dispose()
-      throw error
-    }
-  }
-
   /** 获取远端项目树（projects.tree） */
   async listRemoteProjects(targetId: string): Promise<HermesRemoteProject[]> {
     const target = this.targetStore.getTarget(targetId)
     if (!target) {
       throw new Error('Hermes target 不存在')
     }
-    const session = await this.openDashboardAdapter(target)
+    const lease = await this.dashboardBroker.acquire(target)
     try {
-      const tree = await session.adapter.listProjects()
+      const tree = await lease.withAdapter((adapter) => adapter.listProjects())
       return tree.projects
     } finally {
-      session.close()
+      lease.release()
     }
   }
 
@@ -345,11 +358,11 @@ export class HermesIpcService {
     if (!target) {
       throw new Error('Hermes target 不存在')
     }
-    const session = await this.openDashboardAdapter(target)
+    const lease = await this.dashboardBroker.acquire(target)
     try {
-      return await session.adapter.listProjectSessions(projectId)
+      return await lease.withAdapter((adapter) => adapter.listProjectSessions(projectId))
     } finally {
-      session.close()
+      lease.release()
     }
   }
 
@@ -359,77 +372,93 @@ export class HermesIpcService {
     if (!target) {
       throw new Error('Hermes target 不存在')
     }
-    const session = await this.openDashboardAdapter(target)
+    const lease = await this.dashboardBroker.acquire(target)
     try {
-      return await session.adapter.listSessions(limit)
+      return await lease.withAdapter((adapter) => adapter.listSessions(Math.min(Math.max(limit, 1), 500)))
     } finally {
-      session.close()
+      lease.release()
     }
   }
 
   /**
-   * 拉取远端会话历史并写入 Proma 会话（打开远端会话后展示历史消息）。
-   *
-   * 流程：resume 远端会话 → session.history → 转 SDKMessage → appendSDKMessages。
+   * 从 Dashboard REST snapshot 读取远端历史。远端是唯一真源：
+   * 不写 Agent JSONL、不按文本去重；每次打开都可由 snapshot 重建。
    */
+  async getRemoteSessionHistory(
+    promaSessionId: string,
+    targetId: string,
+    remoteSessionId: string,
+    profile?: string,
+  ): Promise<SDKMessage[]> {
+    const target = this.targetStore.getTarget(targetId)
+    if (!target) throw new Error('Hermes target 未配置')
+    this.claimLegacyRefs(target)
+    const brokerLease = await this.dashboardBroker.acquire(target)
+    const endpointLease = await this.endpointManager.acquire(target)
+    try {
+      const transport = endpointLease.dashboard
+      if (!transport) throw new Error('Hermes target 未配置 Dashboard endpoint')
+      const token = target.auth.dashboardMode === 'token'
+        ? this.credentialBroker.getSecret(target.id, 'dashboard-token') ?? undefined
+        : undefined
+      const headers = buildDashboardRestAuthHeaders(target.auth.dashboardMode, token)
+      const query = profile ? `?profile=${encodeURIComponent(profile)}` : ''
+      const detail = await transport.requestJson(`/api/sessions/${encodeURIComponent(remoteSessionId)}${query}`, { headers, timeoutMs: 10_000 })
+      if (detail.status === 404) return []
+      if (detail.status !== 200 || !detail.body || typeof detail.body !== 'object') {
+        throw new Error(`读取 Hermes session snapshot 失败（HTTP ${detail.status}）`)
+      }
+      const messageCount = Number((detail.body as { message_count?: unknown }).message_count ?? 0)
+      const limit = 300
+      const offset = Math.max(0, Number.isFinite(messageCount) ? messageCount - limit : 0)
+      const separator = query ? '&' : '?'
+      const response = await transport.requestJson(
+        `/api/sessions/${encodeURIComponent(remoteSessionId)}/messages${query}${separator}limit=${limit}&offset=${offset}`,
+        { headers, timeoutMs: 15_000 },
+      )
+      if (response.status !== 200 || !response.body || typeof response.body !== 'object') {
+        throw new Error(`读取 Hermes messages snapshot 失败（HTTP ${response.status}）`)
+      }
+      const rows = (response.body as { messages?: unknown }).messages
+      if (!Array.isArray(rows)) return []
+      return rows.flatMap((row, index) => {
+        const sdk = historyRowToSDKMessage(row, { targetId, remoteSessionId, promaSessionId, offset: offset + index })
+        return sdk ? [sdk] : []
+      })
+    } finally {
+      endpointLease.release()
+      brokerLease.release()
+    }
+  }
+
+  /** 将远端 snapshot 推入已打开会话的 live timeline。 */
   async hydrateRemoteSessionHistory(
     promaSessionId: string,
     targetId: string,
     remoteSessionId: string,
     profile?: string,
   ): Promise<number> {
-    const target = this.targetStore.getTarget(targetId)
-    if (!target) {
-      throw new Error('Hermes target 不存在')
-    }
-    const session = await this.openDashboardAdapter(target)
-    try {
-      // resume 远端会话拿 runtime session id
-      const resumed = await session.adapter.resumeSession(remoteSessionId, {
-        profile,
-        cols: 96,
-      }).catch(() => null)
-      if (!resumed) {
-        return 0
-      }
-      const history = await session.adapter.getSessionHistory(resumed.sessionId)
-      if (history.length === 0) {
-        return 0
-      }
-      const sdkMessages: SDKMessage[] = history.map((message) =>
-        historyToSDKMessage(message, promaSessionId),
-      )
-      appendSDKMessages(promaSessionId, sdkMessages)
-      return history.length
-    } finally {
-      session.close()
-    }
+    const snapshot = await this.getRemoteSessionHistory(promaSessionId, targetId, remoteSessionId, profile)
+    for (const message of snapshot) agentEventBus.emit(promaSessionId, { kind: 'sdk_message', message })
+    return snapshot.length
   }
 
   /**
    * 建立 SFTP 连接（SSH Tunnel target 的 SSH 配置）。
    * 调用方负责 close。
    */
-  private async connectSftpForTarget(target: HermesTarget): Promise<HermesRemoteSftp> {
-    if (!target.ssh) {
-      throw new Error('当前 Hermes target 无 SSH 配置（请使用 SSH Tunnel 模式连接）')
+  private async connectSftpForTarget(target: HermesTarget): Promise<{ sftp: HermesRemoteSftp; close(): void }> {
+    if (!target.ssh) throw new Error('当前 Hermes target 无 SSH 配置')
+    this.claimLegacyRefs(target)
+    const lease = await this.sshBroker.acquire(target)
+    const sftp = new HermesRemoteSftp(lease.connection)
+    try {
+      await sftp.connect()
+      return { sftp, close: () => { sftp.close(); lease.release() } }
+    } catch (error) {
+      lease.release()
+      throw error
     }
-    const sshSecret = target.ssh.credentialRef
-      ? this.credentialStore.getCredential(target.ssh.credentialRef)
-      : null
-    const auth: HermesSftpAuth = {
-      host: target.ssh.host,
-      port: target.ssh.port,
-      username: target.ssh.username,
-      ...(sshSecret
-        ? sshSecret.includes('PRIVATE KEY') || sshSecret.startsWith('-----BEGIN')
-          ? { privateKey: sshSecret }
-          : { password: sshSecret }
-        : {}),
-    }
-    const sftp = new HermesRemoteSftp()
-    await sftp.connect(auth)
-    return sftp
   }
 
   /** 远端项目根目录约定 */
@@ -447,89 +476,35 @@ export class HermesIpcService {
     if (!safeName) {
       throw new Error('项目名称无效')
     }
-    const sftp = await this.connectSftpForTarget(target)
+    const connection = await this.connectSftpForTarget(target)
     try {
-      const remoteDir = `${this.remoteProjectsRoot(target)}/${safeName}`
-      await sftp.mkdirp(remoteDir)
-      return remoteDir
+      return await connection.sftp.createProject(this.remoteProjectsRoot(target), safeName)
     } finally {
-      sftp.close()
+      connection.close()
     }
   }
 
   /** 列出远端项目文件（一级目录） */
-  async listRemoteProjectFiles(targetId: string, remotePath: string): Promise<HermesRemoteFileEntry[]> {
+  async listRemoteProjectFiles(targetId: string, rootPath: string, remotePath: string): Promise<HermesRemoteFileEntry[]> {
     const target = this.targetStore.getTarget(targetId)
-    if (!target) {
-      throw new Error('Hermes target 不存在')
-    }
-    const sftp = await this.connectSftpForTarget(target)
+    if (!target) throw new Error('Hermes target 不存在')
+    const connection = await this.connectSftpForTarget(target)
     try {
-      return await sftp.listDir(remotePath)
+      return await connection.sftp.listDir(rootPath, remotePath)
     } finally {
-      sftp.close()
+      connection.close()
     }
   }
 
   /** 读取远端文件内容（文本） */
-  async readRemoteFile(targetId: string, remotePath: string): Promise<string> {
+  async readRemoteFile(targetId: string, rootPath: string, remotePath: string, maxBytes?: number): Promise<string> {
     const target = this.targetStore.getTarget(targetId)
-    if (!target) {
-      throw new Error('Hermes target 不存在')
-    }
-    const sftp = await this.connectSftpForTarget(target)
+    if (!target) throw new Error('Hermes target 不存在')
+    const connection = await this.connectSftpForTarget(target)
     try {
-      return await sftp.readFile(remotePath)
+      return await connection.sftp.readFile(rootPath, remotePath, maxBytes)
     } finally {
-      sftp.close()
-    }
-  }
-
-  /**
-   * 同步本地项目到远端 Hermes（SFTP，增量）。
-   *
-   * 要求 target 为 SSH Tunnel 模式（有 SSH 配置）；远端目标目录默认 ~/proma-projects/<slug>。
-   * 同步后 Hermes 会话可用 cwd 指向该目录在远端工作。
-   */
-  async syncProjectToRemote(
-    targetId: string,
-    workspaceId: string,
-    remoteBaseDir = '~/proma-projects',
-  ): Promise<HermesSyncResult> {
-    const target = this.targetStore.getTarget(targetId)
-    if (!target?.ssh) {
-      throw new Error('当前 Hermes target 无 SSH 配置（请使用 SSH Tunnel 模式连接）')
-    }
-    const workspace = getAgentWorkspace(workspaceId)
-    if (!workspace?.projectRootPath) {
-      throw new Error('工作区无项目根目录')
-    }
-    if (!existsSync(workspace.projectRootPath)) {
-      throw new Error(`本地项目目录不存在: ${workspace.projectRootPath}`)
-    }
-
-    // SSH 凭据：优先私钥（若存），否则密码
-    const sshSecret = target.ssh.credentialRef
-      ? this.credentialStore.getCredential(target.ssh.credentialRef)
-      : null
-    const auth: HermesSftpAuth = {
-      host: target.ssh.host,
-      port: target.ssh.port,
-      username: target.ssh.username,
-      ...(sshSecret
-        ? sshSecret.includes('PRIVATE KEY') || sshSecret.startsWith('-----BEGIN')
-          ? { privateKey: sshSecret }
-          : { password: sshSecret }
-        : {}),
-    }
-
-    const sftp = new HermesRemoteSftp()
-    await sftp.connect(auth)
-    try {
-      const remoteDir = `${remoteBaseDir.replace(/\/+$/, '')}/${workspace.slug}`
-      return await sftp.syncDir(workspace.projectRootPath, remoteDir)
-    } finally {
-      sftp.close()
+      connection.close()
     }
   }
 }

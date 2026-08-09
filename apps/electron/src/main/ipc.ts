@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import { registerHermesIpcHandlers } from './lib/hermes/hermes-ipc-handlers'
+import { hermesIpcService } from './lib/hermes/hermes-ipc-service'
 import type {
   QuickTaskSubmitInput,
   VoiceDictationAudioChunkInput,
@@ -258,7 +259,8 @@ import {
   listAgentSessions,
   createAgentSession,
   getAgentSessionMeta,
-  getAgentSessionSDKMessages,
+  getAgentSessionSDKMessagesAfterForRenderer,
+  getAgentSessionSDKMessagesForRenderer,
   updateAgentSessionMeta,
   deleteAgentSession,
   migrateChatToAgentSession,
@@ -1991,8 +1993,36 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.GET_SDK_MESSAGES,
     async (_, id: string): Promise<SDKMessage[]> => {
-      return getAgentSessionSDKMessages(id)
+      const meta = getAgentSessionMeta(id)
+      if (
+        meta?.agentRuntime === 'hermes-remote'
+        && (meta.hermesProtocol ?? 'dashboard') === 'dashboard'
+        && meta.hermesTargetId
+        && meta.hermesRemoteSessionId
+      ) {
+        // Dashboard REST snapshot is canonical. Returning it directly lets the
+        // renderer replace its persisted-message cache on every open/restart,
+        // instead of appending remote rows onto stale Agent JSONL.
+        return await hermesIpcService.getRemoteSessionHistory(
+          id,
+          meta.hermesTargetId,
+          meta.hermesRemoteSessionId,
+          meta.hermesProfile,
+        )
+      }
+      return getAgentSessionSDKMessagesForRenderer(id)
     }
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_SDK_MESSAGES_AFTER,
+    async (_, id: string, afterUuid: string): Promise<SDKMessage[] | null> => {
+      if (typeof id !== 'string' || !id || typeof afterUuid !== 'string' || !afterUuid) return null
+      const meta = getAgentSessionMeta(id)
+      // Hermes Dashboard snapshot 不是本地 append-only JSONL；必须继续走 full canonical snapshot。
+      if (meta?.agentRuntime === 'hermes-remote') return null
+      return getAgentSessionSDKMessagesAfterForRenderer(id, afterUuid)
+    },
   )
 
   // 更新 Agent 会话标题
@@ -2284,7 +2314,7 @@ export function registerIpcHandlers(): void {
 
       for (const sessionId of affectedSessionIds) {
         if (isAgentSessionActive(sessionId)) {
-          stopAgent(sessionId)
+          await stopAgent(sessionId)
         }
         deleteAgentSession(sessionId)
       }
@@ -2534,6 +2564,16 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SEND_MESSAGE,
     async (event, input: AgentSendInput): Promise<void> => {
+      if (input.hermesTurn) {
+        if (typeof input.hermesTurn.clientMessageId !== 'string' || input.hermesTurn.clientMessageId.length > 128) throw new Error('Hermes clientMessageId 无效')
+        if (!Array.isArray(input.hermesTurn.attachments) || input.hermesTurn.attachments.length > 20) throw new Error('Hermes 附件数量超过限制')
+        for (const attachment of input.hermesTurn.attachments) {
+          if (!attachment || (attachment.kind !== 'image' && attachment.kind !== 'file')) throw new Error('Hermes 附件类型无效')
+          if (typeof attachment.base64 !== 'string' || attachment.base64.length > 36 * 1024 * 1024) throw new Error('Hermes 附件编码超过限制')
+          if (typeof attachment.name !== 'string' || attachment.name.length > 255 || attachment.name.includes('\0')) throw new Error('Hermes 附件名称无效')
+          if (typeof attachment.mimeType !== 'string' || attachment.mimeType.length > 255) throw new Error('Hermes 附件 MIME 无效')
+        }
+      }
       const session = getAgentSessionMeta(input.sessionId)
       if (session) {
         await feishuBridgeManager.startSessionMirrorRun(session).catch((error) => {
@@ -2549,7 +2589,7 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.STOP_AGENT,
     async (_, sessionId: string): Promise<void> => {
       feishuBridgeManager.stopSessionMirrorRun(sessionId)
-      stopAgent(sessionId)
+      await stopAgent(sessionId)
     }
   )
 
@@ -2691,7 +2731,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_SESSION_AGENT_RUNTIME,
-    async (_, sessionId: string, runtime: AgentRuntime, hermesTargetId?: string): Promise<AgentSessionMeta> => {
+    async (_, sessionId: string, runtime: AgentRuntime, hermesTargetId?: string, hermesProtocol?: 'dashboard' | 'api-server'): Promise<AgentSessionMeta> => {
       if (!isAgentRuntime(runtime)) {
         throw new Error(`无效的 Agent runtime: ${String(runtime)}`)
       }
@@ -2704,14 +2744,22 @@ export function registerIpcHandlers(): void {
 
       // 历史会话缺失 runtime 时按 Claude 处理，避免将 Claude SDK 会话 ID 交给 Pi 恢复。
       const previousRuntime: AgentRuntime = isAgentRuntime(current.agentRuntime) ? current.agentRuntime : 'claude'
-      const updates: Partial<Pick<AgentSessionMeta, 'agentRuntime' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'hermesTargetId' | 'hermesProfile' | 'hermesRemoteSessionId' | 'channelId' | 'modelId'>> = {
+      const updates: Partial<Pick<AgentSessionMeta, 'agentRuntime' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'hermesTargetId' | 'hermesProtocol' | 'hermesProfile' | 'hermesRemoteSessionId' | 'hermesRemoteCwd' | 'channelId' | 'modelId'>> = {
         agentRuntime: runtime,
       }
       // Hermes Remote 会话绑定 target（切换时由 UI 传入）；不依赖 Proma 本地渠道/模型
-      if (runtime === 'hermes-remote' && typeof hermesTargetId === 'string' && hermesTargetId) {
-        updates.hermesTargetId = hermesTargetId
-      }
       if (runtime === 'hermes-remote') {
+        const nextTargetId = typeof hermesTargetId === 'string' && hermesTargetId ? hermesTargetId : current.hermesTargetId
+        if (!nextTargetId) throw new Error('Hermes Remote 会话必须绑定 target')
+        const nextProtocol = hermesProtocol ?? (current.hermesTargetId === nextTargetId ? current.hermesProtocol : undefined) ?? 'dashboard'
+        if (nextProtocol !== 'dashboard' && nextProtocol !== 'api-server') throw new Error('Hermes protocol 无效')
+        const identityChanged = current.hermesTargetId !== nextTargetId || (current.hermesProtocol ?? 'dashboard') !== nextProtocol
+        updates.hermesTargetId = nextTargetId
+        updates.hermesProtocol = nextProtocol
+        if (identityChanged) {
+          updates.hermesRemoteSessionId = undefined
+          updates.hermesRemoteCwd = undefined
+        }
         // 清掉本地渠道/模型（避免 UI 显示 DeepSeek 等本地模型头像，远端模型在 Hermes 端配置）
         updates.channelId = 'hermes-remote'
         updates.modelId = undefined

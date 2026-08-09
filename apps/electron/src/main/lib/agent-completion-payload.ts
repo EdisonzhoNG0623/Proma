@@ -13,6 +13,11 @@ export interface AgentStreamCompleteTarget {
   send(channel: string, payload: AgentStreamCompletePayload): void
 }
 
+/** UI completion 不读取历史；只有明确需要摘要的 headless 调用方才执行 loader。 */
+export function loadCompletionMessagesIfRequested<T>(include: boolean | undefined, loader: () => T): T | undefined {
+  return include ? loader() : undefined
+}
+
 export function buildAgentStreamCompletePayload(
   run: Readonly<Pick<AgentSendInput, 'sessionId' | 'triggeredBy'>>,
   details: AgentStreamCompletionDetails = {},

@@ -62,7 +62,7 @@ export function HermesRemoteFileBrowser({ target }: { target: HermesTarget }): R
     setError(null)
     setSelectedContent(null)
     try {
-      const list = await window.electronAPI.hermes.listRemoteFiles(target.id, path)
+      const list = await window.electronAPI.hermes.listRemoteFiles(target.id, REMOTE_ROOT, path)
       setEntries(list)
       setCurrentPath(path)
     } catch (e) {
@@ -100,7 +100,7 @@ export function HermesRemoteFileBrowser({ target }: { target: HermesTarget }): R
     setLoading(true)
     setError(null)
     try {
-      const content = await window.electronAPI.hermes.readRemoteFile(target.id, entry.path)
+      const content = await window.electronAPI.hermes.readRemoteFile(target.id, REMOTE_ROOT, entry.path)
       setSelectedContent({ path: entry.path, content })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

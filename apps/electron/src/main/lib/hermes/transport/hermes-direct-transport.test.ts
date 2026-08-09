@@ -26,9 +26,9 @@ describe('HermesDirectTransport URL 工具', () => {
     )
   })
 
-  test('Given 以 / 开头路径 When 拼接 Then 替换根路径', () => {
+  test('Given reverse-proxy base 与 / 路径 When 拼接 Then 保留 path prefix', () => {
     expect(joinPath('https://h.example.com/base/', '/v1/capabilities')).toBe(
-      'https://h.example.com/v1/capabilities',
+      'https://h.example.com/base/v1/capabilities',
     )
   })
 
@@ -195,6 +195,18 @@ describe('HermesDirectTransport openSse', () => {
     expect(ended).toBe(true)
   })
 
+  test('Given SSE 读取中断 When 等待 done Then reject 而非伪装正常结束', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull() { throw new Error('socket reset') },
+    })
+    const transport = new HermesDirectTransport('https://h.example.com', {
+      fetchImpl: async () => new Response(stream, { status: 200 }),
+    })
+    const handle = await transport.openSse('/stream', { onEvent: () => undefined })
+    expect(handle.done).rejects.toThrow('socket reset')
+    await handle.done.catch(() => undefined)
+  })
+
   test('Given SSE 返回 401 When 打开 Then 拒绝 unauthorized', async () => {
     const fetchImpl = async (): Promise<Response> => new Response('{}', { status: 401 })
     const transport = new HermesDirectTransport('https://h.example.com', { fetchImpl })
@@ -219,6 +231,9 @@ describe('HermesDirectTransport connectWebSocket', () => {
       this.readyState = 1
       this.dispatchEvent(new Event('open'))
     }
+    message(data: string): void {
+      this.dispatchEvent(new MessageEvent('message', { data }))
+    }
     fail(): void {
       this.dispatchEvent(new Event('error'))
     }
@@ -238,6 +253,34 @@ describe('HermesDirectTransport connectWebSocket', () => {
     const result = await promise
     expect(result.socket).not.toBeNull()
     expect(FakeWebSocket.instances[0]?.url).toBe('wss://h.example.com/api/ws?ticket=t')
+  })
+
+  test('Given gateway.ready 紧随 open When 上层尚未装 listener Then transport 缓冲早到消息', async () => {
+    FakeWebSocket.instances = []
+    const transport = new HermesDirectTransport('https://h.example.com', {
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    })
+    const promise = transport.connectWebSocket('/api/ws')
+    queueMicrotask(() => {
+      const socket = FakeWebSocket.instances[0]!
+      socket.open()
+      socket.message('{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready"}}')
+    })
+    const result = await promise
+    result.stopBuffering?.()
+    expect(result.bufferedMessages?.map((event) => event.data)).toContain('{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready"}}')
+  })
+
+  test('Given WebSocket 构造器同步抛错 When 连接 Then 返回 network 且无 timer TDZ', async () => {
+    class ThrowingWebSocket {
+      constructor() { throw new Error('bad url') }
+    }
+    const transport = new HermesDirectTransport('https://h.example.com/base/', {
+      WebSocketImpl: ThrowingWebSocket as unknown as typeof WebSocket,
+    })
+    const result = await transport.connectWebSocket('/api/ws')
+    expect(result.errorCode).toBe('network')
+    expect(result.errorMessage).toContain('构造失败')
   })
 
   test('Given WebSocket 失败 When 连接 Then 返回 network 错误码', async () => {

@@ -40,6 +40,20 @@ export class HermesError extends Error {
   }
 }
 
+export class HermesRpcError extends HermesError {
+  readonly rpcCode?: number
+  readonly requestId: number | string
+  readonly method: string
+
+  constructor(message: string, input: { rpcCode?: number; requestId: number | string; method: string }) {
+    super(message, 'unknown')
+    this.name = 'HermesRpcError'
+    this.rpcCode = input.rpcCode
+    this.requestId = input.requestId
+    this.method = input.method
+  }
+}
+
 /**
  * 从 HTTP 状态码映射 Hermes 错误码。
  *

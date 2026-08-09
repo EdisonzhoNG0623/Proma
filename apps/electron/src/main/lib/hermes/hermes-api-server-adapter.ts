@@ -179,4 +179,22 @@ export class HermesApiServerAdapter {
     }
     return response.body
   }
+
+  /** stop ACK 仅表示 stopping；有限轮询到 terminal，超时则显式失败。 */
+  async stopRunAndWait(
+    runId: string,
+    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  ): Promise<unknown> {
+    await this.stopRun(runId)
+    const deadline = Date.now() + (options.timeoutMs ?? 8_000)
+    while (Date.now() < deadline) {
+      const status = await this.getRunStatus(runId)
+      const value = status && typeof status === 'object'
+        ? String((status as { status?: unknown }).status ?? '')
+        : ''
+      if (value === 'cancelled' || value === 'completed' || value === 'failed') return status
+      await new Promise((resolve) => setTimeout(resolve, options.pollIntervalMs ?? 250))
+    }
+    throw new HermesError('Hermes API run 停止请求已发送，但等待终态超时', 'timeout')
+  }
 }

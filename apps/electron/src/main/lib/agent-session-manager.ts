@@ -446,14 +446,46 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
  * 截断超大 SDKMessage 的内容，保留元数据结构。
  * 处理三类膨胀源：超长 text block、超大 tool_result、内嵌 base64 图片。
  */
-function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKMessage {
-  const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
-  const truncationThreshold = MAX_SDK_MESSAGE_LENGTH / 2
+function sanitizeOversizedMessage(
+  msg: SDKMessage,
+  originalLength: number,
+  truncationThreshold = MAX_SDK_MESSAGE_LENGTH / 2,
+): SDKMessage {
+  const truncationNote = `
+[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
+  // 图片 base64 独立阈值：超过即剥离（防 transcript 因大图膨胀卡死；图片回显走本地缓存/文本匹配补图）
+  const IMAGE_DATA_MAX = 150 * 1024
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const clone: any = JSON.parse(JSON.stringify(msg))
   const content = clone.message?.content
+
+  // 递归剥离超大图片 data / dataUrl / image_url.base64 字符串字段
+  const stripHugeImageData = (node: unknown, depth: number): void => {
+    if (!node || typeof node !== 'object' || depth > 6) return
+    if (Array.isArray(node)) {
+      for (const item of node) stripHugeImageData(item, depth + 1)
+      return
+    }
+    const record = node as Record<string, unknown>
+    for (const key of ['data', 'dataUrl', 'url', 'image_url']) {
+      const value = record[key]
+      if (typeof value === 'string' && value.length > IMAGE_DATA_MAX) {
+        // 仅剥离看起来像图片 base64 / data URL 的超大字段
+        if (/^(data:image\/|data:image\/.*;base64,|[A-Za-z0-9+/=]{200,})/.test(value.slice(0, 400))) {
+          record[key] = undefined
+          record['_truncated'] = true
+          record['_originalLength'] = value.length
+        }
+      }
+    }
+    for (const value of Object.values(record)) {
+      if (value && typeof value === 'object') stripHugeImageData(value, depth + 1)
+    }
+  }
+
   if (Array.isArray(content)) {
+    stripHugeImageData(content, 0)
     for (let i = 0; i < content.length; i++) {
       const block = content[i]
       if (!block || typeof block !== 'object') continue
@@ -463,12 +495,12 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
         block.text = block.text.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
       }
 
-      // 截断超大 tool_result
+      // 截断超长 tool_result
       if (block.type === 'tool_result') {
         if (typeof block.content === 'string' && block.content.length > truncationThreshold) {
           block.content = block.content.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
         }
-        // 剥离 base64 图片数据
+        // 剥离 base64 图片块
         if (Array.isArray(block.content)) {
           block.content = block.content.map((item: Record<string, unknown>) => {
             if (item?.type === 'image' && (item.source as Record<string, unknown>)?.data) {
@@ -513,6 +545,63 @@ export function getAgentSessionSDKMessages(id: string): SDKMessage[] {
   }
 }
 
+const MAX_RENDERER_SDK_MESSAGE_LENGTH = 64 * 1024
+
+/**
+ * Renderer 只需要可展示预览，不应复制数百 KB～数 MB 的原始工具结果。
+ * 该函数只裁剪 IPC 副本；磁盘 JSONL 和 SDK resume 真源保持不变。
+ */
+export function sanitizeSDKMessageForRenderer(message: SDKMessage): SDKMessage {
+  const serializedLength = JSON.stringify(message).length
+  if (serializedLength <= MAX_RENDERER_SDK_MESSAGE_LENGTH) return message
+  return sanitizeOversizedMessage(message, serializedLength, MAX_RENDERER_SDK_MESSAGE_LENGTH)
+}
+
+export function getAgentSessionSDKMessagesForRenderer(id: string): SDKMessage[] {
+  return getAgentSessionSDKMessages(id).map(sanitizeSDKMessageForRenderer)
+}
+
+/**
+ * 返回稳定 UUID 之后的 canonical 尾段。找不到边界时返回 null，调用方必须回退 full snapshot。
+ */
+export function getAgentSessionSDKMessagesAfterForRenderer(id: string, afterUuid: string): SDKMessage[] | null {
+  const messages = getAgentSessionSDKMessages(id)
+  const boundaryIndex = messages.findLastIndex((message) => getStoredMessageUuid(message) === afterUuid)
+  if (boundaryIndex < 0) return null
+  return messages.slice(boundaryIndex + 1).map(sanitizeSDKMessageForRenderer)
+}
+
+/**
+ * 去重 SDKMessage transcript 中的重复 user/assistant 消息（Hermes 重复 hydrate 可能造成翻倍）。
+ * key 用类型 + 文本；返回删除条数。
+ */
+export function dedupeSDKMessagesByIdentity(id: string, keyOf: (m: SDKMessage) => string): number {
+  const all = getAgentSessionSDKMessages(id)
+  const seen = new Set<string>()
+  const deduped: SDKMessage[] = []
+  let removed = 0
+  for (const m of all) {
+    if (m.type === 'user' || m.type === 'assistant') {
+      const key = keyOf(m)
+      if (seen.has(key)) {
+        removed += 1
+        continue
+      }
+      seen.add(key)
+    }
+    deduped.push(m)
+  }
+  if (removed > 0) {
+    const filePath = getAgentSessionMessagesPath(id)
+    try {
+      writeFileSync(filePath, deduped.map((m) => serializeSDKMessageForStorage(m) + '\n').join(''), 'utf-8')
+    } catch (error) {
+      console.error(`[Agent 会话] 去重重写失败 (${id}):`, error)
+    }
+  }
+  return removed
+}
+
 /**
  * convertLegacyMessage 已迁移至 @proma/session-core（本文件从该包 import 使用）。
  */
@@ -522,7 +611,7 @@ export function getAgentSessionSDKMessages(id: string): SDKMessage[] {
  */
 export function updateAgentSessionMeta(
   id: string,
-  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'agentRuntime' | 'hermesTargetId' | 'hermesProfile' | 'hermesRemoteSessionId' | 'hermesRemoteCwd' | 'codexFastMode' | 'reasoningLevel' | 'openAIThinkingLevel' | 'workspaceId' | 'pinned' | 'starred' | 'archived' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal'>>,
+  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'agentRuntime' | 'hermesTargetId' | 'hermesProtocol' | 'hermesProfile' | 'hermesRemoteSessionId' | 'hermesRemoteCwd' | 'codexFastMode' | 'reasoningLevel' | 'openAIThinkingLevel' | 'workspaceId' | 'pinned' | 'starred' | 'archived' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal'>>,
 ): AgentSessionMeta {
   const index = readIndex()
   const idx = index.sessions.findIndex((s) => s.id === id)

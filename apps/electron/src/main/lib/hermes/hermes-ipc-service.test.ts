@@ -25,6 +25,12 @@ import { join } from 'node:path'
 import { HermesIpcService } from './hermes-ipc-service'
 import { HermesTargetStore } from './hermes-target-store'
 import { HermesCredentialStore } from './hermes-credential-store'
+import { HermesCredentialBroker } from './hermes-credential-broker'
+import { HermesCookieSessionManager } from './hermes-cookie-session'
+import { HermesEndpointManager } from './hermes-endpoint-manager'
+import { HermesDashboardConnectionBroker } from './hermes-dashboard-connection-broker'
+import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
+import type { HermesTransport } from './transport/hermes-transport'
 
 let dir: string
 let targetStore: HermesTargetStore
@@ -41,7 +47,12 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'proma-hermes-ipc-'))
   targetStore = new HermesTargetStore(join(dir, 'hermes-targets.json'))
   credentialStore = new HermesCredentialStore(join(dir, 'hermes-credentials.json'), fakeCrypto)
-  service = new HermesIpcService({ targetStore, credentialStore })
+  const cookieSessions = new HermesCookieSessionManager(() => ({
+    fetch: async () => new Response('{}'),
+    cookies: { get: async () => [], remove: async () => undefined },
+    flushStorageData: async () => undefined,
+  }))
+  service = new HermesIpcService({ targetStore, credentialStore, cookieSessions })
 })
 
 afterAll(() => {
@@ -60,91 +71,120 @@ describe('HermesIpcService target CRUD', () => {
     expect(service.getTarget(created.id)?.name).toBe('IPC 测试')
   })
 
-  test('Given 更新 target When update Then 保留 id', () => {
+  test('Given 更新 target When update Then 保留 id', async () => {
     const created = service.createTarget({
       name: 'a',
       mode: 'direct',
       remoteUrl: 'https://a.example.com',
     })
-    const updated = service.updateTarget(created.id, { name: 'b' })
+    const updated = await service.updateTarget(created.id, { name: 'b' })
     expect(updated.id).toBe(created.id)
     expect(updated.name).toBe('b')
   })
 })
 
-describe('HermesIpcService 凭据管理', () => {
-  test('Given 保存 Dashboard 密码 When setDashboardPassword Then 加密存储并更新 target 引用', () => {
-    const created = service.createTarget({
-      name: '凭据测试',
+describe('HermesIpcService remote snapshot history', () => {
+  test('Given 远端 session When 读取 canonical snapshot Then 保留媒体指令且不调用 session.resume', async () => {
+    const target = targetStore.createTarget({
+      name: 'history',
       mode: 'direct',
-      remoteUrl: 'https://h.example.com',
+      endpoints: { dashboard: { baseUrl: 'https://history.example.com/root' } },
     })
-    const result = service.setDashboardPassword({
+    const paths: string[] = []
+    const transport: HermesTransport = {
+      baseUrl: 'https://history.example.com/root/',
+      requestJson: async (path) => {
+        paths.push(path)
+        if (path.includes('/messages')) return {
+          status: 200,
+          body: { messages: [
+            { id: 699, role: 'system', content: '内部系统提示' },
+            { id: 700, role: 'tool', content: '{"skill":"完整内部 Skill 正文"}' },
+            { id: 701, role: 'user', content: '@image:/remote/a.png' },
+            { id: 702, role: 'assistant', content: '看到了' },
+          ] },
+        }
+        return { status: 200, body: { message_count: 700 } }
+      },
+      openSse: async () => ({ abort: () => undefined, done: Promise.resolve() }),
+      connectWebSocket: async () => ({ socket: null, errorCode: null, errorMessage: null }),
+      dispose: () => undefined,
+    }
+    const endpoints = new HermesEndpointManager({
+      build: async () => ({ dashboard: transport, dispose: async () => undefined }),
+    })
+    const socket = new class extends EventTarget {
+      send(): void { /* history path must not issue RPC */ }
+      close(): void { this.dispatchEvent(new Event('close')) }
+    }()
+    const broker = new HermesDashboardConnectionBroker({
+      endpointManager: endpoints,
+      prepareConnection: async (_target, _transport, onClose) => ({
+        url: 'wss://history.example.com/root/api/ws',
+        client: new HermesDashboardWsClient(async () => ({
+          socket: socket as unknown as WebSocket,
+          errorCode: null,
+          errorMessage: null,
+          bufferedMessages: [new MessageEvent('message', { data: JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } }) })],
+        }), onClose),
+      }),
+    })
+    const isolated = new HermesIpcService({ targetStore, credentialStore, endpointManager: endpoints, dashboardBroker: broker })
+    const snapshot = await isolated.getRemoteSessionHistory('proma-1', target.id, 'stored-1', 'work')
+    expect(snapshot).toHaveLength(2)
+    expect((snapshot[0] as { uuid?: string }).uuid).toBe(`hermes:${target.id}:dashboard:stored-1:701`)
+    expect((snapshot[0] as { message?: { content?: Array<{ text?: string }> } }).message?.content?.[0]?.text).toBe('@image:/remote/a.png')
+    expect(paths[0]).toContain('/api/sessions/stored-1?profile=work')
+    expect(paths[1]).toContain('/messages?profile=work&limit=300&offset=400')
+    expect(paths.some((path) => path.includes('session.resume'))).toBe(false)
+    await broker.disposeAll(); await endpoints.disposeAll()
+  })
+})
+
+describe('HermesIpcService 凭据管理', () => {
+  test('Given 保存 Dashboard 密码 When 返回 Target Then 只暴露 credentialState', () => {
+    const created = service.createTarget({ name: '凭据测试', mode: 'direct', remoteUrl: 'https://h.example.com' })
+    expect(service.setDashboardPassword({
       targetId: created.id,
       provider: 'basic',
       username: 'admin',
       password: 'p@ss',
-    })
-    expect(result.ref).toBeTruthy()
-    const target = service.getTarget(created.id)
-    expect(target?.auth.dashboardCredentialRef).toBe(result.ref)
-    expect(target?.auth.dashboardProvider).toBe('basic')
-    // 明文不落盘
-    const raw = credentialStore.getCredential(result.ref)
-    expect(raw).toContain('p@ss') // fake crypto 可逆，真实环境为密文
+    })).toEqual({ configured: true })
+    const target = service.getTarget(created.id)!
+    expect(target.credentialState['dashboard-password']).toBe(true)
+    expect(target.auth.dashboardProvider).toBe('basic')
+    expect(JSON.stringify(target)).not.toContain('CredentialRef')
+    expect(new HermesCredentialBroker(credentialStore).getSecret(created.id, 'dashboard-password')).toContain('p@ss')
   })
 
-  test('Given 保存 API Server key When setApiServerKey Then 更新 target 引用', () => {
-    const created = service.createTarget({
-      name: 'api',
-      mode: 'direct',
-      remoteUrl: 'https://h.example.com',
-    })
-    const result = service.setApiServerKey({ targetId: created.id, secret: 'sk-mock' })
-    expect(service.getTarget(created.id)?.auth.apiServerKeyRef).toBe(result.ref)
-  })
+  test('Given 保存 API/SSH secret When 返回 Then 不返回 ref', () => {
+    const api = service.createTarget({ name: 'api', mode: 'direct', remoteUrl: 'https://h.example.com' })
+    expect(service.setApiServerKey({ targetId: api.id, secret: 'sk-mock' })).toEqual({ configured: true })
+    expect(service.getTarget(api.id)?.credentialState['api-server-key']).toBe(true)
 
-  test('Given 保存 SSH 密码 When setSshPassword Then 更新 ssh 引用', () => {
-    const created = service.createTarget({
+    const ssh = service.createTarget({
       name: 'ssh',
       mode: 'ssh-tunnel',
       ssh: { host: 'vps.example.com', port: 22, username: 'deploy' },
     })
-    const result = service.setSshPassword({ targetId: created.id, secret: 'ssh-pass' })
-    expect(service.getTarget(created.id)?.ssh?.credentialRef).toBe(result.ref)
+    expect(service.setSshPassword({ targetId: ssh.id, secret: 'ssh-pass' })).toEqual({ configured: true })
+    expect(service.getTarget(ssh.id)?.credentialState['ssh-password']).toBe(true)
   })
 
-  test('Given 删除 target When delete Then 同步清理关联凭据', () => {
-    const created = service.createTarget({
-      name: '删除测试',
-      mode: 'direct',
-      remoteUrl: 'https://h.example.com',
+  test('Given 删除 target When delete Then 按 ownership 清理全部凭据', async () => {
+    const created = service.createTarget({ name: '删除测试', mode: 'direct', remoteUrl: 'https://h.example.com' })
+    service.setDashboardPassword({ targetId: created.id, provider: 'basic', username: 'u', password: 'p' })
+    service.setApiServerKey({ targetId: created.id, secret: 'sk' })
+    const result = await service.deleteTarget(created.id)
+    expect(result).toEqual({ ok: true, targetId: created.id, removedCredentialCount: 2 })
+    expect(new HermesCredentialBroker(credentialStore).credentialState(created.id)).toEqual({})
+  })
+
+  test('Given 删除不存在的 target When delete Then 返回 ok=false', async () => {
+    expect(await service.deleteTarget('missing')).toEqual({
+      ok: false,
+      targetId: 'missing',
+      removedCredentialCount: 0,
     })
-    const pwRef = service.setDashboardPassword({
-      targetId: created.id,
-      provider: 'basic',
-      username: 'u',
-      password: 'p',
-    }).ref
-    const apiRef = service.setApiServerKey({ targetId: created.id, secret: 'sk' }).ref
-
-    const result = service.deleteTarget(created.id)
-    expect(result.ok).toBe(true)
-    expect(result.removedCredentialRefs).toContain(pwRef)
-    expect(result.removedCredentialRefs).toContain(apiRef)
-    // 凭据已清理
-    expect(credentialStore.getCredential(pwRef)).toBeNull()
-    expect(credentialStore.getCredential(apiRef)).toBeNull()
-  })
-
-  test('Given 删除不存在的 target When delete Then 返回 ok=false', () => {
-    const result = service.deleteTarget('missing')
-    expect(result.ok).toBe(false)
-  })
-
-  test('Given deleteCredential When 调用 Then 返回是否删除', () => {
-    const ref = service.setCredential('api-server-key', { secret: 'x' }).ref
-    expect(service.deleteCredential(ref)).toBe(true)
-    expect(service.deleteCredential(ref)).toBe(false)
   })
 })

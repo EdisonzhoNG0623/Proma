@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -114,7 +114,8 @@ describe('HermesTargetStore CRUD', () => {
       })
       expect(created.id).toBeTruthy()
       expect(created.mode).toBe('direct')
-      expect(created.remoteUrl).toBe('https://hermes.example.com/')
+      expect(created.endpoints?.dashboard?.baseUrl).toBe('https://hermes.example.com/')
+      expect(created.remoteUrl).toBeUndefined()
       expect(created.createdAt).toBeGreaterThan(0)
 
       const listed = store.listTargets()
@@ -133,7 +134,8 @@ describe('HermesTargetStore CRUD', () => {
         mode: 'ssh-tunnel',
         ssh: { host: 'vps.example.com', port: 22, username: 'deploy' },
       })
-      expect(created.ssh?.dashboardRemotePort).toBe(9119)
+      expect(created.endpoints?.dashboard?.remotePort).toBe(9119)
+      expect(created.endpoints?.apiServer?.remotePort).toBe(8642)
       expect(created.remoteUrl).toBeUndefined()
       expect(store.listTargets()).toHaveLength(1)
     } finally {
@@ -155,7 +157,7 @@ describe('HermesTargetStore CRUD', () => {
   test('Given Direct 模式缺少 URL When 创建 Then 拒绝', () => {
     const { store, dir } = setup()
     try {
-      expect(() => store.createTarget({ name: 'x', mode: 'direct' })).toThrow('必须提供远端 URL')
+      expect(() => store.createTarget({ name: 'x', mode: 'direct' })).toThrow('至少一个 Hermes 服务 URL')
     } finally {
       cleanup(dir)
     }
@@ -246,13 +248,125 @@ describe('HermesTargetStore CRUD', () => {
     }
   })
 
-  test('Given 配置文件损坏 When 读取 Then 返回空列表而非崩溃', () => {
+  test('Given 主配置与 backup 都损坏 When 读取 Then fail closed', () => {
     const dir = mkdtempSync(join(tmpdir(), 'proma-hermes-target-'))
+    const file = join(dir, 'hermes-targets.json')
     try {
-      writeFileSync(join(dir, 'hermes-targets.json'), '{ not valid json', 'utf-8')
-      const store = new HermesTargetStore(join(dir, 'hermes-targets.json'))
-      expect(store.listTargets()).toEqual([])
-      expect(store.getTarget('any')).toBeNull()
+      writeFileSync(file, '{ not valid json', 'utf-8')
+      writeFileSync(`${file}.bak`, '{ also invalid', 'utf-8')
+      const store = new HermesTargetStore(file)
+      expect(() => store.listTargets()).toThrow('配置损坏')
+      expect(() => store.createTarget({ name: '不可覆盖', mode: 'direct', remoteUrl: 'https://x.example.com' })).toThrow('配置损坏')
+    } finally {
+      cleanup(dir)
+    }
+  })
+
+  test('Given V1 Direct 无 API-only 快照 When 读取 Then 保留 ID 并迁移为 Dashboard endpoint', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'proma-hermes-target-'))
+    const file = join(dir, 'hermes-targets.json')
+    try {
+      writeFileSync(file, JSON.stringify({
+        version: 1,
+        targets: [{
+          id: 'legacy-dashboard',
+          name: '旧 Dashboard',
+          mode: 'direct',
+          remoteUrl: 'https://dashboard.example.com',
+          auth: {},
+          createdAt: 1,
+          updatedAt: 2,
+        }],
+      }), 'utf8')
+      const [target] = new HermesTargetStore(file).listTargets()
+      expect(target?.id).toBe('legacy-dashboard')
+      expect(target?.endpoints).toEqual({ dashboard: { baseUrl: 'https://dashboard.example.com/' } })
+      expect(target?.remoteUrl).toBeUndefined()
+      expect(JSON.parse(readFileSync(file, 'utf8')).version).toBe(2)
+    } finally {
+      cleanup(dir)
+    }
+  })
+
+  test('Given V1 Direct API-only 快照 When 读取 Then 迁移为 API endpoint', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'proma-hermes-target-'))
+    const file = join(dir, 'hermes-targets.json')
+    try {
+      writeFileSync(file, JSON.stringify({
+        version: 1,
+        targets: [{
+          id: 'legacy-api',
+          name: '旧 API',
+          mode: 'direct',
+          remoteUrl: 'https://api.example.com',
+          auth: {},
+          lastCapabilitySnapshot: { probedAt: 1, version: null, serviceClass: 'api-only' },
+          createdAt: 1,
+          updatedAt: 2,
+        }],
+      }), 'utf8')
+      const [target] = new HermesTargetStore(file).listTargets()
+      expect(target?.endpoints).toEqual({ apiServer: { baseUrl: 'https://api.example.com/' } })
+      expect(target?.lastCapabilitySnapshot).toBeUndefined()
+    } finally {
+      cleanup(dir)
+    }
+  })
+
+  test('Given 旧 V2 password ref 无 auth mode When 读取 Then 推断 password-cookie 并回写', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'proma-hermes-target-'))
+    const file = join(dir, 'hermes-targets.json')
+    try {
+      writeFileSync(file, JSON.stringify({
+        version: 2,
+        targets: [{
+          id: 'legacy-password-v2',
+          name: '旧密码配置',
+          mode: 'direct',
+          endpoints: { dashboard: { baseUrl: 'https://dashboard.example.com' } },
+          auth: { dashboardCredentialRef: 'legacy-ref', dashboardProvider: 'basic' },
+          createdAt: 1,
+          updatedAt: 2,
+        }],
+      }), 'utf8')
+      const [target] = new HermesTargetStore(file).listTargets()
+      expect(target?.auth.dashboardMode).toBe('password-cookie')
+      const persisted = JSON.parse(readFileSync(file, 'utf8')) as { targets: Array<{ auth: { dashboardMode?: string } }> }
+      expect(persisted.targets[0]?.auth.dashboardMode).toBe('password-cookie')
+    } finally {
+      cleanup(dir)
+    }
+  })
+
+  test('Given V2 Direct 两个 URL When 创建 Then 独立持久化', () => {
+    const { store, dir } = setup()
+    try {
+      const target = store.createTarget({
+        name: '双端点',
+        mode: 'direct',
+        endpoints: {
+          dashboard: { baseUrl: 'https://dashboard.example.com' },
+          apiServer: { baseUrl: 'https://api.example.com:8642' },
+        },
+      })
+      expect(target.endpoints?.dashboard?.baseUrl).toBe('https://dashboard.example.com/')
+      expect(target.endpoints?.apiServer?.baseUrl).toBe('https://api.example.com:8642/')
+    } finally {
+      cleanup(dir)
+    }
+  })
+
+  test('Given endpoint 发生变化 When 更新 Then 清除旧能力快照', () => {
+    const { store, dir } = setup()
+    try {
+      const target = store.createTarget({ name: 'x', mode: 'direct', remoteUrl: 'https://a.example.com' })
+      store.updateTarget(target.id, {
+        lastCapabilitySnapshot: { probedAt: 1, version: '1', serviceClass: 'dashboard-only' },
+      })
+      const updated = store.updateTarget(target.id, {
+        endpoints: { dashboard: { baseUrl: 'https://b.example.com' } },
+      })
+      expect(updated.lastCapabilitySnapshot).toBeUndefined()
     } finally {
       cleanup(dir)
     }

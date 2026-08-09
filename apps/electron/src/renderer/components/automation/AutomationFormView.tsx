@@ -49,6 +49,7 @@ import type {
   FeishuChatBinding,
   UpdateAutomationInput,
   AgentRuntime,
+  LocalAgentRuntime,
 } from '@proma/shared'
 
 const NO_FEISHU_BINDING = '__none__'
@@ -198,9 +199,10 @@ function coerceAutomationDraftRuntime(
   defaultAgentRuntime: AgentRuntime,
   agentChannelIds: string[],
 ): AutomationDraft {
-  const runtime: AgentRuntime = draft.id
-    ? draft.agentRuntime ?? defaultAgentRuntime
-    : defaultAgentRuntime
+  const localDefault: LocalAgentRuntime = defaultAgentRuntime === 'claude' ? 'claude' : 'pi'
+  const runtime: LocalAgentRuntime = draft.id
+    ? draft.agentRuntime ?? localDefault
+    : localDefault
 
   if (runtime === 'claude' && draft.channelId && !agentChannelIds.includes(draft.channelId)) {
     return { ...draft, agentRuntime: runtime, channelId: '', modelId: undefined, active: false }
@@ -282,7 +284,7 @@ function SaveStatusBadge({
 
 // Pi 为默认与推荐内核，Claude Agent SDK 计划于 2026 年 8 月中旬彻底下线
 const AGENT_RUNTIME_OPTIONS: Array<{
-  value: AgentRuntime
+  value: LocalAgentRuntime
   label: string
   description: string
   badge?: string
@@ -310,13 +312,13 @@ function AutomationRuntimeSelector({
   runtime,
   onChange,
 }: {
-  runtime: AgentRuntime
-  onChange: (runtime: AgentRuntime) => void
+  runtime: LocalAgentRuntime
+  onChange: (runtime: LocalAgentRuntime) => void
 }): React.ReactElement {
   const [open, setOpen] = React.useState(false)
   const current = AGENT_RUNTIME_OPTIONS.find((option) => option.value === runtime) ?? AGENT_RUNTIME_OPTIONS[0]!
 
-  const handleSelect = (nextRuntime: AgentRuntime): void => {
+  const handleSelect = (nextRuntime: LocalAgentRuntime): void => {
     onChange(nextRuntime)
     setOpen(false)
   }
@@ -698,7 +700,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
     ? { channelId: form.channelId, modelId: form.modelId }
     : null
   const modelFilterChannelIds = form.agentRuntime === 'pi' ? undefined : agentChannelIds
-  const handleRuntimeChange = (runtime: AgentRuntime): void => {
+  const handleRuntimeChange = (runtime: LocalAgentRuntime): void => {
     const patch: Partial<AutomationDraft> = { agentRuntime: runtime }
     if (runtime === 'claude' && form.channelId && !agentChannelIds.includes(form.channelId)) {
       patch.channelId = ''

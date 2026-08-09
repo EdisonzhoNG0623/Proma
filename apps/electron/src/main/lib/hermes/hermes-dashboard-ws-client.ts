@@ -12,7 +12,8 @@
  *   notify:   { jsonrpc: '2.0', method, params }
  */
 
-import { HermesError, redactSecrets } from './hermes-errors'
+import { HermesError, HermesRpcError, redactSecrets } from './hermes-errors'
+import { parseDashboardWireMessage, type HermesDashboardEvent } from './hermes-dashboard-contract'
 
 /** WS 消息形态 */
 export interface HermesWsMessage {
@@ -30,14 +31,17 @@ export interface HermesWsRequestOptions {
   timeoutMs?: number
 }
 
-/** 通知处理器签名 */
+/** 通知处理器签名（兼容现有 normalizer；真实事件 method 固定为 event）。 */
 export type HermesWsNotificationHandler = (method: string, params: unknown) => void
+export type HermesDashboardEventHandler = (event: HermesDashboardEvent) => void
 
 /** 连接打开结果（复用 transport 的 WS 打开约定） */
 export interface HermesWsConnectResult {
   socket: WebSocket | null
   errorCode: string | null
   errorMessage: string | null
+  bufferedMessages?: MessageEvent[]
+  stopBuffering?: () => void
 }
 
 /** socket 连接器：由 transport 提供 */
@@ -45,6 +49,7 @@ export type HermesWsConnector = (url: string) => Promise<HermesWsConnectResult>
 
 /** JSON-RPC 请求响应类型 */
 interface PendingRequest {
+  method: string
   resolve: (value: unknown) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
@@ -58,8 +63,9 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
  */
 export class HermesDashboardWsClient {
   private socket: WebSocket | null = null
-  private readonly pending = new Map<number, PendingRequest>()
+  private readonly pending = new Map<number | string, PendingRequest>()
   private readonly notificationHandlers = new Set<HermesWsNotificationHandler>()
+  private readonly eventHandlers = new Set<HermesDashboardEventHandler>()
   private nextId = 1
   private closed = false
 
@@ -90,9 +96,15 @@ export class HermesDashboardWsClient {
       )
     }
     this.socket = result.socket
+    const handledEarly = new WeakSet<object>()
     this.socket.addEventListener('message', (event) => {
+      if (typeof event === 'object' && event) handledEarly.add(event)
       this.handleMessage(event)
     })
+    result.stopBuffering?.()
+    for (const event of result.bufferedMessages ?? []) {
+      if (!handledEarly.has(event)) this.handleMessage(event)
+    }
     this.socket.addEventListener('close', () => {
       const reason = 'connection closed'
       this.socket = null
@@ -113,9 +125,15 @@ export class HermesDashboardWsClient {
         this.pending.delete(id)
         reject(new HermesError(`Hermes 请求超时（${method}）`, 'timeout'))
       }, timeoutMs)
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer })
+      this.pending.set(id, { method, resolve: resolve as (value: unknown) => void, reject, timer })
       const message: HermesWsMessage = { jsonrpc: '2.0', id, method, params }
-      this.socket?.send(JSON.stringify(message))
+      try {
+        this.socket?.send(JSON.stringify(message))
+      } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(new HermesError(redactSecrets(error instanceof Error ? error.message : String(error)), 'network'))
+      }
     })
   }
 
@@ -123,6 +141,12 @@ export class HermesDashboardWsClient {
   onNotification(handler: HermesWsNotificationHandler): () => void {
     this.notificationHandlers.add(handler)
     return () => this.notificationHandlers.delete(handler)
+  }
+
+  /** 注册严格解析后的 Dashboard event。 */
+  onEvent(handler: HermesDashboardEventHandler): () => void {
+    this.eventHandlers.add(handler)
+    return () => this.eventHandlers.delete(handler)
   }
 
   /** 关闭连接 */
@@ -135,33 +159,41 @@ export class HermesDashboardWsClient {
   }
 
   private handleMessage(event: MessageEvent): void {
-    let message: HermesWsMessage
-    try {
-      message = JSON.parse(String(event.data)) as HermesWsMessage
-    } catch {
-      // 非 JSON 消息（心跳等）忽略
-      return
-    }
-    if (message.id !== undefined) {
-      const pending = this.pending.get(Number(message.id))
+    const message = parseDashboardWireMessage(String(event.data))
+    if (!message) return
+    if (message.kind === 'response') {
+      const pending = this.pending.get(message.id)
       if (!pending) return
       clearTimeout(pending.timer)
-      this.pending.delete(Number(message.id))
+      this.pending.delete(message.id)
       if (message.error) {
-        const text = message.error.message ?? '未知错误'
-        pending.reject(new HermesError(redactSecrets(text), 'network'))
+        pending.reject(new HermesRpcError(redactSecrets(message.error.message ?? '未知错误'), {
+          rpcCode: message.error.code,
+          requestId: message.id,
+          method: pending.method,
+        }))
       } else {
         pending.resolve(message.result)
       }
       return
     }
-    if (message.method) {
-      for (const handler of this.notificationHandlers) {
-        try {
-          handler(message.method, message.params)
-        } catch (error) {
-          console.warn('[Hermes Dashboard] 通知处理器异常:', error instanceof Error ? error.message : String(error))
-        }
+    for (const handler of this.eventHandlers) {
+      try {
+        handler(message)
+      } catch (error) {
+        console.warn('[Hermes Dashboard] 事件处理器异常:', error instanceof Error ? error.message : String(error))
+      }
+    }
+    const params = {
+      type: message.type,
+      ...(message.sessionId ? { session_id: message.sessionId } : {}),
+      payload: message.payload,
+    }
+    for (const handler of this.notificationHandlers) {
+      try {
+        handler('event', params)
+      } catch (error) {
+        console.warn('[Hermes Dashboard] 通知处理器异常:', error instanceof Error ? error.message : String(error))
       }
     }
   }

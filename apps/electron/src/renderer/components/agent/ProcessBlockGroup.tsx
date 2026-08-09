@@ -23,6 +23,11 @@ const MAX_PROCESS_GROUP_ICONS = 4
 const PROCESS_GROUP_COLLAPSE_DURATION_MS = 500
 const PROCESS_GROUP_AUTO_COLLAPSE_SOUND_DELAY_MS = 900
 const PROCESS_GROUP_AUTO_COLLAPSE_COUNTDOWN_SECONDS = 3
+const LARGE_PROCESS_GROUP_BLOCK_THRESHOLD = 80
+
+export function shouldImmediatelyCollapseProcessGroup(blocks: SDKContentBlock[]): boolean {
+  return blocks.length >= LARGE_PROCESS_GROUP_BLOCK_THRESHOLD
+}
 
 interface IndexedContentBlock {
   block: SDKContentBlock
@@ -177,6 +182,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
   const autoCollapseTimersRef = React.useRef<number[]>([])
   const contentRef = React.useRef<HTMLDivElement>(null)
   const [measuredHeight, setMeasuredHeight] = React.useState<number | undefined>(undefined)
+  const isLargeProcessGroup = shouldImmediatelyCollapseProcessGroup(blocks)
 
   const clearAutoCollapseTimers = React.useCallback(() => {
     for (const timer of autoCollapseTimersRef.current) window.clearTimeout(timer)
@@ -208,6 +214,13 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
       return
     }
 
+    // 大型过程组不保留 4.4 秒倒计时/高度动画，避免输出结束后持续布局抖动。
+    if (isLargeProcessGroup) {
+      setCollapseCountdown(null)
+      setExpanded(false)
+      return
+    }
+
     const soundDelayTimer = window.setTimeout(() => {
       setCollapseCountdown(PROCESS_GROUP_AUTO_COLLAPSE_COUNTDOWN_SECONDS)
 
@@ -224,7 +237,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
     autoCollapseTimersRef.current.push(soundDelayTimer)
 
     return clearAutoCollapseTimers
-  }, [clearAutoCollapseTimers, isStreaming])
+  }, [clearAutoCollapseTimers, isLargeProcessGroup, isStreaming])
 
   // 折叠前测量实际高度，用于丝滑的 height 过渡（子元素不 reflow，只裁剪边界）
   React.useEffect(() => {
@@ -234,7 +247,13 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
       return
     }
 
-    // 折叠时：先测量当前高度，触发 height 过渡动画，动画结束后卸载 DOM
+    if (isLargeProcessGroup) {
+      setMeasuredHeight(0)
+      setShouldRenderContent(false)
+      return
+    }
+
+    // 小型过程组折叠时保留高度过渡；大型组已在上方立即卸载。
     const el = contentRef.current
     if (el) {
       const h = el.scrollHeight
@@ -245,7 +264,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
 
     const timer = window.setTimeout(() => setShouldRenderContent(false), PROCESS_GROUP_COLLAPSE_DURATION_MS)
     return () => window.clearTimeout(timer)
-  }, [expanded])
+  }, [expanded, isLargeProcessGroup])
 
   const summary = React.useMemo(
     () => buildProcessGroupSummary(blocks),
@@ -254,6 +273,13 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
   const toolNames = React.useMemo(() => buildProcessGroupToolNames(blocks), [blocks])
   const visibleToolNames = toolNames.slice(0, MAX_PROCESS_GROUP_ICONS)
   const hiddenToolCount = Math.max(0, toolNames.length - visibleToolNames.length)
+  // streaming → complete 的首帧就停止渲染大型 children，不等待 effect 再卸载。
+  const immediateCompletionCollapse = isLargeProcessGroup
+    && !isStreaming
+    && wasStreamingRef.current
+    && !userToggledRef.current
+  const displayedExpanded = expanded && !immediateCompletionCollapse
+  const renderExpandedContent = shouldRenderContent && !immediateCompletionCollapse
 
   // 内容区子项渲染策略：
   // - 流式中：每个新块有入场动画，最新一段（消息末尾过程组的最后一个 child）保持正常显示，
@@ -295,7 +321,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
         <ChevronRight
           className={cn(
             'size-3 shrink-0 text-muted-foreground/40 transition-transform duration-150',
-            expanded && 'rotate-90',
+            displayedExpanded && 'rotate-90',
           )}
         />
         <span className="min-w-0 truncate text-[14px] text-muted-foreground">{summary}</span>
@@ -325,13 +351,13 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
         )}
       </button>
 
-      {shouldRenderContent && (
+      {renderExpandedContent && (
         <div
           ref={contentRef}
           className="overflow-hidden"
           style={{
             height: measuredHeight !== undefined ? `${measuredHeight}px` : 'auto',
-            opacity: expanded ? 1 : 0,
+            opacity: displayedExpanded ? 1 : 0,
             transition: measuredHeight !== undefined
               ? `height ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out, opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`
               : `opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`,

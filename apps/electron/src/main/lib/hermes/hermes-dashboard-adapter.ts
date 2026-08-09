@@ -212,17 +212,17 @@ export class HermesDashboardAdapter {
   }
 
   /** 提交 prompt（默认沿用会话 profile；显式 profile 时传入） */
-  async submitPrompt(sessionId: string, text: string, profile?: string): Promise<void> {
+  async submitPrompt(sessionId: string, text: string, profile?: string): Promise<unknown> {
     const params: Record<string, unknown> = { session_id: sessionId, text }
     if (profile && profile !== 'default') {
       params.profile = profile
     }
-    await this.client.request<unknown>('prompt.submit', params, { timeoutMs: 60_000 })
+    return await this.client.request<unknown>('prompt.submit', params, { timeoutMs: 60_000 })
   }
 
   /** 中断当前 turn */
-  async interruptSession(sessionId: string): Promise<void> {
-    await this.client.request<unknown>('session.interrupt', { session_id: sessionId })
+  async interruptSession(sessionId: string): Promise<unknown> {
+    return await this.client.request<unknown>('session.interrupt', { session_id: sessionId })
   }
 
   /** 响应 approval */

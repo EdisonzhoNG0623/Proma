@@ -20,6 +20,7 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 - **Agent 模式**：内置 Claude Agent SDK 与 Pi Agent SDK 两套运行时；支持工作区隔离、权限模式、文件操作、长任务流式输出、计划确认和用户追问。Claude 是默认内核，Pi 可在实验性设置中开启。
 - **协作与任务**：复杂任务可拆分为可追踪的协作子 Agent / Task，并在消息流中展示调用过程和结果。
 - **Skills、MCP 与项目根目录**：每个 Proma 项目独立配置 Skills 与 MCP Server。项目文件可使用用户选择的本地项目根目录，也可使用 Proma 托管的空白项目目录；本地项目配置不会被自动导入。
+- **Hermes Remote（实验性，`0.16.10-hermes.5`）**：Proma 可作为远端 Hermes Agent 的客户端；Dashboard 与 API Server 是显式独立协议，支持 Direct/SSH、远端会话与项目、原子附件提交和真实远端停止。Hermes 的 Skills、Memory、MCP、Automation 与 Proma 本地运行时严格隔离。
 - **远程机器人**：支持飞书 / Lark 机器人桥接，并已提供钉钉、微信桥接入口，用手机或群聊触发本机 Agent 工作流。
 - **记忆与工具**：Chat 和 Agent 可共享记忆能力，并支持联网搜索、内置 Chat 工具、Agent 推荐等辅助能力。
 - **本地优先**：会话、工作区、附件、配置、Skills 等默认存储在 `~/.proma/`，使用 JSON / JSONL 文件组织，不依赖本地数据库。
@@ -61,6 +62,7 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 5. Agent 输入框下方可直接切换 Claude / Pi 内核；Pi 可使用任意已启用的模型渠道。
 6. 进入 **设置 > Agent**，选择默认 Agent 渠道、模型和工作区。
 7. 如需记忆、联网搜索、飞书 / 钉钉 / 微信桥接，在设置页对应 Tab 中继续配置。
+8. 使用 Hermes Remote 时，在 **设置 > Hermes 远程** 分别填写 Dashboard URL 与 API Server URL（或 SSH 远端端口）；会话绑定协议后不会透明切换到另一协议或本地 Agent。
 
 ## 模式选择
 

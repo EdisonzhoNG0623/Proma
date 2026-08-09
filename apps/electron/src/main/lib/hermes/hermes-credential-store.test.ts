@@ -136,13 +136,15 @@ describe('HermesCredentialStore 加密持久化', () => {
     }
   })
 
-  test('Given 配置文件损坏 When 读取 Then 返回空列表而非崩溃', () => {
+  test('Given 主配置与 backup 都损坏 When 读取 Then fail closed', () => {
     const dir = mkdtempSync(join(tmpdir(), 'proma-hermes-cred-'))
+    const file = join(dir, 'hermes-credentials.json')
     try {
-      writeFileSync(join(dir, 'hermes-credentials.json'), 'broken{', 'utf-8')
-      const store = new HermesCredentialStore(join(dir, 'hermes-credentials.json'), createFakeCrypto())
-      expect(store.listCredentials()).toEqual([])
-      expect(store.getCredential('x')).toBeNull()
+      writeFileSync(file, 'broken{', 'utf-8')
+      writeFileSync(`${file}.bak`, 'also broken{', 'utf-8')
+      const store = new HermesCredentialStore(file, createFakeCrypto())
+      expect(() => store.listCredentials()).toThrow('配置损坏')
+      expect(() => store.setCredential('api-server-key', 'must-not-overwrite')).toThrow('配置损坏')
     } finally {
       cleanup(dir)
     }

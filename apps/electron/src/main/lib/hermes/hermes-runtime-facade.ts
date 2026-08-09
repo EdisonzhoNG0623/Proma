@@ -1,522 +1,376 @@
-/**
- * Hermes Runtime Facade
- *
- * 实现 AgentProviderAdapter，把远端 Hermes 作为 Proma Agent 的 External Runtime：
- * - query：按会话绑定的 target 建立连接 → Dashboard 优先（session.create/resume + prompt.submit + WS 事件流）
- *   → API Server fallback（/v1/runs + SSE）；
- * - 远端事件归一化为 HermesTurnEvent，再映射为 SDKMessage 流（HermesSdkMessageMapper）；
- * - abort / interruptQuery：停止远端 run / 断开 WS；
- * - dispose：清理全部活跃连接。
- *
- * 设计约束（方案文档）：
- * - 不伪装成 Proma Local；禁止断线时静默降级到本地执行（Dashboard 不可用时仅可切 API Server，仍是远端）；
- * - 会话绑定（targetId/profile/remoteSessionId）由调用方（agent-session-manager）持久化。
- */
-
-import type { AgentProviderAdapter, AgentQueryInput, SDKMessage, SDKUserMessageInput } from '@proma/shared'
-import { HermesError } from './hermes-errors'
-import { HermesAuthService, buildTicketWsUrl, canSubmitPasswordTo } from './hermes-auth'
-import { HermesDashboardAdapter, type HermesSessionResult } from './hermes-dashboard-adapter'
-import { HermesDashboardWsClient, type HermesWsNotificationHandler } from './hermes-dashboard-ws-client'
+import { posix, win32 } from 'node:path'
+import type {
+  AgentProviderAdapter,
+  AgentQueryInput,
+  HermesProtocol,
+  HermesTarget,
+  HermesTurnAttachment,
+  SDKMessage,
+  SDKUserMessageInput,
+} from '@proma/shared'
+import { buildDashboardRestAuthHeaders } from './hermes-auth'
 import { HermesApiServerAdapter } from './hermes-api-server-adapter'
+import {
+  HermesDashboardConnectionBroker,
+  hermesDashboardConnectionBroker,
+  type HermesDashboardBrokerLease,
+} from './hermes-dashboard-connection-broker'
+import type { HermesSessionCreateInput, HermesSessionResult } from './hermes-dashboard-adapter'
+import { HermesError, HermesRpcError } from './hermes-errors'
 import { HermesSdkMessageMapper, type HermesTurnEvent } from './hermes-sdk-message-mapper'
 import { normalizeApiServerEvent, normalizeDashboardNotification } from './hermes-turn-normalizer'
-import type { HermesTransport } from './transport/hermes-transport'
-import type { HermesTarget } from '@proma/shared'
+import type { HermesCredentialSlot } from './hermes-credential-store'
+import type { HermesSseHandle, HermesTransport } from './transport/hermes-transport'
 
-/**
- * 归一化远端 cwd 用于比较：Hermes 返回的 resolvedCwd 是绝对路径（~ 已展开），
- * 请求 cwd 可能带 ~/ 前缀；两者归一化后比较判断目录是否已存在。
- */
-function normalizeRemoteCwdForCompare(resolved: string, requested: string): boolean {
-  const norm = (p: string): string => {
-    let s = p.trim()
-    if (s.startsWith('~/')) s = s.slice(2)
-    while (s.endsWith('/')) s = s.slice(0, -1)
-    return s.toLowerCase()
-  }
-  const r = norm(resolved)
-  const q = norm(requested)
-  if (r === q) return true
-  // Hermes 展开 ~ 后可能与请求的 ~/xxx 尾部一致（如 /home/ai/proma-projects/elevit vs ~/proma-projects/elevit）
-  return r.endsWith(q) || q.endsWith(r)
-}
-
-/** 会话绑定（持久化在 AgentSessionMeta 中） */
 export interface HermesSessionBinding {
   targetId: string
+  protocol?: HermesProtocol
   profile?: string
   remoteSessionId?: string
-  /** 工作区 slug（用于远端 cwd 指向同步目录） */
   workspaceSlug?: string
-  /** 显式远端 cwd（优先于 workspaceSlug 推导；如 ~/proma-projects/<项目名>） */
   remoteCwd?: string
-  /** Proma 会话标题（新建远端会话时同步为 Hermes 标题） */
   title?: string
 }
 
-/** 读取 dashboard-password 凭据的解密结果 */
 export interface HermesDashboardPasswordCredential {
   username: string
   password: string
 }
 
-/** Facade 依赖（接入 agent-service 时注入真实实现；测试注入 mock） */
 export interface HermesRuntimeDeps {
-  /** 读取 target */
   getTarget(targetId: string): HermesTarget | null
-  /** 读取凭据明文（ref → secret） */
-  getCredential(ref: string): string | null
-  /** 保存凭据明文（ref → secret；用于持久化 Dashboard Cookie 复用） */
-  saveCredential(ref: string, secret: string): void
-  /** 读取 dashboard 密码凭据（ref → { username, password }） */
-  readDashboardPassword(ref: string): HermesDashboardPasswordCredential | null
-  /** 读取会话绑定 */
   getBinding(sessionId: string): HermesSessionBinding | null
-  /** 持久化远端会话 ID（stored_session_id） */
-  persistRemoteSessionId(sessionId: string, remoteSessionId: string): void
-  /** 构建 target 的 transport（Direct 或 SSH Tunnel） */
-  buildTransport(target: HermesTarget): Promise<HermesTransport>
-  /**
-   * 确保远端目录存在（SFTP mkdirp，用于自动创建同名项目目录）。
-   * 无 SSH 配置或失败时返回 false（不阻塞会话，Hermes 会忽略不存在的 cwd）。
-   */
-  ensureRemoteCwd(targetId: string, cwd: string): Promise<boolean>
+  persistRemoteSessionId(
+    sessionId: string,
+    remoteSessionId: string,
+    expected: Pick<HermesSessionBinding, 'targetId' | 'protocol' | 'profile'>,
+  ): boolean | void
+  buildTransport(target: HermesTarget, protocol?: HermesProtocol): Promise<HermesTransport>
+  getTargetCredential?(targetId: string, slot: HermesCredentialSlot): string | null
+  dashboardBroker?: HermesDashboardConnectionBroker
+  /** Legacy credential bridge kept only for V1 target migration/media compatibility. */
+  getCredential?(ref: string): string | null
+  saveCredential?(ref: string, secret: string): void
+  readDashboardPassword?(ref: string): HermesDashboardPasswordCredential | null
+  ensureRemoteCwd?(targetId: string, cwd: string): Promise<boolean>
 }
 
-/** 活跃 turn 连接状态 */
 interface ActiveTurn {
-  dashboard?: HermesDashboardAdapter
-  dashboardClient?: HermesDashboardWsClient
+  protocol: HermesProtocol
+  dashboardLease?: HermesDashboardBrokerLease
   apiServer?: HermesApiServerAdapter
+  apiTransport?: HermesTransport
+  sseHandle?: HermesSseHandle
   runId?: string
-  /** Hermes 远端运行时 session id（交互响应使用） */
   hermesSessionId?: string
-  transport: HermesTransport
 }
 
-/**
- * Hermes Runtime Facade
- */
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+const MAX_TURN_ATTACHMENT_BYTES = 40 * 1024 * 1024
+
+export function resolveHermesSessionFilePath(cwd: string, fileRef: string): string {
+  if (!cwd.trim() || !fileRef.trim() || cwd.includes('\0') || fileRef.includes('\0')) {
+    throw new HermesError('Hermes 附件路径无效', 'invalid-response')
+  }
+  const pathApi = /^[A-Za-z]:[\\/]/.test(cwd) ? win32 : posix
+  const root = pathApi.resolve(cwd)
+  const resolved = pathApi.resolve(root, fileRef)
+  const relative = pathApi.relative(root, resolved)
+  if (!relative || relative === '.') throw new HermesError('Hermes 附件必须指向文件', 'invalid-response')
+  if (relative === '..' || relative.startsWith(`..${pathApi.sep}`) || pathApi.isAbsolute(relative)) {
+    throw new HermesError('Hermes 附件路径越出远端会话目录', 'invalid-response')
+  }
+  return resolved
+}
+
+function decodedBase64Size(base64: string): number {
+  const raw = base64.includes(',') ? base64.slice(base64.indexOf(',') + 1) : base64
+  const compact = raw.replace(/\s+/g, '')
+  if (!compact || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) {
+    throw new HermesError('Hermes 附件不是合法 base64', 'invalid-response')
+  }
+  const padding = compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0
+  return Math.floor((compact.length * 3) / 4) - padding
+}
+
+export function validateHermesTurnAttachments(attachments: HermesTurnAttachment[]): void {
+  let total = 0
+  for (const attachment of attachments) {
+    const bytes = decodedBase64Size(attachment.base64)
+    if (bytes > MAX_ATTACHMENT_BYTES) throw new HermesError(`附件 ${attachment.name} 超过 25 MiB`, 'invalid-response')
+    total += bytes
+  }
+  if (total > MAX_TURN_ATTACHMENT_BYTES) throw new HermesError('本次附件总大小超过 40 MiB', 'invalid-response')
+}
+
 export class HermesRuntimeFacade implements AgentProviderAdapter {
   private readonly activeTurns = new Map<string, ActiveTurn>()
+  private readonly turnQueues = new Map<string, HermesTurnEvent[]>()
+  private readonly dashboardBroker: HermesDashboardConnectionBroker
 
-  constructor(private readonly deps: HermesRuntimeDeps) {}
+  constructor(private readonly deps: HermesRuntimeDeps) {
+    this.dashboardBroker = deps.dashboardBroker ?? hermesDashboardConnectionBroker
+  }
 
   async *query(input: AgentQueryInput): AsyncIterable<SDKMessage> {
-    const binding = this.deps.getBinding(input.sessionId)
-    if (!binding?.targetId) {
-      throw new HermesError('会话未绑定 Hermes target，请先在 Hermes 设置中绑定', 'unknown')
+    const binding = this.requireBinding(input.sessionId)
+    const target = this.requireTarget(binding.targetId)
+    const protocol = binding.protocol ?? 'dashboard'
+    const active: ActiveTurn = { protocol }
+    let turnAccepted = false
+    const routedInput: AgentQueryInput = {
+      ...input,
+      onHermesTurnSubmitState: (state) => {
+        if (state.status === 'accepted') turnAccepted = true
+        input.onHermesTurnSubmitState?.(state)
+      },
     }
-    const target = this.deps.getTarget(binding.targetId)
-    if (!target) {
-      throw new HermesError('Hermes target 不存在或已删除', 'unknown')
-    }
-
-    const transport = await this.deps.buildTransport(target)
-    const active: ActiveTurn = { transport }
     this.activeTurns.set(input.sessionId, active)
-
     try {
-      // Dashboard 优先；服务不存在（404/连接拒绝）时回退 API Server
-      try {
-        yield* this.runDashboardTurn(active, target, binding, input)
-      } catch (error) {
-        if (error instanceof HermesError && error.code === 'service-not-found') {
-          yield* this.runApiServerTurn(active, target, binding, input)
-          return
-        }
-        throw error
+      if (protocol === 'dashboard') {
+        yield* this.runDashboardTurn(active, target, binding, routedInput)
+      } else {
+        yield* this.runApiServerTurn(active, target, binding, routedInput)
       }
+    } catch (error) {
+      if (input.hermesTurn && !turnAccepted) input.onHermesTurnSubmitState?.({
+        clientMessageId: input.hermesTurn.clientMessageId,
+        status: 'rejected',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
     } finally {
       this.activeTurns.delete(input.sessionId)
-      transport.dispose()
+      this.turnQueues.delete(input.sessionId)
+      active.sseHandle?.abort()
+      active.dashboardLease?.untrackSession(input.sessionId)
+      active.dashboardLease?.release()
+      active.apiTransport?.dispose()
     }
   }
 
-  /**
-   * Dashboard turn：认证 → 建 WS → create/resume session → submit prompt → 事件流。
-   */
   private async *runDashboardTurn(
     active: ActiveTurn,
     target: HermesTarget,
     binding: HermesSessionBinding,
     input: AgentQueryInput,
   ): AsyncIterable<SDKMessage> {
-    const transport = active.transport
-    const auth = new HermesAuthService(transport)
-
-    // 认证：password-cookie 或 token
-    const mode = target.auth.dashboardMode ?? 'password-cookie'
-
-    // 1. 复用持久化 Cookie（避免每次 turn 都密码登录触发 429 限流）
-    if (mode === 'password-cookie') {
-      const cookieRef = `hermes-cookie-${binding.targetId}`
-      const persistedCookie = this.deps.getCredential(cookieRef)
-      if (persistedCookie) {
-        try {
-          const jar = JSON.parse(persistedCookie) as Record<string, string>
-          const targetJar = auth.cookieJarFor(binding.targetId)
-          for (const [name, value] of Object.entries(jar)) {
-            targetJar.set(name, value)
-          }
-        } catch {
-          // Cookie 解析失败则忽略，走登录流程
-        }
-      }
-    }
-
-    // 2. 尝试用现有 Cookie 直接 mint ticket；401 再密码登录并持久化 Cookie
-    let ticket: string
-    try {
-      ticket = await auth.mintWsTicket(binding.targetId)
-    } catch (error) {
-      const isAuthError = error instanceof HermesError && error.code === 'unauthorized'
-      if (!isAuthError || mode !== 'password-cookie') {
-        throw error
-      }
-      const credential = this.deps.readDashboardPassword(target.auth.dashboardCredentialRef ?? '')
-      if (!credential) {
-        throw new HermesError('缺少 Hermes 账号密码凭据，请在 Hermes 设置中登录', 'unauthorized')
-      }
-      if (!canSubmitPasswordTo(transport.baseUrl)) {
-        throw new HermesError(
-          'http 非 loopback 地址不允许提交 Hermes 密码（请使用 HTTPS 或 SSH Tunnel）',
-          'network',
-        )
-      }
-      await auth.passwordLogin(binding.targetId, {
-        provider: target.auth.dashboardProvider ?? 'basic',
-        username: credential.username,
-        password: credential.password,
+    const lease = await this.dashboardBroker.acquire(target)
+    active.dashboardLease = lease
+    const session = await this.ensureDashboardSession(lease, binding, input.sessionId)
+    active.hermesSessionId = session.sessionId
+    lease.trackSession(
+      input.sessionId,
+      session.storedSessionId,
+      this.resumeInput(binding),
+      (resumed) => { active.hermesSessionId = resumed.sessionId },
+      session.sessionId,
+    )
+    const off = lease.subscribeSession(input.sessionId, (event) => {
+      const normalized = normalizeDashboardNotification('event', {
+        type: event.type,
+        ...(event.sessionId ? { session_id: event.sessionId } : {}),
+        payload: event.payload,
       })
-      // 持久化 Cookie（含 refresh cookie，供后续复用）
-      const jar = Object.fromEntries(auth.cookieJarFor(binding.targetId).entries())
-      if (Object.keys(jar).length > 0) {
-        try {
-          this.deps.saveCredential(`hermes-cookie-${binding.targetId}`, JSON.stringify(jar))
-        } catch (cookieError) {
-          console.warn('[Hermes] 持久化 Dashboard Cookie 失败:', cookieError instanceof Error ? cookieError.message : String(cookieError))
-        }
-      }
-      ticket = await auth.mintWsTicket(binding.targetId)
-    }
-
-    const wsUrl = buildTicketWsUrl(transport.baseUrl, ticket)
-    const client = new HermesDashboardWsClient((url) => transport.connectWebSocket(url))
-    active.dashboardClient = client
-    await client.connect(wsUrl)
-    const dashboard = new HermesDashboardAdapter(client)
-    active.dashboard = dashboard
-
-    console.log('[Hermes] turn 开始 binding:', JSON.stringify({ remoteSessionId: binding.remoteSessionId, title: binding.title, remoteCwd: binding.remoteCwd, workspaceSlug: binding.workspaceSlug }))
-
-    // create / resume 远端会话（cwd 优先显式 remoteCwd，否则用同步目录）
-    const remoteCwd = binding.remoteCwd
-      ?? (binding.workspaceSlug ? `~/proma-projects/${binding.workspaceSlug}` : undefined)
-    // 新建远端会话前：有 SSH 时用 SFTP 快速确保 cwd 目录存在（无 SSH 返回 false，稍后走免 SSH 引导）
-    let preEnsuredCwd = false
-    if (remoteCwd && !binding.remoteSessionId) {
-      try {
-        preEnsuredCwd = await this.deps.ensureRemoteCwd(binding.targetId, remoteCwd)
-      } catch (error) {
-        console.warn('[Hermes] ensureRemoteCwd 异常:', error instanceof Error ? error.message : String(error))
-      }
-    }
-    const session = binding.remoteSessionId
-      ? await dashboard.resumeSession(binding.remoteSessionId, {
-          profile: binding.profile,
-          cols: 96,
-          ...(remoteCwd ? { cwd: remoteCwd } : {}),
-        }).catch((error: unknown) => {
-          // session not found 时重新创建
-          if (error instanceof Error && /session not found/i.test(error.message)) {
-            return null
-          }
-          throw error
-        })
-      : null
-    const resolvedSession: HermesSessionResult = session ?? await dashboard.createSession({
-      profile: binding.profile,
-      cols: 96,
-      ...(binding.title ? { title: binding.title } : {}),
-      ...(remoteCwd ? { cwd: remoteCwd } : {}),
+      if (normalized) this.enqueueTurnEvent(input.sessionId, normalized)
     })
-    active.hermesSessionId = resolvedSession.sessionId
-    console.log('[Hermes] 会话模式:', session ? 'resume' : 'create', 'sid=', resolvedSession.sessionId, 'created=', resolvedSession.created)
-    if (resolvedSession.created) {
-      this.deps.persistRemoteSessionId(input.sessionId, resolvedSession.storedSessionId)
-    }
-    // 标题同步：把 Proma 当前标题同步到远端（含重命名后；create 时已在 session.create 传 title，resume 时这里补同步）
-    if (binding.title) {
-      try {
-        await dashboard.setSessionTitle(resolvedSession.sessionId, binding.title)
-        console.log('[Hermes] 已同步远端标题:', binding.title)
-      } catch (error) {
-        console.warn('[Hermes] 同步远端标题失败:', error instanceof Error ? error.message : String(error))
-      }
-    }
-
-    // 事件 handler 提前注册：引导 turn（mkdir 初始化）也需要被监听
-    const mapper = new HermesSdkMessageMapper({
-      sessionId: input.sessionId,
-      // Hermes 会话不传 Proma 本地 modelId（远端模型由 session.info 事件提供，避免头像显示本地模型）
-    })
-    const notificationHandler: HermesWsNotificationHandler = (method, params) => {
-      const turnEvent = normalizeDashboardNotification(method, params)
-      if (!turnEvent) return
-      this.dispatchTurnEvent(active, input.sessionId, turnEvent)
-    }
-    const off = client.onNotification(notificationHandler)
-
     try {
-      // 新建会话：SFTP 未确保目录时，用 Hermes 返回的 resolvedCwd 探测目录是否已存在——
-      // 请求的 cwd 与 Hermes 实际解析一致 = 目录已存在 → 跳过引导；不一致（落默认）= 目录不存在 → 引导 mkdir
-      if (resolvedSession.created && remoteCwd && !preEnsuredCwd) {
-        const cwdMatches = resolvedSession.resolvedCwd && normalizeRemoteCwdForCompare(resolvedSession.resolvedCwd, remoteCwd)
-        if (!cwdMatches) {
-          await this.bootstrapRemoteCwd(dashboard, resolvedSession.sessionId, remoteCwd, binding.profile)
-        } else {
-          console.log('[Hermes] 远端项目目录已存在，跳过引导:', remoteCwd)
+      const attachments = input.hermesTurn?.attachments ?? []
+      validateHermesTurnAttachments(attachments)
+      const prompt = await lease.withAdapter(async (dashboard) => {
+        const refs: string[] = []
+        for (const attachment of attachments) {
+          if (attachment.kind === 'image') {
+            // image.attach_bytes only queues pixels in the live gateway session; Hermes
+            // persists prompt text, not that transient queue. Include the returned
+            // canonical path as an @image directive so REST history can reconstruct the
+            // media after every Proma process restart without relying on local JSONL.
+            const result = await dashboard.attachImageBytes(session.sessionId, attachment.base64, attachment.name) as { path?: unknown }
+            if (typeof result.path !== 'string' || !result.path.trim()) {
+              throw new HermesError('Hermes image.attach_bytes 未返回持久路径', 'invalid-response')
+            }
+            refs.push(`@image:${result.path.trim()}`)
+          } else {
+            const dataUrl = `data:${attachment.mimeType || 'application/octet-stream'};base64,${attachment.base64}`
+            const result = await dashboard.attachFile(session.sessionId, dataUrl, attachment.name) as { ref_text?: unknown }
+            if (typeof result.ref_text === 'string' && result.ref_text.trim()) refs.push(result.ref_text.trim())
+          }
         }
-      }
-
-      await this.submitPromptWithRetry(dashboard, resolvedSession.sessionId, input.prompt, binding.profile)
-
-      // 等待 turn 结束：poll mapper 输出（notification 已同步进入 mapper）
-      // 首版采用同步事件流：notification 处理中直接产出（由 dispatchTurnEvent 缓存后这里消费）
-      yield* this.drainTurnMessages(active, input.sessionId)
+        const composed = [input.prompt, ...refs].filter((part) => part.trim().length > 0).join('\n')
+        if (!composed) throw new HermesError('Hermes turn 不能同时缺少文本和附件', 'invalid-response')
+        await this.submitPromptWithRetry(dashboard, session.sessionId, composed)
+        return composed
+      })
+      if (input.hermesTurn) input.onHermesTurnSubmitState?.({
+        clientMessageId: input.hermesTurn.clientMessageId,
+        status: 'accepted',
+      })
+      void prompt
+      yield* this.drainTurnMessages(input.sessionId)
     } finally {
       off()
     }
   }
 
-  /**
-   * 提交 prompt 并容忍 Hermes 会话未就绪（session busy / agent not ready）：
-   * 新会话刚创建时 Agent 异步构建，立即提交会被拒绝，重试直至就绪或超时。
-   */
-  private async submitPromptWithRetry(
-    dashboard: HermesDashboardAdapter,
-    sessionId: string,
-    text: string,
-    profile?: string,
-    deadlineMs = 30_000,
-  ): Promise<void> {
-    const deadline = Date.now() + deadlineMs
-    while (true) {
-      try {
-        await dashboard.submitPrompt(sessionId, text, profile)
-        return
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        if (/busy|not ready|agent/i.test(message) && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 1000))
-          continue
-        }
-        throw error
-      }
-    }
-  }
-
-  /**
-   * 免 SSH 引导：让 Hermes Agent 在远端执行 mkdir -p 创建项目目录，
-   * 完成后用 session.cwd.set 把会话 cwd 指向该目录（引导 turn 事件丢弃，不进对话）。
-   * 失败不阻断（Hermes 会忽略不存在的 cwd，会话落默认 workspace）。
-   */
-  private async bootstrapRemoteCwd(
-    dashboard: HermesDashboardAdapter,
-    sessionId: string,
-    cwd: string,
-    profile?: string,
-  ): Promise<void> {
-    try {
-      // 会话刚创建时 Hermes Agent 可能还在异步构建（prompt.submit 会报 session busy），重试直至就绪
-      await this.submitPromptWithRetry(
-        dashboard,
-        sessionId,
-        `Proma 初始化：请仅执行 bash 命令 mkdir -p ${cwd}，不要做任何其他操作，完成后只回复 OK。`,
-        profile,
-        30_000,
-      )
-      console.log('[Hermes] 引导指令已提交，等待 turn 完成…')
-      // 等待引导 turn 完成（事件进入队列但此处直接消费丢弃）
-      const deadline = Date.now() + 15_000
-      while (Date.now() < deadline) {
-        const queue = this.turnQueues.get(sessionId) ?? []
-        this.turnQueues.set(sessionId, [])
-        let terminated = false
-        for (const event of queue) {
-          console.log('[Hermes] 引导事件:', event.type)
-          if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') {
-            terminated = true
-          }
-        }
-        if (terminated) break
-        await new Promise((resolve) => setTimeout(resolve, 25))
-        if (!this.activeTurns.has(sessionId)) break
-      }
-      // 目录已创建，把会话 cwd 指向项目目录（session.cwd.set 要求目录存在；turn teardown 可能未完成，busy 时重试）
-      const cwdDeadline = Date.now() + 30_000
-      while (true) {
-        try {
-          await dashboard.setSessionCwd(sessionId, cwd)
-          console.log('[Hermes] 引导完成，会话 cwd 已设为:', cwd)
-          return
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          if (/busy|not ready/i.test(message) && Date.now() < cwdDeadline) {
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-            continue
-          }
-          console.warn('[Hermes] cwd.set 失败:', message)
-          return
-        }
-      }
-    } catch (error) {
-      console.warn('[Hermes] 免 SSH 引导创建项目目录失败:', error instanceof Error ? error.message : String(error))
-    }
-  }
-
-  /**
-   * API Server turn：createRun → SSE 事件流。
-   */
   private async *runApiServerTurn(
     active: ActiveTurn,
     target: HermesTarget,
     binding: HermesSessionBinding,
     input: AgentQueryInput,
   ): AsyncIterable<SDKMessage> {
-    const apiKey = target.auth.apiServerKeyRef
-      ? this.deps.getCredential(target.auth.apiServerKeyRef)
-      : null
-    if (!apiKey) {
-      throw new HermesError('缺少 API Server key，请在 Hermes 设置中配置', 'unauthorized')
+    if ((input.hermesTurn?.attachments.length ?? 0) > 0) {
+      throw new HermesError('Hermes API Server 模式暂不支持附件；请选择 Dashboard 协议', 'protocol-incompatible')
     }
-    const adapter = new HermesApiServerAdapter(active.transport, apiKey)
+    const apiKey = this.targetCredential(target, 'api-server-key')
+    if (!apiKey) throw new HermesError('缺少 API Server key，请在 Hermes 设置中配置', 'unauthorized')
+    const transport = await this.deps.buildTransport(target, 'api-server')
+    active.apiTransport = transport
+    const adapter = new HermesApiServerAdapter(transport, apiKey)
     active.apiServer = adapter
-
     const run = await adapter.createRun({
       input: input.prompt,
       sessionId: binding.remoteSessionId,
       model: input.model,
     })
     active.runId = run.runId
-
-    const mapper = new HermesSdkMessageMapper({
-      sessionId: input.sessionId,
-      // Hermes 会话不传 Proma 本地 modelId（远端模型由 session.info 事件提供，避免头像显示本地模型）
+    if (input.hermesTurn) input.onHermesTurnSubmitState?.({
+      clientMessageId: input.hermesTurn.clientMessageId,
+      status: 'accepted',
     })
-
+    const mapper = new HermesSdkMessageMapper({ sessionId: input.sessionId })
     const events: HermesTurnEvent[] = []
     const handle = await adapter.openRunEvents(run.runId, (event) => {
-      const turnEvent = normalizeApiServerEvent(event)
-      if (!turnEvent) return
-      events.push(turnEvent)
+      const normalized = normalizeApiServerEvent(event)
+      if (normalized) events.push(normalized)
     })
+    active.sseHandle = handle
     await handle.done
-
-    for (const event of events) {
-      yield* mapper.push(event)
-    }
+    for (const event of events) yield* mapper.push(event)
     yield* mapper.flush()
   }
 
-  /** 通知事件分发：把 turn 事件写入会话事件队列（由 drain 消费） */
-  private dispatchTurnEvent(active: ActiveTurn, sessionId: string, event: HermesTurnEvent): void {
-    let queue = this.turnQueues.get(sessionId)
-    if (!queue) {
-      queue = []
-      this.turnQueues.set(sessionId, queue)
+  private async ensureDashboardSession(
+    lease: HermesDashboardBrokerLease,
+    binding: HermesSessionBinding,
+    localSessionId: string,
+  ): Promise<HermesSessionResult> {
+    const resumeInput = this.resumeInput(binding)
+    const resumed = binding.remoteSessionId
+      ? await lease.withAdapter((dashboard) => dashboard.resumeSession(binding.remoteSessionId!, resumeInput)).catch((error: unknown) => {
+          if (error instanceof HermesRpcError && (error.rpcCode === 4007 || /session not found/i.test(error.message))) return null
+          throw error
+        })
+      : null
+    const result = resumed ?? await lease.withAdapter((dashboard) => dashboard.createSession({
+      ...resumeInput,
+      ...(binding.title ? { title: binding.title } : {}),
+      ...(binding.remoteCwd ? { cwd: binding.remoteCwd } : {}),
+    }))
+    if (result.created) {
+      const persisted = this.deps.persistRemoteSessionId(localSessionId, result.storedSessionId, {
+        targetId: binding.targetId,
+        protocol: binding.protocol ?? 'dashboard',
+        profile: binding.profile,
+      })
+      if (persisted === false) throw new HermesError('Hermes binding 已变化，拒绝写入旧远端会话', 'unknown')
     }
-    queue.push(event)
+    if (binding.title) {
+      await lease.withAdapter((dashboard) => dashboard.setSessionTitle(result.sessionId, binding.title!)).catch(() => undefined)
+    }
+    return result
   }
 
-  private readonly turnQueues = new Map<string, HermesTurnEvent[]>()
+  private resumeInput(binding: HermesSessionBinding): HermesSessionCreateInput {
+    return { profile: binding.profile, cols: 96, closeOnDisconnect: false }
+  }
 
-  /** 轮询消费 turn 事件直到终止事件（turn.completed / turn.failed / error） */
-  private async *drainTurnMessages(active: ActiveTurn, sessionId: string): AsyncIterable<SDKMessage> {
+  private async submitPromptWithRetry(
+    dashboard: import('./hermes-dashboard-adapter').HermesDashboardAdapter,
+    sessionId: string,
+    text: string,
+    deadlineMs = 30_000,
+  ): Promise<unknown> {
+    const deadline = Date.now() + deadlineMs
+    while (true) {
+      try {
+        return await dashboard.submitPrompt(sessionId, text)
+      } catch (error) {
+        const busyRpc = error instanceof HermesRpcError && error.rpcCode === 4009
+        const busyText = error instanceof HermesRpcError && /busy|not ready|agent/i.test(error.message)
+        if ((busyRpc || busyText) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 250))
+          continue
+        }
+        // Timeout/network after send has unknown outcome: never replay a mutating prompt.
+        throw error
+      }
+    }
+  }
+
+  private enqueueTurnEvent(sessionId: string, event: HermesTurnEvent): void {
+    const queue = this.turnQueues.get(sessionId) ?? []
+    queue.push(event)
+    this.turnQueues.set(sessionId, queue)
+  }
+
+  private async *drainTurnMessages(sessionId: string): AsyncIterable<SDKMessage> {
     const mapper = new HermesSdkMessageMapper({ sessionId })
-    // 卡住保护：较长时间无任何事件（如事件流被其他客户端抢占/连接异常）时自动结束，避免永久 running
-    const STALL_TIMEOUT_MS = 180_000
+    const stallTimeoutMs = 300_000
     let lastEventAt = Date.now()
-    // 一次性消费队列；终止事件后结束
     while (true) {
       const queue = this.turnQueues.get(sessionId) ?? []
       this.turnQueues.set(sessionId, [])
-      let terminated = false
+      let terminal = false
       for (const event of queue) {
         lastEventAt = Date.now()
         yield* mapper.push(event)
-        if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') {
-          terminated = true
-        }
+        if (event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'error') terminal = true
       }
-      if (terminated) {
-        this.turnQueues.delete(sessionId)
-        return
-      }
-      // 队列为空：等待新事件（10ms 轮询；断线/关闭时跳出由连接 close 处理）
-      if (Date.now() - lastEventAt > STALL_TIMEOUT_MS) {
-        console.warn('[Hermes] turn 超过 3 分钟无事件（可能被其他客户端抢占），自动结束')
-        this.turnQueues.delete(sessionId)
+      if (terminal) {
         yield* mapper.flush()
         return
       }
-      await new Promise((resolve) => setTimeout(resolve, 10))
       if (!this.activeTurns.has(sessionId)) {
         yield* mapper.flush()
         return
       }
+      if (Date.now() - lastEventAt > stallTimeoutMs) {
+        throw new HermesError('Hermes turn 超过 5 分钟无事件', 'timeout')
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10))
     }
   }
 
   abort(sessionId: string): void {
     const active = this.activeTurns.get(sessionId)
     if (!active) return
-    // 断开连接：dashboard WS close 会 reject pending，SSE handle 由 transport dispose 关闭
-    active.dashboardClient?.close()
+    active.sseHandle?.abort()
+    active.dashboardLease?.untrackSession(sessionId)
+    active.dashboardLease?.release()
+    active.apiTransport?.dispose()
     this.activeTurns.delete(sessionId)
+    this.turnQueues.delete(sessionId)
   }
 
-  /**
-   * 响应 Hermes 交互请求（approval/clarify/sudo/secret）。
-   * 仅 Dashboard 活跃 turn 中可响应（approval.respond 等需要 live session）。
-   */
-  /**
-   * Hermes 会话 turn 中追加消息：Hermes prompt.submit 支持 mid-turn interrupt/排队，
-   * 追加到活跃 turn 的同一 WS 连接。
-   */
+  async interruptQuery(sessionId: string): Promise<void> {
+    const active = this.activeTurns.get(sessionId)
+    if (!active) return
+    if (active.protocol === 'dashboard' && active.dashboardLease && active.hermesSessionId) {
+      await active.dashboardLease.withAdapter((dashboard) => dashboard.interruptSession(active.hermesSessionId!)).then(() => undefined)
+      return
+    }
+    if (active.apiServer && active.runId) {
+      await active.apiServer.stopRunAndWait(active.runId)
+      active.sseHandle?.abort()
+    }
+  }
+
   async sendQueuedMessage(sessionId: string, message: SDKUserMessageInput): Promise<void> {
     const active = this.activeTurns.get(sessionId)
-    if (!active?.dashboard || !active.hermesSessionId) {
-      throw new HermesError('会话不在活跃状态，无法追加消息', 'unknown')
-    }
+    if (!active?.dashboardLease || !active.hermesSessionId) throw new HermesError('会话不在活跃 Dashboard 状态', 'unknown')
     const text = message?.message?.content
-    if (!text) {
-      throw new HermesError('追加消息为空', 'unknown')
-    }
-    await active.dashboard.submitPrompt(active.hermesSessionId, text)
-  }
-
-  /**
-   * 附加图片/文件到 Hermes 会话（Proma → Hermes 发送）。
-   * 需要活跃 turn（attach RPC 作用于 live session）。
-   */
-  async attachToSession(sessionId: string, input: {
-    kind: 'image' | 'file'
-    /** 图片：base64；文件：data URL（data:<mime>;base64,<b64>） */
-    data: string
-    name?: string
-  }): Promise<void> {
-    const active = this.activeTurns.get(sessionId)
-    if (!active?.dashboard || !active.hermesSessionId) {
-      throw new HermesError('会话不在活跃状态，无法附加文件', 'unknown')
-    }
-    if (input.kind === 'image') {
-      await active.dashboard.attachImageBytes(active.hermesSessionId, input.data, input.name)
-    } else {
-      await active.dashboard.attachFile(active.hermesSessionId, input.data, input.name)
-    }
+    if (!text) throw new HermesError('追加消息为空', 'unknown')
+    await active.dashboardLease.withAdapter((dashboard) => dashboard.submitPrompt(active.hermesSessionId!, text)).then(() => undefined)
   }
 
   async respondInteraction(input: {
@@ -530,59 +384,114 @@ export class HermesRuntimeFacade implements AgentProviderAdapter {
     value?: string
   }): Promise<void> {
     const active = this.activeTurns.get(input.sessionId)
-    if (!active?.dashboard) {
-      throw new HermesError('会话不在活跃状态（仅 Dashboard 连接中可响应交互）', 'unknown')
-    }
-    if (!active.hermesSessionId) {
-      throw new HermesError('缺少远端会话 ID，无法响应', 'unknown')
-    }
-    const remoteSessionId = active.hermesSessionId
-    switch (input.type) {
-      case 'approval':
-        await active.dashboard.respondApproval({
-          sessionId: remoteSessionId,
-          choice: input.choice ?? 'allow',
-          all: input.all,
+    if (!active?.dashboardLease || !active.hermesSessionId) throw new HermesError('会话不在活跃 Dashboard 状态', 'unknown')
+    await active.dashboardLease.withAdapter(async (dashboard) => {
+      const remote = active.hermesSessionId!
+      if (input.type === 'approval') await dashboard.respondApproval({ sessionId: remote, choice: input.choice ?? 'allow', all: input.all })
+      else if (input.type === 'clarify') {
+        if (!input.answer || !input.requestId) throw new HermesError('clarify 缺少 answer/requestId', 'unknown')
+        await dashboard.respondClarify({ sessionId: remote, answer: input.answer, requestId: input.requestId })
+      } else if (input.type === 'sudo') {
+        if (!input.password || !input.requestId) throw new HermesError('sudo 缺少 password/requestId', 'unknown')
+        await dashboard.respondSudo({ sessionId: remote, password: input.password, requestId: input.requestId })
+      } else {
+        if (!input.value || !input.requestId) throw new HermesError('secret 缺少 value/requestId', 'unknown')
+        await dashboard.respondSecret({ sessionId: remote, value: input.value, requestId: input.requestId })
+      }
+    })
+  }
+
+  async fetchMedia(targetId: string, mediaPath: string): Promise<{ dataUrl?: string } | null> {
+    const target = this.deps.getTarget(targetId)
+    if (!target || !mediaPath || mediaPath.includes('\0')) return null
+    let authLease: HermesDashboardBrokerLease | null = null
+    try {
+      if (target.auth.dashboardMode === 'password-cookie') authLease = await this.dashboardBroker.acquire(target)
+      const transport = await this.deps.buildTransport(target, 'dashboard')
+      try {
+        const token = target.auth.dashboardMode === 'token' ? this.targetCredential(target, 'dashboard-token') ?? undefined : undefined
+        const response = await transport.requestJson(`/api/media?path=${encodeURIComponent(mediaPath)}`, {
+          headers: buildDashboardRestAuthHeaders(target.auth.dashboardMode, token),
+          timeoutMs: 15_000,
         })
-        break
-      case 'clarify':
-        if (!input.answer) throw new HermesError('缺少回答内容', 'unknown')
-        if (!input.requestId) throw new HermesError('缺少 requestId（Hermes 用其匹配待回答请求）', 'unknown')
-        await active.dashboard.respondClarify({ sessionId: remoteSessionId, answer: input.answer, requestId: input.requestId })
-        break
-      case 'sudo':
-        if (!input.password) throw new HermesError('缺少 sudo 密码', 'unknown')
-        if (!input.requestId) throw new HermesError('缺少 requestId', 'unknown')
-        await active.dashboard.respondSudo({ sessionId: remoteSessionId, password: input.password, requestId: input.requestId })
-        break
-      case 'secret':
-        if (!input.value) throw new HermesError('缺少密钥', 'unknown')
-        if (!input.requestId) throw new HermesError('缺少 requestId', 'unknown')
-        await active.dashboard.respondSecret({ sessionId: remoteSessionId, value: input.value, requestId: input.requestId })
-        break
+        if (response.status !== 200 || !response.body || typeof response.body !== 'object') return null
+        const dataUrl = (response.body as { data_url?: unknown }).data_url
+        return typeof dataUrl === 'string' ? { dataUrl } : null
+      } finally {
+        transport.dispose()
+      }
+    } catch {
+      return null
+    } finally {
+      authLease?.release()
     }
   }
 
-  async interruptQuery(sessionId: string): Promise<void> {
-    const active = this.activeTurns.get(sessionId)
-    if (!active) return
-    if (active.dashboard && active.dashboardClient) {
-      // Dashboard 中断需要 runtime session id；Facade 不持有时由上层通过 IPC 调用 adapter
-      // 首版：直接断开 WS 视为中断（远端 turn 会随连接关闭而取消）
-      active.dashboardClient.close()
-      return
-    }
-    if (active.apiServer && active.runId) {
-      await active.apiServer.stopRun(active.runId)
+  async fetchAttachment(sessionId: string, fileRef: string): Promise<{ dataUrl: string; name: string; cacheIdentity: string } | null> {
+    const binding = this.deps.getBinding(sessionId)
+    if (!binding?.targetId || (binding.protocol ?? 'dashboard') !== 'dashboard' || !binding.remoteSessionId) return null
+    const target = this.deps.getTarget(binding.targetId)
+    if (!target || !fileRef.trim() || fileRef.includes('\0')) return null
+    let authLease: HermesDashboardBrokerLease | null = null
+    try {
+      if (target.auth.dashboardMode === 'password-cookie') authLease = await this.dashboardBroker.acquire(target)
+      const transport = await this.deps.buildTransport(target, 'dashboard')
+      try {
+        const token = target.auth.dashboardMode === 'token' ? this.targetCredential(target, 'dashboard-token') ?? undefined : undefined
+        const headers = buildDashboardRestAuthHeaders(target.auth.dashboardMode, token)
+        const profileQuery = binding.profile ? `?profile=${encodeURIComponent(binding.profile)}` : ''
+        const detail = await transport.requestJson(
+          `/api/sessions/${encodeURIComponent(binding.remoteSessionId)}${profileQuery}`,
+          { headers, timeoutMs: 10_000 },
+        )
+        if (detail.status !== 200 || !detail.body || typeof detail.body !== 'object') return null
+        const cwd = (detail.body as { cwd?: unknown }).cwd
+        if (typeof cwd !== 'string' || !cwd.trim()) return null
+        const absolutePath = resolveHermesSessionFilePath(cwd, fileRef)
+        const response = await transport.requestJson(`/api/fs/read-data-url?path=${encodeURIComponent(absolutePath)}`, {
+          headers,
+          timeoutMs: 20_000,
+        })
+        if (response.status !== 200 || !response.body || typeof response.body !== 'object') return null
+        const dataUrl = (response.body as { dataUrl?: unknown }).dataUrl
+        if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return null
+        const pathApi = /^[A-Za-z]:[\\/]/.test(absolutePath) ? win32 : posix
+        return {
+          dataUrl,
+          name: pathApi.basename(absolutePath),
+          cacheIdentity: `${target.id}:${binding.remoteSessionId}:${absolutePath}`,
+        }
+      } finally {
+        transport.dispose()
+      }
+    } catch {
+      return null
+    } finally {
+      authLease?.release()
     }
   }
 
   dispose(): void {
-    for (const [sessionId, active] of this.activeTurns.entries()) {
-      active.dashboardClient?.close()
-      active.transport.dispose()
-      this.activeTurns.delete(sessionId)
-    }
-    this.turnQueues.clear()
+    for (const [sessionId] of [...this.activeTurns]) this.abort(sessionId)
+    void this.dashboardBroker.disposeAll()
+  }
+
+  private requireBinding(sessionId: string): HermesSessionBinding {
+    const binding = this.deps.getBinding(sessionId)
+    if (!binding?.targetId) throw new HermesError('会话未绑定 Hermes target，请先在 Hermes 设置中绑定', 'unknown')
+    return binding
+  }
+
+  private requireTarget(targetId: string): HermesTarget {
+    const target = this.deps.getTarget(targetId)
+    if (!target) throw new HermesError('Hermes target 不存在或已删除', 'unknown')
+    return target
+  }
+
+  private targetCredential(target: HermesTarget, slot: HermesCredentialSlot): string | null {
+    const owned = this.deps.getTargetCredential?.(target.id, slot)
+    if (owned) return owned
+    const legacyRef = slot === 'api-server-key' ? target.auth.apiServerKeyRef : target.auth.dashboardCredentialRef
+    return legacyRef && this.deps.getCredential ? this.deps.getCredential(legacyRef) : null
   }
 }

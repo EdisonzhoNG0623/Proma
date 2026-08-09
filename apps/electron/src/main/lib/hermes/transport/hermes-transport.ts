@@ -62,6 +62,10 @@ export interface HermesWsOpenResult {
   errorCode: HermesErrorCode | null
   /** 错误消息（已脱敏） */
   errorMessage: string | null
+  /** open 到上层安装 listener 之间由 transport 暂存的早到消息。 */
+  bufferedMessages?: MessageEvent[]
+  /** 停止 transport 临时缓冲；上层必须先安装正式 listener 再调用。 */
+  stopBuffering?: () => void
 }
 
 /**

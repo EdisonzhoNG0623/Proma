@@ -30,6 +30,8 @@ export interface ApiServerCapabilitiesResponse {
 
 /** Dashboard 探测结果 */
 export interface DashboardProbeResult {
+  /** endpoint 是否在 target 中配置；false 与网络不可达严格区分。 */
+  configured?: boolean
   /** 服务可达且协议兼容 */
   available: boolean
   /** 是否开启认证 */
@@ -46,6 +48,7 @@ export interface DashboardProbeResult {
 
 /** API Server 探测结果 */
 export interface ApiServerProbeResult {
+  configured?: boolean
   available: boolean
   /** 是否存在但需认证（401） */
   authRequired: boolean
@@ -56,8 +59,8 @@ export interface ApiServerProbeResult {
 
 /** 探测目标（两个传输可能指向不同端口） */
 export interface HermesProbeTargets {
-  dashboardTransport: HermesTransport
-  apiServerTransport: HermesTransport
+  dashboardTransport?: HermesTransport
+  apiServerTransport?: HermesTransport
 }
 
 /** 分类决策（纯函数，便于测试） */
@@ -65,9 +68,6 @@ export function classifyHermesService(
   dashboard: DashboardProbeResult,
   apiServer: ApiServerProbeResult,
 ): HermesServiceClass {
-  if (dashboard.protocolIncompatible || apiServer.protocolIncompatible) {
-    return 'protocol-incompatible'
-  }
   if (dashboard.available && apiServer.available) {
     return 'both'
   }
@@ -76,6 +76,9 @@ export function classifyHermesService(
   }
   if (apiServer.available) {
     return 'api-only'
+  }
+  if (dashboard.protocolIncompatible || apiServer.protocolIncompatible) {
+    return 'protocol-incompatible'
   }
   return 'unreachable'
 }
@@ -237,9 +240,15 @@ export async function probeApiServer(
   const data = body as ApiServerCapabilitiesResponse
   const endpoints = Array.isArray(data.endpoints)
     ? data.endpoints.filter((item): item is string => typeof item === 'string')
-    : Array.isArray(data.capabilities)
-      ? data.capabilities.filter((item): item is string => typeof item === 'string')
-      : []
+    : data.endpoints && typeof data.endpoints === 'object'
+      ? Object.values(data.endpoints as Record<string, unknown>).flatMap((item) => {
+          if (!item || typeof item !== 'object') return []
+          const endpointPath = (item as { path?: unknown }).path
+          return typeof endpointPath === 'string' ? [endpointPath] : []
+        })
+      : Array.isArray(data.capabilities)
+        ? data.capabilities.filter((item): item is string => typeof item === 'string')
+        : []
   return {
     available: true,
     authRequired: false,
@@ -256,8 +265,12 @@ export async function probeHermesCapabilities(
   now: number = Date.now(),
 ): Promise<HermesCapabilities> {
   const [dashboard, apiServer] = await Promise.all([
-    probeDashboard(targets.dashboardTransport),
-    probeApiServer(targets.apiServerTransport),
+    targets.dashboardTransport
+      ? probeDashboard(targets.dashboardTransport)
+      : Promise.resolve<DashboardProbeResult>({ configured: false, available: false, authRequired: false, authFlows: [], supportsPassword: false, version: null, protocolIncompatible: false }),
+    targets.apiServerTransport
+      ? probeApiServer(targets.apiServerTransport)
+      : Promise.resolve<ApiServerProbeResult>({ configured: false, available: false, authRequired: false, endpoints: [], protocolIncompatible: false }),
   ])
   return {
     probedAt: now,

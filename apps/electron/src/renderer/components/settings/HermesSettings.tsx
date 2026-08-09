@@ -47,7 +47,10 @@ import type {
 interface HermesFormState {
   name: string
   mode: 'direct' | 'ssh-tunnel'
-  remoteUrl: string
+  dashboardUrl: string
+  apiServerUrl: string
+  dashboardRemotePort: string
+  apiServerRemotePort: string
   sshHost: string
   sshPort: string
   sshUsername: string
@@ -61,7 +64,10 @@ interface HermesFormState {
 const EMPTY_FORM: HermesFormState = {
   name: '',
   mode: 'direct',
-  remoteUrl: '',
+  dashboardUrl: '',
+  apiServerUrl: '',
+  dashboardRemotePort: '9119',
+  apiServerRemotePort: '8642',
   sshHost: '',
   sshPort: '22',
   sshUsername: '',
@@ -76,7 +82,10 @@ function targetToForm(target: HermesTarget): HermesFormState {
   return {
     name: target.name,
     mode: target.mode,
-    remoteUrl: target.remoteUrl ?? '',
+    dashboardUrl: target.endpoints?.dashboard?.baseUrl ?? target.remoteUrl ?? '',
+    apiServerUrl: target.endpoints?.apiServer?.baseUrl ?? '',
+    dashboardRemotePort: String(target.endpoints?.dashboard?.remotePort ?? 9119),
+    apiServerRemotePort: String(target.endpoints?.apiServer?.remotePort ?? 8642),
     sshHost: target.ssh?.host ?? '',
     sshPort: String(target.ssh?.port ?? 22),
     sshUsername: target.ssh?.username ?? '',
@@ -104,7 +113,7 @@ function TargetCard({
 }): React.ReactElement {
   const snapshot = target.lastCapabilitySnapshot
   const host = target.mode === 'direct'
-    ? (target.remoteUrl ?? '')
+    ? [target.endpoints?.dashboard?.baseUrl, target.endpoints?.apiServer?.baseUrl].filter(Boolean).join(' · ')
     : `${target.ssh?.username ?? ''}@${target.ssh?.host ?? ''}:${target.ssh?.port ?? 22}`
 
   return (
@@ -187,12 +196,14 @@ function HermesTargetForm({
   const [error, setError] = React.useState<string | null>(null)
   const [testResult, setTestResult] = React.useState<HermesConnectionTestResult | null>(null)
   const [testing, setTesting] = React.useState(false)
+  const [testedTargetId, setTestedTargetId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     if (open) {
       setForm(editing ? targetToForm(editing) : EMPTY_FORM)
       setError(null)
       setTestResult(null)
+      setTestedTargetId(null)
     }
   }, [open, editing])
 
@@ -207,12 +218,20 @@ function HermesTargetForm({
     setError(null)
     try {
       const isDirect = form.mode === 'direct'
-      // Direct 模式可选填 SSH 文件访问（远端项目浏览/同步用）；SSH Tunnel 模式必填
+      // Direct 模式可选填 SSH 文件访问；SSH Tunnel 模式必填
       const hasSshConfig = form.sshHost.trim() !== ''
       const input = {
         name: form.name,
         mode: form.mode,
-        ...(isDirect ? { remoteUrl: form.remoteUrl } : {}),
+        endpoints: isDirect
+          ? {
+              ...(form.dashboardUrl.trim() ? { dashboard: { baseUrl: form.dashboardUrl.trim() } } : {}),
+              ...(form.apiServerUrl.trim() ? { apiServer: { baseUrl: form.apiServerUrl.trim() } } : {}),
+            }
+          : {
+              ...(form.dashboardRemotePort.trim() ? { dashboard: { remotePort: Number(form.dashboardRemotePort) || 9119 } } : {}),
+              ...(form.apiServerRemotePort.trim() ? { apiServer: { remotePort: Number(form.apiServerRemotePort) || 8642 } } : {}),
+            },
         ...(hasSshConfig
           ? {
               ssh: {
@@ -274,7 +293,15 @@ function HermesTargetForm({
         const input = {
           name: form.name || '连接测试',
           mode: form.mode,
-          ...(form.mode === 'direct' ? { remoteUrl: form.remoteUrl } : {}),
+          endpoints: form.mode === 'direct'
+            ? {
+                ...(form.dashboardUrl.trim() ? { dashboard: { baseUrl: form.dashboardUrl.trim() } } : {}),
+                ...(form.apiServerUrl.trim() ? { apiServer: { baseUrl: form.apiServerUrl.trim() } } : {}),
+              }
+            : {
+                dashboard: { remotePort: Number(form.dashboardRemotePort) || 9119 },
+                apiServer: { remotePort: Number(form.apiServerRemotePort) || 8642 },
+              },
           ...(form.mode === 'ssh-tunnel'
             ? {
                 ssh: {
@@ -288,6 +315,7 @@ function HermesTargetForm({
         const temp = await createHermesTarget(input)
         targetId = temp.id
       }
+      setTestedTargetId(targetId!)
       const result = await window.electronAPI.hermes.testConnection(targetId!)
       setTestResult(result)
     } catch (e) {
@@ -326,13 +354,20 @@ function HermesTargetForm({
               onValueChange={(v) => set('mode', v as HermesFormState['mode'])}
             />
             {form.mode === 'direct' ? (
-              <SettingsInput
-                label="远端 URL"
-                value={form.remoteUrl}
-                onChange={(v) => set('remoteUrl', v)}
-                placeholder="https://hermes.example.com 或 http://127.0.0.1:9119"
-                required
-              />
+              <>
+                <SettingsInput
+                  label="Dashboard URL（可选）"
+                  value={form.dashboardUrl}
+                  onChange={(v) => set('dashboardUrl', v)}
+                  placeholder="https://hermes.example.com/dashboard-prefix"
+                />
+                <SettingsInput
+                  label="API Server URL（可选）"
+                  value={form.apiServerUrl}
+                  onChange={(v) => set('apiServerUrl', v)}
+                  placeholder="https://hermes.example.com:8642/api-prefix"
+                />
+              </>
             ) : (
               <>
                 <SettingsInput
@@ -355,12 +390,24 @@ function HermesTargetForm({
                   placeholder="deploy"
                   required
                 />
+                <SettingsInput
+                  label="Dashboard 远端端口"
+                  value={form.dashboardRemotePort}
+                  onChange={(v) => set('dashboardRemotePort', v)}
+                  placeholder="9119"
+                />
+                <SettingsInput
+                  label="API Server 远端端口"
+                  value={form.apiServerRemotePort}
+                  onChange={(v) => set('apiServerRemotePort', v)}
+                  placeholder="8642"
+                />
               </>
             )}
-            {/* Direct 模式也可选填 SSH 文件访问（远端项目浏览/同步用；不用于隧道） */}
+            {/* Direct 模式也可选填 SSH 文件访问（仅显式浏览/读取，不做递归同步） */}
             {form.mode === 'direct' && (
               <div className="rounded-md border p-2 text-xs text-muted-foreground">
-                <div className="mb-1 font-medium">SSH 文件访问（可选）— 用于远端项目浏览/同步</div>
+                <div className="mb-1 font-medium">SSH 文件访问（可选）— 仅用于显式远端项目浏览</div>
                 <div className="flex flex-col gap-1.5">
                   <SettingsInput
                     label="SSH 主机"
@@ -434,6 +481,23 @@ function HermesTargetForm({
                 </Badge>
                 {testResult.version && <span>v{testResult.version}</span>}
               </div>
+              {testResult.sshHostKeyChallenge && testedTargetId && (
+                <div className="mt-2 rounded border p-2 text-xs">
+                  <div>首次连接，请在远端核对 SSH SHA256 指纹：</div>
+                  <code className="mt-1 block break-all font-mono">{testResult.sshHostKeyChallenge.fingerprint}</code>
+                  <Button
+                    className="mt-2"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => window.electronAPI.hermes
+                      .confirmSshHostKey(testedTargetId, testResult.sshHostKeyChallenge!.challenge)
+                      .then(() => handleTest())
+                      .catch((e) => setError(e instanceof Error ? e.message : String(e)))}
+                  >
+                    指纹一致，信任并重试
+                  </Button>
+                </div>
+              )}
               {testResult.ok ? (
                 <div className="mt-1 text-xs text-muted-foreground">
                   {serviceClassLabel(testResult.serviceClass!)}

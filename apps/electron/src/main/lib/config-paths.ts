@@ -84,6 +84,11 @@ export function getHermesCredentialsPath(): string {
   return join(getConfigDir(), 'hermes-credentials.json')
 }
 
+/** Hermes Remote 独立 known-host trust store。 */
+export function getHermesKnownHostsPath(): string {
+  return join(getConfigDir(), 'hermes-known-hosts.json')
+}
+
 /**
  * 获取对话索引文件路径
  *

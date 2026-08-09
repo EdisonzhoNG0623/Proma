@@ -118,9 +118,11 @@ export async function startMockHermesServer(
           return Response.json({ detail: 'Unauthorized' }, { status: 401 })
         }
         return Response.json({
-          capabilities: {
+          features: { run_submission: true, run_stop: true },
+          endpoints: {
             runs: { method: 'POST', path: '/v1/runs' },
             run_events: { method: 'GET', path: '/v1/runs/{run_id}/events' },
+            run_stop: { method: 'POST', path: '/v1/runs/{run_id}/stop' },
           },
         })
       }
@@ -144,7 +146,7 @@ export async function startMockHermesServer(
           headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
         })
       }
-      if (req.method === 'GET' && url.pathname.startsWith('/v1/runs/') && url.pathname.endsWith('/stop')) {
+      if (req.method === 'POST' && url.pathname.startsWith('/v1/runs/') && url.pathname.endsWith('/stop')) {
         return Response.json({}, { status: 200 })
       }
 
@@ -167,7 +169,12 @@ export async function startMockHermesServer(
         const data = ws.data
         if (!data.authenticated) {
           ws.close(4001, 'unauthorized')
+          return
         }
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0', method: 'event',
+          params: { type: 'gateway.ready', payload: { skin: {}, change_events: true } },
+        }))
       },
       message(ws, rawMessage) {
         let msg: { id?: number; method?: string; params?: unknown }

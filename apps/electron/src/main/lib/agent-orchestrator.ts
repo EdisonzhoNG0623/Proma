@@ -20,7 +20,7 @@ import { join, dirname } from 'node:path'
 import { accessSync, constants, existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { app } from 'electron'
-import type { AgentRuntime, AgentSendInput, AgentMessage, AgentGenerateTitleInput, AgentProviderAdapter, AgentSessionMeta, CodexOAuthCredentials, XaiOAuthCredentials, TypedError, RetryAttempt, SDKMessage, SDKAssistantMessage, AgentStreamPayload, RewindSessionResult, ProviderType, AgentQueryInput } from '@proma/shared'
+import type { AgentRuntime, AgentSendInput, AgentMessage, AgentGenerateTitleInput, AgentProviderAdapter, AgentSessionMeta, CodexOAuthCredentials, XaiOAuthCredentials, TypedError, RetryAttempt, SDKMessage, SDKAssistantMessage, AgentStreamPayload, RewindSessionResult, ProviderType, AgentQueryInput, HermesTurnSubmitState } from '@proma/shared'
 import {
   PROMA_DEFAULT_PERMISSION_MODE,
   PROMA_PERMISSION_MODE_CONFIG,
@@ -49,6 +49,7 @@ import pkg from '../../../package.json' with { type: 'json' }
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { appendSDKMessages, updateAgentSessionMeta, getAgentSessionMeta, getAgentSessionMessages, truncateSDKMessages, removeSDKErrorMessage, resolveUserUuidFromSDK, rewindFilesFromSnapshot, rewindPiAgentSession, ensureClaudeSessionSettings, resolveAgentCwd, getAgentCwdMode } from './agent-session-manager'
+import { loadCompletionMessagesIfRequested } from './agent-completion-payload'
 import { getAgentWorkspace, getLocalProjectRootStatus, getProjectFilesPath, getWorkspaceMcpConfig, ensurePluginManifest, getWorkspaceAutoMemoryDir, getWorkspaceAttachedDirectories, getWorkspaceAttachedFiles } from './agent-workspace-manager'
 import { getAgentWorkspacePath, getAgentSessionWorkspacePath, getConfigDir, getSdkConfigDir, getWorkspaceSkillsDir } from './config-paths'
 import { getRuntimeStatus } from './runtime-init'
@@ -90,12 +91,15 @@ import { createFallbackTitle, sanitizeGeneratedTitle, TITLE_PROMPT } from './tit
 export interface SessionCallbacks {
   /** 发送流式错误 */
   onError: (error: string) => void
-  /** 发送流式完成（携带已持久化的消息列表） */
+  /** 发送流式完成；只有 headless/collaboration 调用方明确请求时才读取完整历史。 */
   onComplete: (messages?: AgentMessage[], opts?: { stoppedByUser?: boolean; startedAt?: number; resultSubtype?: string; resultErrors?: string[]; backgroundTasksPending?: boolean }) => void
+  includeMessagesOnComplete?: boolean
   /** 发送标题更新 */
   onTitleUpdated: (title: string) => void
   /** 用户消息已持久化，外部入口可据此通知前端切到实时会话 */
   onRunStarted?: (opts: { startedAt: number }) => void
+  /** Hermes attach+submit 原子边界；Renderer 据此清理或回滚预览。 */
+  onHermesTurnSubmitState?: (state: HermesTurnSubmitState) => void
 }
 
 type RecoverableAgentQueryOptions = {
@@ -855,13 +859,14 @@ export class AgentOrchestrator {
     appendSDKMessages(sessionId, withTimestamps)
   }
 
-  private persistUserMessage(sessionId: string, userMessage: string, createdAt = Date.now()): void {
+  private persistUserMessage(sessionId: string, userMessage: string, createdAt = Date.now(), uuid?: string): void {
     const userSDKMsg: SDKMessage = {
       type: 'user',
       message: {
         content: [{ type: 'text', text: userMessage }],
       },
       parent_tool_use_id: null,
+      ...(uuid ? { uuid } : {}),
       _createdAt: createdAt,
     } as unknown as SDKMessage
     appendSDKMessages(sessionId, [userSDKMsg])
@@ -913,12 +918,13 @@ export class AgentOrchestrator {
     const streamStartedAt = input.startedAt ?? Date.now()
     let userMessagePersisted = false
     let sessionMeta = getAgentSessionMeta(sessionId)
+    const deferInitialUserMessage = inputAgentRuntime === 'hermes-remote' || sessionMeta?.agentRuntime === 'hermes-remote'
 
     const persistInitialUserMessage = (): void => {
       if (userMessagePersisted) return
       // rawUserMessage 保留展示/持久化用的原始文本（@file 编码原文，remarkMentions 解码显示）；
       // userMessage 是传给 Agent 的 SDK 文本（@file 路径已解码为真实路径）。
-      this.persistUserMessage(sessionId, rawUserMessage ?? userMessage)
+      this.persistUserMessage(sessionId, rawUserMessage ?? userMessage, Date.now(), input.clientMessageId)
       userMessagePersisted = true
     }
 
@@ -926,7 +932,7 @@ export class AgentOrchestrator {
     if (this.activeSessions.has(sessionId)) {
       console.warn(`[Agent 编排] 会话 ${sessionId} 正在处理中，拒绝新请求`)
       try {
-        persistInitialUserMessage()
+        if (!deferInitialUserMessage) persistInitialUserMessage()
       } catch (error) {
         console.error('[Agent 编排] 持久化被拒绝的用户消息失败:', error)
       }
@@ -946,7 +952,7 @@ export class AgentOrchestrator {
     }
 
     try {
-      persistInitialUserMessage()
+      if (!deferInitialUserMessage) persistInitialUserMessage()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error('[Agent 编排] 持久化用户消息失败:', error)
@@ -1193,31 +1199,31 @@ export class AgentOrchestrator {
         this.queuedMessageUuids.delete(sessionId)
       }
     }
+    const getCompletionMessages = (): AgentMessage[] | undefined => (
+      loadCompletionMessagesIfRequested(callbacks.includeMessagesOnComplete, () => getAgentSessionMessages(sessionId))
+    )
     const completeRun = (
-      messages?: AgentMessage[],
       opts?: { stoppedByUser?: boolean; startedAt?: number; resultSubtype?: string; resultErrors?: string[] },
     ): void => {
       releaseActiveRun()
-      callbacks.onComplete(messages, opts)
+      callbacks.onComplete(getCompletionMessages(), opts)
     }
     // 轻量完成：turn 主体结束但仍有后台任务在飞行。
     // 关键区别——不调用 releaseActiveRun，保留 activeSessions/activeChannels/sessionPermissionModes，
     // 以便 ① adapter 保持的通道在任务完成时自动续轮 ② 用户在等待期手动注入消息能复用通道。
     // UI 侧通过 backgroundTasksPending 进入"空闲可输入"态（spinner 停、输入框启用）。
     const idleComplete = (
-      messages?: AgentMessage[],
       opts?: { startedAt?: number; resultSubtype?: string; resultErrors?: string[] },
     ): void => {
-      callbacks.onComplete(messages, { ...opts, backgroundTasksPending: true })
+      callbacks.onComplete(getCompletionMessages(), { ...opts, backgroundTasksPending: true })
     }
     const failRun = (
       error: string,
-      messages?: AgentMessage[],
       opts?: { stoppedByUser?: boolean; startedAt?: number; resultSubtype?: string; resultErrors?: string[] },
     ): void => {
       releaseActiveRun()
       callbacks.onError(error)
-      callbacks.onComplete(messages, opts)
+      callbacks.onComplete(getCompletionMessages(), opts)
     }
 
     // 3. 构建环境变量
@@ -1321,7 +1327,7 @@ export class AgentOrchestrator {
       agentCwd = homedir()
       workspaceSlug = undefined
       workspace = undefined
-      if (workspaceId) {
+      if (workspaceId && !isHermesRemote) {
         const ws = getAgentWorkspace(workspaceId)
         if (!ws) {
           throw new Error(`指定的 Agent 项目不存在或已删除: ${workspaceId}`)
@@ -1349,7 +1355,7 @@ export class AgentOrchestrator {
       // 从源会话继承并持久化，避免历史相对路径在恢复时切换到另一文件根。
 
       // 必须与 runtime 接收的附加目录保持一致；视觉助手据此限制允许外发的图片路径。
-      const allAdditionalDirectories = collectAttachedDirectories({
+      const allAdditionalDirectories = isHermesRemote ? [] : collectAttachedDirectories({
         extraDirs: additionalDirectories,
         sessionMeta,
         workspaceSlug,
@@ -1365,14 +1371,16 @@ export class AgentOrchestrator {
       }
 
       // 10. 构建 MCP 服务器配置 + 记忆工具 + 生图工具 + 自定义工具
-      const mcpServers = this.buildMcpServers(workspaceSlug)
-      if (isBuiltinMcpUserEnabled('chrome-devtools')) {
+      const mcpServers = isHermesRemote ? {} : this.buildMcpServers(workspaceSlug)
+      if (!isHermesRemote && isBuiltinMcpUserEnabled('chrome-devtools')) {
         injectChromeDevtoolsMcpServer(mcpServers)
       }
       let piBuiltinTools: unknown[] = []
       let piMcpTools: unknown[] = []
-      const builtinMcpResult = agentRuntime === 'claude' && sdk
-        ? await injectBuiltinMcpServers({
+      const builtinMcpResult = isHermesRemote
+        ? { collaborationAvailable: false }
+        : agentRuntime === 'claude' && sdk
+          ? await injectBuiltinMcpServers({
           sdk,
           mcpServers,
           sessionId,
@@ -1405,7 +1413,7 @@ export class AgentOrchestrator {
       const collaborationAvailable = builtinMcpResult.collaborationAvailable
 
       // 合并外部注入的自定义 MCP 服务器（如飞书群聊工具）
-      if (customMcpServers) {
+      if (customMcpServers && !isHermesRemote) {
         Object.assign(mcpServers, customMcpServers)
         console.log(`[Agent 编排] 已合并 ${Object.keys(customMcpServers).length} 个自定义 MCP 服务器`)
       }
@@ -1432,12 +1440,12 @@ export class AgentOrchestrator {
 
       // 11.5 注入 mention 引用指令（Skill/MCP/会话）— 仅影响 prompt，不影响持久化
       let enrichedMessage = userMessage
-      const referencedSessionsBlock = buildReferencedSessionsPrompt(sessionId, mentionedSessionIds, workspaceSlug)
+      const referencedSessionsBlock = isHermesRemote ? '' : buildReferencedSessionsPrompt(sessionId, mentionedSessionIds, workspaceSlug)
       if (referencedSessionsBlock) {
         enrichedMessage = `${referencedSessionsBlock}\n\n${enrichedMessage}`
         console.log(`[Agent 编排] 注入 referenced_sessions: ${mentionedSessionIds?.length ?? 0} sessions`)
       }
-      if (mentionedSkills?.length || mentionedMcpServers?.length) {
+      if (!isHermesRemote && (mentionedSkills?.length || mentionedMcpServers?.length)) {
         const toolLines: string[] = ['用户在消息中明确引用了以下工具，请在本次回复中主动调用：']
         for (const slug of mentionedSkills ?? []) {
           const qualifiedName = workspaceSlug
@@ -1451,7 +1459,7 @@ export class AgentOrchestrator {
         enrichedMessage = `<mentioned_tools>\n${toolLines.join('\n')}\n</mentioned_tools>\n\n${enrichedMessage}`
         console.log(`[Agent 编排] 注入 mentioned_tools: ${mentionedSkills?.length ?? 0} skills, ${mentionedMcpServers?.length ?? 0} MCP`)
       }
-      const referencedPlanningBlock = buildReferencedPlanningPrompt(
+      const referencedPlanningBlock = isHermesRemote ? '' : buildReferencedPlanningPrompt(
         mentionedTodoIds,
         mentionedCalendarEventIds,
         { requireToolRead: agentRuntime === 'pi' },
@@ -1464,9 +1472,11 @@ export class AgentOrchestrator {
       const contextualMessage = `${dynamicCtx}\n\n${enrichedMessage}`
 
       const isCompactCommand = userMessage.trim() === '/compact'
-      const finalPrompt = isCompactCommand
-        ? '/compact'
-        : (existingSdkSessionId || isHermesResumed)
+      const finalPrompt = isHermesRemote
+        ? userMessage
+        : isCompactCommand
+          ? '/compact'
+          : (existingSdkSessionId || isHermesResumed)
           ? contextualMessage
           : buildContextPrompt(sessionId, contextualMessage, { agentCwd, workspaceSlug })
 
@@ -1749,7 +1759,7 @@ export class AgentOrchestrator {
       const piThinkingLevel = agentRuntime === 'pi'
         ? resolvePiThinkingLevel(appSettings, sessionMeta, channel.provider, selectedModelId, piReasoningCapability)
         : undefined
-      const systemPromptAppend = buildSystemPrompt({
+      const systemPromptAppend = isHermesRemote ? '' : buildSystemPrompt({
         agentRuntime,
         workspaceName: workspace?.name,
         workspaceSlug,
@@ -1822,6 +1832,18 @@ export class AgentOrchestrator {
         prompt: finalPrompt,
         model: selectedModelId,
         cwd: agentCwd,
+        ...(input.hermesTurn ? { hermesTurn: input.hermesTurn } : {}),
+        onHermesTurnSubmitState: (state) => {
+          if (state.status === 'accepted') {
+            try {
+              persistInitialUserMessage()
+            } catch (error) {
+              console.error('[Agent 编排] Hermes accepted 后本地消息持久化失败:', error)
+              callbacks.onError(`远端已接受消息，但本地记录失败：${error instanceof Error ? error.message : String(error)}`)
+            }
+          }
+          callbacks.onHermesTurnSubmitState?.(state)
+        },
       } : agentRuntime === 'pi' ? {
         agentRuntime: 'pi',
         sessionId,
@@ -1961,10 +1983,10 @@ export class AgentOrchestrator {
       let invisibleRecoveryAttempts = 0
       const canAutoRetry = (attempt: number): boolean =>
         attempt <= MAX_AUTO_RETRIES && retryDelayElapsedMs < MAX_AUTO_RETRY_WAIT_MS
-      // Pi runtime 使用其 session 内的 native retry（agent.continue），能保留已完成的
-      // tool_result；禁止外层以原 prompt 重开 query，但保留 session-not-found 等显式恢复。
+      // Pi 使用 session-native retry；Hermes mutation 在断线时 outcome 可能未知。
+      // 两者都禁止外层以原 prompt 重放，只有 Claude 可做 query-level replay。
       const canReplayPromptForRetry = (attempt: number): boolean =>
-        agentRuntime !== 'pi' && canAutoRetry(attempt)
+        agentRuntime === 'claude' && canAutoRetry(attempt)
 
       const canTryThinkingSignatureRecovery = (attempt: number): boolean =>
         !thinkingSignatureRecoveryAttempted &&
@@ -2021,7 +2043,7 @@ export class AgentOrchestrator {
               const wasStoppedByUser = this.consumeStoppedByUser(sessionId, runGeneration)
               this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
               try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
-              completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
+              completeRun({ stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
               return
             }
           }
@@ -2260,7 +2282,7 @@ export class AgentOrchestrator {
                 // 透传归一化后的错误消息到前端，避免 SDK 原始 API Error 直接暴露给用户。
                 this.eventBus.emit(sessionId, { kind: 'sdk_message', message: errorSDKMsg })
                 try { updateAgentSessionMeta(sessionId, {}) } catch { /* 忽略 */ }
-                completeRun(getAgentSessionMessages(sessionId), { startedAt: streamStartedAt })
+                completeRun({ startedAt: streamStartedAt })
                 return
               }
             }
@@ -2368,7 +2390,7 @@ export class AgentOrchestrator {
                 // 轻量完成：UI 置空闲可输入，但 host 保持运行态（不 releaseActiveRun、不 break、不启动 drain 超时），
                 // while 循环继续 park 在 queryIterator.next()，等待后台任务完成时 SDK 自动 yield 的新一轮消息。
                 awaitingBackgroundWake = true
-                idleComplete(getAgentSessionMessages(sessionId), { startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
+                idleComplete({ startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
               } else if (!keepChannelOpen && !drainTimeoutPromise) {
                 // 启动 drain 超时安全网：正常情况下 adapter 收到 terminal result 会主动 break
                 // 触发 iterator.return → 下一次 next() 立即返回 done，此 timeout 不会触发。
@@ -2419,7 +2441,7 @@ export class AgentOrchestrator {
 
           if (!wasStoppedByUser && visibleRunMessageCount === 0) {
             const errorContent = this.persistEmptyResponseError(sessionId, capturedResultSubtype, capturedResultErrors)
-            failRun(errorContent, getAgentSessionMessages(sessionId), {
+            failRun(errorContent, {
               startedAt: streamStartedAt,
               resultSubtype: EMPTY_RESPONSE_RESULT_SUBTYPE,
               resultErrors: [errorContent],
@@ -2436,8 +2458,8 @@ export class AgentOrchestrator {
             console.log(`[Agent 编排] Plan 模式：已注入计划确认建议`)
           }
 
-          // 发送完成信号
-          completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
+          // 发送轻量完成信号；UI 不再为此读取并复制整段历史。
+          completeRun({ stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
 
           break  // 成功完成，退出重试循环
 
@@ -2458,7 +2480,7 @@ export class AgentOrchestrator {
             this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
             // 持久化中断状态到会话 meta
             try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
-            completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
+            completeRun({ stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
             return
           }
 
@@ -2634,7 +2656,7 @@ export class AgentOrchestrator {
             })
           }
 
-          failRun(userFacingError, getAgentSessionMessages(sessionId), { startedAt: streamStartedAt })
+          failRun(userFacingError, { startedAt: streamStartedAt })
 
           // 保留 sdkSessionId，确保下一轮能继续 resume（修复 #903）。
           // 此终止分支只会被「非 session-not-found」的错误命中（session 失效已在上文
@@ -2681,7 +2703,7 @@ export class AgentOrchestrator {
         } as unknown as SDKMessage
         appendSDKMessages(sessionId, [retryErrorSDKMsg])
 
-        failRun(`${retryFailureMessage}: ${lastRetryableError}`, getAgentSessionMessages(sessionId), { startedAt: streamStartedAt })
+        failRun(`${retryFailureMessage}: ${lastRetryableError}`, { startedAt: streamStartedAt })
       }
 
     } finally {
@@ -2697,16 +2719,19 @@ export class AgentOrchestrator {
   /**
    * 中止指定会话的 Agent 执行
    *
-   * 先从 activeSessions 移除（供 sendMessage catch 块检测用户中止），
-   * 再调用 adapter.abort() 中止底层 SDK 进程。
+   * 先保留 runtime binding 请求语义停止；远端 ACK/有限终态后再释放会话槽位并做紧急清理。
    */
-  stop(sessionId: string): void {
+  async stop(sessionId: string): Promise<void> {
     const runGeneration = this.activeSessions.get(sessionId)
-    this.activeSessions.delete(sessionId)
-    this.sessionPermissionModes.delete(sessionId)
-    if (runGeneration != null) this.stoppedBySessions.set(sessionId, runGeneration)
-    this.queuedMessageUuids.delete(sessionId)
-    this.adapter.abort(sessionId)
+    try {
+      await this.adapter.interruptQuery?.(sessionId)
+    } finally {
+      this.activeSessions.delete(sessionId)
+      this.sessionPermissionModes.delete(sessionId)
+      if (runGeneration != null) this.stoppedBySessions.set(sessionId, runGeneration)
+      this.queuedMessageUuids.delete(sessionId)
+      this.adapter.abort(sessionId)
+    }
     console.log(`[Agent 编排] 已中止会话: ${sessionId}`)
   }
 

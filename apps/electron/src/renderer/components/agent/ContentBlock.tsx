@@ -37,45 +37,12 @@ import type {
   SDKSystemMessage,
 } from '@proma/shared'
 
-// ===== useToolResult Hook =====
+// ===== SDKMessage 关联索引 =====
 
 interface ToolResultData {
   result?: string
   isError?: boolean
 }
-
-/** 在 allMessages 中查找匹配 toolUseId 的工具结果 */
-function useToolResult(toolUseId: string, allMessages: SDKMessage[]): ToolResultData | null {
-  return React.useMemo(() => {
-    for (const msg of allMessages) {
-      if (msg.type !== 'user') continue
-      const userMsg = msg as SDKUserMessage
-      const contentBlocks = userMsg.message?.content
-      if (!Array.isArray(contentBlocks)) continue
-
-      for (const block of contentBlocks) {
-        if (block.type === 'tool_result') {
-          const resultBlock = block as SDKToolResultBlock
-          if (resultBlock.tool_use_id === toolUseId) {
-            let result: string | undefined
-            if (typeof resultBlock.content === 'string') {
-              result = resultBlock.content
-            } else if (Array.isArray(resultBlock.content)) {
-              result = (resultBlock.content as Array<{ type: string; text?: string }>)
-                .filter((c) => c.type === 'text' && typeof c.text === 'string')
-                .map((c) => c.text)
-                .join('\n')
-            }
-            return { result, isError: resultBlock.is_error }
-          }
-        }
-      }
-    }
-    return null
-  }, [toolUseId, allMessages])
-}
-
-// ===== useSubAgentMeta Hook =====
 
 interface SubAgentMeta {
   durationMs: number
@@ -83,24 +50,70 @@ interface SubAgentMeta {
   toolUses: number
 }
 
-/** 从 allMessages 中查找匹配 toolUseId 的 task_notification 系统消息，提取用量数据 */
-function useSubAgentMeta(toolUseId: string, allMessages: SDKMessage[]): SubAgentMeta | null {
-  return React.useMemo(() => {
-    for (const msg of allMessages) {
-      if (msg.type !== 'system') continue
-      const sysMsg = msg as SDKSystemMessage
-      if (sysMsg.subtype !== 'task_notification') continue
-      if (sysMsg.tool_use_id !== toolUseId) continue
-      const usage = sysMsg.usage
-      if (!usage) return null
-      return {
-        durationMs: usage.duration_ms ?? 0,
-        totalTokens: usage.total_tokens ?? 0,
-        toolUses: usage.tool_uses ?? 0,
+export interface SDKMessageLookupIndex {
+  toolResults: Map<string, SDKToolResultBlock>
+  subAgentMeta: Map<string, SubAgentMeta>
+}
+
+const messageLookupCache = new WeakMap<SDKMessage[], SDKMessageLookupIndex>()
+
+/** 单次线性建立工具关联索引；同一 allMessages 引用下后续工具块均为 O(1) 查询。 */
+export function buildSDKMessageLookupIndex(allMessages: SDKMessage[]): SDKMessageLookupIndex {
+  const toolResults = new Map<string, SDKToolResultBlock>()
+  const subAgentMeta = new Map<string, SubAgentMeta>()
+  for (const msg of allMessages) {
+    if (msg.type === 'user') {
+      const contentBlocks = (msg as SDKUserMessage).message?.content
+      if (!Array.isArray(contentBlocks)) continue
+      for (const block of contentBlocks) {
+        if (block.type === 'tool_result') {
+          const resultBlock = block as SDKToolResultBlock
+          toolResults.set(resultBlock.tool_use_id, resultBlock)
+        }
       }
+      continue
     }
-    return null
+    if (msg.type !== 'system') continue
+    const sysMsg = msg as SDKSystemMessage
+    if (sysMsg.subtype !== 'task_notification' || !sysMsg.tool_use_id || !sysMsg.usage) continue
+    subAgentMeta.set(sysMsg.tool_use_id, {
+      durationMs: sysMsg.usage.duration_ms ?? 0,
+      totalTokens: sysMsg.usage.total_tokens ?? 0,
+      toolUses: sysMsg.usage.tool_uses ?? 0,
+    })
+  }
+  return { toolResults, subAgentMeta }
+}
+
+function getSDKMessageLookupIndex(allMessages: SDKMessage[]): SDKMessageLookupIndex {
+  const cached = messageLookupCache.get(allMessages)
+  if (cached) return cached
+  const built = buildSDKMessageLookupIndex(allMessages)
+  messageLookupCache.set(allMessages, built)
+  return built
+}
+
+function useToolResult(toolUseId: string, allMessages: SDKMessage[]): ToolResultData | null {
+  return React.useMemo(() => {
+    const resultBlock = getSDKMessageLookupIndex(allMessages).toolResults.get(toolUseId)
+    if (!resultBlock) return null
+    let result: string | undefined
+    if (typeof resultBlock.content === 'string') {
+      result = resultBlock.content
+    } else if (Array.isArray(resultBlock.content)) {
+      result = (resultBlock.content as Array<{ type: string; text?: string }>)
+        .filter((item) => item.type === 'text' && typeof item.text === 'string')
+        .map((item) => item.text)
+        .join('\n')
+    }
+    return { result, isError: resultBlock.is_error }
   }, [toolUseId, allMessages])
+}
+
+function useSubAgentMeta(toolUseId: string | null, allMessages: SDKMessage[]): SubAgentMeta | null {
+  return React.useMemo(() => (
+    toolUseId ? getSDKMessageLookupIndex(allMessages).subAgentMeta.get(toolUseId) ?? null : null
+  ), [toolUseId, allMessages])
 }
 
 // ===== SubAgent 结果文本解析 =====
@@ -348,7 +361,7 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   }, [block.name, resultText, isError])
   const isAgentTool = block.name === 'Agent' || block.name === 'Task'
   const hasChildren = isAgentTool && childBlocks && childBlocks.length > 0
-  const subAgentMeta = useSubAgentMeta(block.id, allMessages)
+  const subAgentMeta = useSubAgentMeta(isAgentTool ? block.id : null, allMessages)
 
   // Agent/Task 子代理内容默认折叠
   const [childrenExpanded, setChildrenExpanded] = React.useState(false)
@@ -670,6 +683,19 @@ export function ContentBlock({ block, allMessages, basePath, basePaths, animate 
     const thinkingBlock = block as SDKThinkingBlock
     if (!thinkingBlock.thinking) return null
     return <ThinkingBlock block={thinkingBlock} dimmed={dimmed} />
+  }
+
+  // 图片块（Hermes 消息图片 / 用户发送附件预览）
+  if (block.type === 'image') {
+    const url = (block as { dataUrl?: string; image_url?: string; url?: string }).dataUrl
+      ?? (block as { dataUrl?: string; image_url?: string; url?: string }).image_url
+      ?? (block as { dataUrl?: string; image_url?: string; url?: string }).url
+    if (!url) return null
+    return (
+      <div className="my-1">
+        <img src={url} alt="图片" className="max-h-72 max-w-full rounded-md border border-border object-contain" />
+      </div>
+    )
   }
 
   return null

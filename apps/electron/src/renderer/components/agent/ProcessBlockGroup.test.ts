@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { buildAssistantTurnRenderItems, buildProcessGroupToolNames } from './ProcessBlockGroup'
+import { buildAssistantTurnRenderItems, buildProcessGroupToolNames, shouldImmediatelyCollapseProcessGroup } from './ProcessBlockGroup'
 import type { SDKContentBlock } from '@proma/shared'
 
 const tool = (id: string, name = 'Read'): SDKContentBlock => ({
@@ -129,6 +129,11 @@ describe('Agent 过程块折叠分组', () => {
     if (items[0]?.type === 'process-group') {
       expect(items[0].items.map((item) => item.index)).toEqual([0, 1])
     }
+  })
+
+  test('given huge process group when completion starts then skips delayed collapse animation', () => {
+    expect(shouldImmediatelyCollapseProcessGroup(Array.from({ length: 80 }, (_, index) => tool(`tool-${index}`)))).toBe(true)
+    expect(shouldImmediatelyCollapseProcessGroup(Array.from({ length: 79 }, (_, index) => tool(`tool-${index}`)))).toBe(false)
   })
 
   test('given repeated tools when building capability icons then returns unique tool names in order', () => {

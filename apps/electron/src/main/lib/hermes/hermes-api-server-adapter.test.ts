@@ -179,6 +179,18 @@ describe('HermesApiServerAdapter', () => {
     expect(stoppedPath).toBe('/v1/runs/run_1/stop')
   })
 
+  test('Given stop ACK=stopping When stopRunAndWait Then 轮询到 cancelled 才返回', async () => {
+    const { adapter, respondWith } = createAdapter()
+    let statusReads = 0
+    respondWith((path) => {
+      if (path.endsWith('/stop')) return { status: 200, body: { status: 'stopping' } }
+      statusReads += 1
+      return { status: 200, body: { status: statusReads > 1 ? 'cancelled' : 'stopping' } }
+    })
+    expect(await adapter.stopRunAndWait('run_1', { pollIntervalMs: 1, timeoutMs: 100 })).toEqual({ status: 'cancelled' })
+    expect(statusReads).toBe(2)
+  })
+
   test('Given listCapabilities When 调用 Then 返回能力', async () => {
     const { adapter, respondWith } = createAdapter()
     respondWith(() => ({ status: 200, body: { capabilities: { runs: { method: 'POST', path: '/v1/runs' } } } }))

@@ -12,7 +12,7 @@ import type {
   AutomationScheduleType,
   AutomationPermissionMode,
   AutomationSessionMode,
-  AgentRuntime,
+  LocalAgentRuntime,
 } from '@proma/shared'
 import { AUTOMATION_DEFAULT_PERMISSION_MODE, AUTOMATION_DEFAULT_SESSION_MODE } from '@proma/shared'
 
@@ -38,7 +38,7 @@ export interface AutomationDraft {
   scheduledAt?: number
   /** 最大运行次数上限（实际执行次数）；undefined = 不限次 */
   maxRuns?: number
-  agentRuntime: AgentRuntime
+  agentRuntime: LocalAgentRuntime
   channelId: string
   modelId?: string
   workspaceId?: string

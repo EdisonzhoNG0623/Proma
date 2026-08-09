@@ -156,6 +156,21 @@ describe('probeApiServer API Server 探测', () => {
     expect(result.endpoints).toContain('/v1/runs')
   })
 
+  test('Given Hermes Agent 当前 object endpoints 格式 When 探测 Then 解码 path', async () => {
+    const transport = fakeTransport(() => ({
+      status: 200,
+      body: {
+        features: { run_submission: true, run_stop: true },
+        endpoints: {
+          runs: { method: 'POST', path: '/v1/runs' },
+          stop: { method: 'POST', path: '/v1/runs/{id}/stop' },
+        },
+      },
+    }))
+    const result = await probeApiServer(transport)
+    expect(result.endpoints).toEqual(['/v1/runs', '/v1/runs/{id}/stop'])
+  })
+
   test('Given 返回 401 When 探测 Then available 且标记认证', async () => {
     const transport = fakeTransport(() => ({ status: 401, body: {} }))
     const result = await probeApiServer(transport)
@@ -187,10 +202,17 @@ describe('classifyHermesService 服务分类', () => {
     )
   })
 
-  test('Given 任一协议不兼容 When 分类 Then protocol-incompatible', () => {
+  test('Given 一个可用另一个协议不兼容 When 分类 Then 保留可用协议', () => {
     expect(
-      classifyHermesService({ ...dashOk(), protocolIncompatible: true }, apiOk()),
-    ).toBe('protocol-incompatible')
+      classifyHermesService({ ...dashOk(), protocolIncompatible: true, available: false }, apiOk()),
+    ).toBe('api-only')
+  })
+
+  test('Given 无可用服务且任一协议不兼容 When 分类 Then protocol-incompatible', () => {
+    expect(classifyHermesService(
+      { ...dashOk(), protocolIncompatible: true, available: false },
+      { ...apiOk(), available: false },
+    )).toBe('protocol-incompatible')
   })
 
   test('Given 均不可用 When 分类 Then unreachable', () => {
@@ -233,6 +255,16 @@ describe('probeHermesCapabilities 完整探测', () => {
     expect(snapshot.serviceClass).toBe('api-only')
     expect(snapshot.dashboard).toBeUndefined()
     expect(snapshot.apiServer?.endpoints).toEqual(['/v1/runs'])
+  })
+
+  test('Given 只配置 Dashboard transport When 探测 Then 不猜 API endpoint', async () => {
+    const dashboardTransport = fakeTransport(() => ({
+      status: 200,
+      body: { version: '0.20.0', auth_required: false },
+    }))
+    const snapshot = await probeHermesCapabilities({ dashboardTransport })
+    expect(snapshot.serviceClass).toBe('dashboard-only')
+    expect(snapshot.apiServer).toBeUndefined()
   })
 
   test('Given 均不可达 When 探测 Then unreachable', async () => {

@@ -6,9 +6,13 @@
  */
 
 import type { SDKMessage } from './agent'
+import type { HermesTurnInput, HermesTurnSubmitState } from './hermes'
+
+/** 仅在本机执行的 Agent runtime（Automation 只允许使用本地 runtime） */
+export type LocalAgentRuntime = 'claude' | 'pi'
 
 /** Agent runtime 实现 */
-export type AgentRuntime = 'claude' | 'pi' | 'hermes-remote'
+export type AgentRuntime = LocalAgentRuntime | 'hermes-remote'
 
 /** SDK 用户消息（队列消息注入用，匹配 SDK SDKUserMessage 结构） */
 export interface SDKUserMessageInput {
@@ -49,6 +53,10 @@ export interface AgentQueryInput {
   cwd?: string
   /** 中止信号 */
   abortSignal?: AbortSignal
+  /** Hermes Remote 的原子 turn 输入；本地 runtime 必须忽略 */
+  hermesTurn?: HermesTurnInput
+  /** 主进程内部提交状态回调；不得跨 IPC 传递 */
+  onHermesTurnSubmitState?: (state: HermesTurnSubmitState) => void
 }
 
 /**

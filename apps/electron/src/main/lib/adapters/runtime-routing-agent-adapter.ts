@@ -13,8 +13,18 @@ export class RuntimeRoutingAgentAdapter implements AgentProviderAdapter {
 
   query(input: AgentQueryInput): AsyncIterable<SDKMessage> {
     const runtime = input.agentRuntime ?? 'claude'
+    const adapter = this.adapters[runtime]
+    if (!adapter) throw new Error(`未知 Agent runtime: ${String(runtime)}`)
     this.sessionRuntimes.set(input.sessionId, runtime)
-    return this.adapters[runtime].query(input)
+    const iterable = adapter.query(input)
+    const bindings = this.sessionRuntimes
+    return (async function* (): AsyncIterable<SDKMessage> {
+      try {
+        yield* iterable
+      } finally {
+        if (bindings.get(input.sessionId) === runtime) bindings.delete(input.sessionId)
+      }
+    })()
   }
 
   abort(sessionId: string): void {
@@ -24,8 +34,7 @@ export class RuntimeRoutingAgentAdapter implements AgentProviderAdapter {
       return
     }
 
-    this.adapters.claude.abort(sessionId)
-    this.adapters.pi.abort(sessionId)
+    for (const adapter of new Set(Object.values(this.adapters))) adapter.abort(sessionId)
   }
 
   async interruptQuery(sessionId: string): Promise<void> {
@@ -34,8 +43,7 @@ export class RuntimeRoutingAgentAdapter implements AgentProviderAdapter {
   }
 
   dispose(): void {
-    this.adapters.claude.dispose()
-    this.adapters.pi.dispose()
+    for (const adapter of new Set(Object.values(this.adapters))) adapter.dispose()
     this.sessionRuntimes.clear()
   }
 
@@ -62,7 +70,10 @@ export class RuntimeRoutingAgentAdapter implements AgentProviderAdapter {
   }
 
   private getAdapter(sessionId: string): AgentProviderAdapter {
-    const runtime = this.sessionRuntimes.get(sessionId) ?? 'claude'
-    return this.adapters[runtime]
+    const runtime = this.sessionRuntimes.get(sessionId)
+    if (!runtime) throw new Error(`会话缺少 runtime binding: ${sessionId}`)
+    const adapter = this.adapters[runtime]
+    if (!adapter) throw new Error(`未知 Agent runtime: ${runtime}`)
+    return adapter
   }
 }

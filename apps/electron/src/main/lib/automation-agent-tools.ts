@@ -7,6 +7,7 @@
 
 import {
   type AgentRuntime,
+  type LocalAgentRuntime,
   type Automation,
   type AutomationScheduleType,
   type CreateAutomationInput,
@@ -24,6 +25,7 @@ import {
   runAutomationNow,
 } from './automation-scheduler'
 import { getAgentSessionMeta } from './agent-session-manager'
+import { isLocalAgentRuntime } from './agent-runtime-policy'
 
 interface AutomationAgentToolContext {
   sessionId: string
@@ -236,7 +238,8 @@ export async function injectAutomationMcpServer(
             dayOfMonth: args.dayOfMonth,
             scheduledAt: args.scheduledAt,
             maxRuns: args.maxRuns,
-            agentRuntime: args.agentRuntime ?? ctx.agentRuntime,
+            agentRuntime: (args.agentRuntime as LocalAgentRuntime | undefined)
+              ?? (isLocalAgentRuntime(ctx.agentRuntime) ? ctx.agentRuntime : 'pi'),
             channelId: ctx.channelId,
             modelId: ctx.modelId,
             workspaceId: ctx.workspaceId,

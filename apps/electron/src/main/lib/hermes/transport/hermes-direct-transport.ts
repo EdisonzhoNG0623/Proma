@@ -62,25 +62,18 @@ export function normalizeBaseUrl(rawUrl: string): string {
 /**
  * 拼接路径与 baseUrl，query 参数直接附加。
  *
- * path 以 / 开头时替换根路径；否则拼在 baseUrl 之后。
+ * 所有相对服务路径都拼在 baseUrl path prefix 之后，支持 reverse proxy 子路径。
  */
 export function joinPath(baseUrl: string, path: string): string {
   const base = normalizeBaseUrl(baseUrl)
-  if (path.startsWith('http://') || path.startsWith('https://')) {
-    return path
-  }
-  if (path.startsWith('/')) {
-    const parsed = new URL(base)
-    const queryIndex = path.indexOf('?')
-    if (queryIndex >= 0) {
-      parsed.pathname = path.slice(0, queryIndex)
-      parsed.search = path.slice(queryIndex + 1)
-    } else {
-      parsed.pathname = path
-    }
-    return parsed.toString()
-  }
-  return base + path
+  if (/^https?:\/\//i.test(path)) return path
+  const parsed = new URL(base)
+  const queryIndex = path.indexOf('?')
+  const rawPath = queryIndex >= 0 ? path.slice(0, queryIndex) : path
+  const prefix = parsed.pathname.replace(/\/+$/, '')
+  parsed.pathname = `${prefix}/${rawPath.replace(/^\/+/, '')}`.replace(/\/{2,}/g, '/')
+  parsed.search = queryIndex >= 0 ? path.slice(queryIndex + 1) : ''
+  return parsed.toString()
 }
 
 /**
@@ -290,18 +283,17 @@ export class HermesDirectTransport implements HermesTransport {
     // 响应就绪：启动异步读取循环，不阻塞调用方
     let settled = false
     let resolveDone!: () => void
-    const done = new Promise<void>((resolve) => {
+    let rejectDone!: (error: unknown) => void
+    const done = new Promise<void>((resolve, reject) => {
       resolveDone = resolve
+      rejectDone = reject
     })
-    const finish = (): void => {
-      if (settled) return
-      settled = true
+    const cleanup = (): void => {
       if (timer) clearTimeout(timer)
       options.signal?.removeEventListener('abort', externalAbort)
-      resolveDone()
     }
 
-    const run = (async (): Promise<void> => {
+    void (async (): Promise<void> => {
       try {
         const reader = response.body!.getReader()
         const decoder = new TextDecoder()
@@ -314,22 +306,23 @@ export class HermesDirectTransport implements HermesTransport {
           buffer = lines.pop() ?? ''
           parseSseBuffer(lines.join('\n'), options.onEvent)
         }
-        if (buffer) {
-          parseSseBuffer(buffer, options.onEvent)
-        }
+        if (buffer) parseSseBuffer(buffer, options.onEvent)
         options.onEnd?.()
+        if (!settled) {
+          settled = true
+          cleanup()
+          resolveDone()
+        }
       } catch (error) {
-        // 流中途断线/中止：不抛给调用方，通过 done 结束；上层可感知连接终止
-        console.warn('[Hermes Direct] SSE 流中断:', error instanceof Error ? error.message : String(error))
-      } finally {
-        finish()
+        if (!settled) {
+          settled = true
+          cleanup()
+          rejectDone(error instanceof Error ? error : new Error(String(error)))
+        }
       }
     })()
 
-    return {
-      abort: () => controller.abort(),
-      done: done.then(() => run.catch(() => undefined)),
-    }
+    return { abort: () => controller.abort(), done }
   }
 
   async connectWebSocket(
@@ -349,9 +342,11 @@ export class HermesDirectTransport implements HermesTransport {
 
     return new Promise<HermesWsOpenResult>((resolve) => {
       let settled = false
-      const finish = (
-        result: HermesWsOpenResult,
-      ): void => {
+      let socket: WebSocket | null = null
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const bufferedMessages: MessageEvent[] = []
+      const bufferEarlyMessage = (event: MessageEvent): void => { bufferedMessages.push(event) }
+      const finish = (result: HermesWsOpenResult): void => {
         if (settled) return
         settled = true
         if (timer) clearTimeout(timer)
@@ -359,17 +354,13 @@ export class HermesDirectTransport implements HermesTransport {
         resolve(result)
       }
       const onAbort = (): void => {
-        socket.close()
-        finish({
-          socket: null,
-          errorCode: 'timeout' as HermesErrorCode,
-          errorMessage: 'WebSocket 连接已取消',
-        })
+        if (socket && socket.readyState !== WebSocket.CLOSED) socket.close()
+        finish({ socket: null, errorCode: 'timeout' as HermesErrorCode, errorMessage: 'WebSocket 连接已取消' })
       }
 
-      let socket: WebSocket
       try {
         socket = new this.WebSocketImpl(url)
+        socket.addEventListener('message', bufferEarlyMessage)
       } catch (error) {
         finish({
           socket: null,
@@ -379,27 +370,28 @@ export class HermesDirectTransport implements HermesTransport {
         return
       }
 
-      const timer = setTimeout(() => {
-        socket.close()
-        finish({
-          socket: null,
-          errorCode: 'timeout',
-          errorMessage: `WebSocket 连接超时（超过 ${timeoutMs}ms）`,
-        })
+      timer = setTimeout(() => {
+        if (socket && socket.readyState !== WebSocket.CLOSED) socket.close()
+        finish({ socket: null, errorCode: 'timeout', errorMessage: `WebSocket 连接超时（超过 ${timeoutMs}ms）` })
       }, timeoutMs)
-
       options.signal?.addEventListener('abort', onAbort, { once: true })
 
       socket.addEventListener('open', () => {
-        // 打开成功：移除超时监听与信号监听，交给调用方管理 socket
-        finish({ socket, errorCode: null, errorMessage: null })
+        if (socket?.readyState !== WebSocket.OPEN) {
+          finish({ socket: null, errorCode: 'network', errorMessage: 'WebSocket 状态异常' })
+          return
+        }
+        const openedSocket = socket
+        finish({
+          socket: openedSocket,
+          errorCode: null,
+          errorMessage: null,
+          bufferedMessages,
+          stopBuffering: () => openedSocket?.removeEventListener('message', bufferEarlyMessage),
+        })
       })
       socket.addEventListener('error', () => {
-        finish({
-          socket: null,
-          errorCode: 'network',
-          errorMessage: 'WebSocket 连接失败',
-        })
+        finish({ socket: null, errorCode: 'network', errorMessage: 'WebSocket 连接失败' })
       })
     })
   }

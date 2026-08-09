@@ -604,7 +604,10 @@ function DockBadgeInitializer(): null {
       if (!document.hasFocus() || !activeAgentSessionId) return
       // 以实际激活的 Agent/预览 Tab 为准。Scratch Pad 会保留 currentAgentSessionId，
       // 不能仅据此把后台会话误判为已查看。
-      void window.electronAPI.agentIsland.markSessionViewed(activeAgentSessionId).catch(console.error)
+      // Agent Island 仅 macOS 26+ 注册服务；其他平台跳过（Windows 无 handler 会报错）
+      if (window.electronAPI.agentIsland?.markSessionViewed) {
+        void window.electronAPI.agentIsland.markSessionViewed(activeAgentSessionId).catch(console.error)
+      }
       setUnviewedCompleted((prev) => {
         if (!prev.has(activeAgentSessionId)) return prev
         const next = new Set(prev)
