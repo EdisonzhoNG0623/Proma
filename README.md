@@ -20,7 +20,7 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 - **Agent 模式**：统一使用 Pi Agent Runtime；支持工作区隔离、权限模式、文件操作、长任务流式输出、计划确认和用户追问。
 - **协作与任务**：复杂任务可拆分为可追踪的协作子 Agent / Task，并在消息流中展示调用过程和结果。
 - **Skills、MCP 与项目根目录**：每个 Proma 项目独立配置 Skills 与 MCP Server。项目文件可使用用户选择的本地项目根目录，也可使用 Proma 托管的空白项目目录；本地项目配置不会被自动导入。
-- **Hermes Remote（实验性，`0.16.10-hermes.6`）**：Proma 可作为远端 Hermes Agent 的桌面客户端；支持显式 Dashboard / API Server 协议、Direct / SSH、远端项目与会话、原子附件提交和真实远端停止。Hermes 与本地 Pi 的 Skills、Memory、MCP、Automation 和数据严格隔离。
+- **Hermes Remote（实验性，`0.16.10-hermes.7`）**：Proma 可作为远端 Hermes Agent 的桌面客户端；支持显式 Dashboard / API Server 协议、Direct / SSH、远端项目与会话、原子附件提交和真实远端停止。Proma 创建和浏览的 Hermes 远端项目统一位于 `/opt/ai/projects`。Hermes 与本地 Pi 的 Skills、Memory、MCP、Automation 和数据严格隔离。
 - **远程机器人**：支持飞书 / Lark 机器人桥接，并已提供钉钉、微信桥接入口，用手机或群聊触发本机 Agent 工作流。
 - **记忆与工具**：Chat 和 Agent 可共享记忆能力，并支持联网搜索、内置 Chat 工具、Agent 推荐等辅助能力。
 - **本地优先**：会话、工作区、附件、配置、Skills 等默认存储在 `~/.proma/`，使用 JSON / JSONL 文件组织，不依赖本地数据库。
@@ -129,13 +129,14 @@ Proma 的 Agent 模式统一使用 **Pi Agent Runtime**，由 `@earendil-works/p
 
 ## Hermes Remote（实验性）
 
-`0.16.10-hermes.6` 基于官方最新 Release `v0.16.10` 之后的未发布上游 `main@0e4d2f9b` 移植 Hermes Remote；版本号延续 Hermes fork 预览线，不占用上游 `main` 清单中的开发版本号。Proma 本地 Agent 仍统一使用 Pi；Hermes 在主进程 service 边界作为显式 external runtime 分流，不进入 Pi provider、工作区上下文或本地 JSONL 历史。
+`0.16.10-hermes.7` 基于官方最新 Release `v0.16.10` 之后的未发布上游 `main@0e4d2f9b` 移植 Hermes Remote；版本号延续 Hermes fork 预览线，不占用上游 `main` 清单中的开发版本号。Proma 本地 Agent 仍统一使用 Pi；Hermes 在主进程 service 边界作为显式 external runtime 分流，不进入 Pi provider、工作区上下文或本地 JSONL 历史。
 
 - Dashboard 与 API Server 是能力不同的显式协议端点，不做透明 fallback。
+- Proma 端新建和浏览的 Hermes 远端项目固定使用 `/opt/ai/projects` 根目录；不会再写入旧的 `~/proma-projects`。
 - 支持 Direct / SSH Tunnel、target-scoped 凭据与 Cookie partition、SSH host-key 确认和受限 SFTP 浏览。
 - Dashboard 会话支持远端 canonical history、实时流式、approval / clarify / sudo / secret 交互、图片与普通文件附件、远端停止和重启媒体恢复。
 - 远端历史 snapshot 是真源；本地缓存可删除重建，Hermes 不读取或追加本地 Agent JSONL。
-- Windows prerelease 及校验信息见 [`v0.16.10-hermes.6`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.16.10-hermes.6)。
+- Windows prerelease 及校验信息见 [`v0.16.10-hermes.7`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.16.10-hermes.7)。
 
 ## 技术栈
 
