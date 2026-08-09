@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
 import { join } from 'node:path'
 
@@ -215,6 +215,30 @@ describe('Agent 会话 runtime 元数据', () => {
       .rejects.toThrow('历史 Claude transcript 为只读')
     await expect(manager.rewindPiAgentSession('legacy-claude-session', 'assistant-1'))
       .rejects.toThrow('历史 Claude transcript 为只读')
+  })
+
+  test('Given normalized Hermes v3 binding When repeatedly read Then migration stays idempotent and does not rewrite backup', () => {
+    const indexPath = join(tempHome, '.proma', 'agent-sessions.json')
+    const backupPath = `${indexPath}.bak`
+    mkdirSync(join(tempHome, '.proma'), { recursive: true })
+    writeFileSync(indexPath, JSON.stringify({
+      version: 3,
+      openAIThinkingDefaultEnabledMigrationCompleted: true,
+      sessions: [{
+        id: 'hermes-stable',
+        title: 'Hermes',
+        workspaceId: 'workspace-a',
+        createdAt: 1,
+        updatedAt: 1,
+        agentRuntime: 'hermes-remote',
+        hermesTargetId: 'target-1',
+      }],
+    }), 'utf-8')
+    writeFileSync(backupPath, 'sentinel', 'utf-8')
+
+    expect(manager.getAgentSessionMeta('hermes-stable')?.agentRuntime).toBe('hermes-remote')
+    expect(manager.getAgentSessionMeta('hermes-stable')?.hermesTargetId).toBe('target-1')
+    expect(readFileSync(backupPath, 'utf-8')).toBe('sentinel')
   })
 
   test('Given Pi session moved to another workspace When metadata is persisted Then clears the cwd-bound artifact and bindings', () => {

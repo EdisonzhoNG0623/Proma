@@ -7,6 +7,10 @@
 
 import type { SDKMessage } from './agent'
 
+/** Upstream local runtime remains Pi-only; Hermes is an explicit external runtime. */
+export type LocalAgentRuntime = 'pi'
+export type AgentRuntime = LocalAgentRuntime | 'hermes-remote'
+
 /** SDK 用户消息（队列消息注入用，匹配 SDK SDKUserMessage 结构） */
 export interface SDKUserMessageInput {
   type: 'user'
@@ -34,6 +38,8 @@ export interface SendQueuedMessageOptions {
  * SDK 特定配置通过 Adapter 的扩展输入类型传入。
  */
 export interface AgentQueryInput {
+  /** Provider adapter remains local Pi-only; external runtimes split before this boundary. */
+  agentRuntime?: LocalAgentRuntime
   /** 会话 ID */
   sessionId: string
   /** 用户 prompt（已包含上下文注入） */

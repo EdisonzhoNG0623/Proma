@@ -133,6 +133,7 @@ import {
   restoreQueuedMessageToFront,
 } from '@/lib/agent-message-queue'
 import type { AgentQueuedAttachment, AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message-queue'
+import { findLastStableSDKMessageUuid, reconcileSDKMessagesAfterBoundary } from '@/lib/agent-message-reconcile'
 
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
 const EMPTY_SDK_MESSAGES: SDKMessage[] = []
@@ -408,7 +409,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const sessionMetaChannelId = sessionMeta?.channelId
   const sessionMetaModelId = sessionMeta?.modelId
   const hasSessionMeta = Boolean(sessionMeta)
-  const isLegacyTranscript = sessionMeta?.legacyTranscript?.continuationRequired === true
+  const isHermesRemoteSession = sessionMeta?.agentRuntime === 'hermes-remote'
+  const isLegacyTranscript = sessionMeta?.legacyTranscript?.continuationRequired === true && !isHermesRemoteSession
   const agentChannelId = sessionMetaChannelId ?? sessionChannelMap.get(sessionId) ?? defaultChannelId
   const agentModelId = sessionMetaModelId ?? sessionModelMap.get(sessionId) ?? defaultModelId
   const [agentThinking, setAgentThinking] = useAtom(agentThinkingAtom)
@@ -423,6 +425,25 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [sessionMeta, globalWorkspaceId])
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
   const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
+  const pendingHermesTurnsRef = React.useRef(new Map<string, { files: AgentPendingFile[]; userUuid: string }>())
+  React.useEffect(() => window.electronAPI.hermes.onTurnSubmitState((state) => {
+    const pending = pendingHermesTurnsRef.current.get(state.clientMessageId)
+    if (!pending) return
+    pendingHermesTurnsRef.current.delete(state.clientMessageId)
+    if (state.status === 'accepted') return
+    setPendingFiles((current) => [...pending.files, ...current])
+    setPersistedSDKMessages((current) => current.filter((message) => (
+      !('uuid' in message) || message.uuid !== pending.userUuid
+    )))
+    setStreamingStates((current) => {
+      const stateForSession = current.get(sessionId)
+      if (!stateForSession) return current
+      const next = new Map(current)
+      next.set(sessionId, { ...stateForSession, running: false })
+      return next
+    })
+    toast.error('Hermes 发送失败', { description: state.error })
+  }), [sessionId, setPendingFiles, setStreamingStates])
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const setWorkspaces = useSetAtom(agentWorkspacesAtom)
@@ -865,7 +886,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const appendOptimisticPersistedMessage = React.useCallback((message: SDKMessage) => {
     // 切会话时优先命中内存缓存，因此乐观插入的用户消息也要同步写入缓存，
     // 否则“发送后立刻切走再切回”会短暂回退到旧消息数组。
-    const next = [...persistedSDKMessagesRef.current, message]
+    const optimisticMessage = { ...message, _promaOptimistic: true } as SDKMessage
+    const next = [...persistedSDKMessagesRef.current, optimisticMessage]
     persistedSDKMessagesRef.current = next
     setPersistedSDKMessages(next)
     setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, next))
@@ -1081,7 +1103,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     messagesRefreshingRef.current = true
     setMessagesRefreshing(true)
     let cancelled = false
-    window.electronAPI.getAgentSessionSDKMessages(sessionId)
+    const previousMessages = persistedSDKMessagesRef.current
+    const boundaryUuid = isSessionSwitch ? null : findLastStableSDKMessageUuid(previousMessages)
+    const loadMessages = async (): Promise<SDKMessage[]> => {
+      if (boundaryUuid) {
+        const canonicalTail = await window.electronAPI.getAgentSessionSDKMessagesAfter(sessionId, boundaryUuid)
+        if (canonicalTail !== null) {
+          const reconciled = reconcileSDKMessagesAfterBoundary(previousMessages, boundaryUuid, canonicalTail)
+          if (reconciled) return reconciled
+        }
+      }
+      return window.electronAPI.getAgentSessionSDKMessages(sessionId)
+    }
+    void loadMessages()
       .then((sdkMsgs) => {
         if (cancelled) return
         // 写入缓存（含 LRU 淘汰，防止会话数增长导致内存无限膨胀）
@@ -1613,6 +1647,21 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
   }, [addDialogFilesAsAttachments, sessionId, setAttachedDirsMap])
 
+  /** Hermes 只接受文件；目录和超大 path reference 不会进入远端附件事务。 */
+  const handleHermesAttachContent = React.useCallback(async (): Promise<void> => {
+    try {
+      const result = await window.electronAPI.openFileOrFolderDialog()
+      if (result.directories.length > 0) toast.info('Hermes 远端附件暂不支持目录')
+      await addDialogFilesAsAttachments({
+        files: result.files,
+        largeFiles: result.largeFiles,
+        skippedFiles: result.skippedFiles,
+      })
+    } catch (error) {
+      toast.error('读取 Hermes 附件失败', { description: error instanceof Error ? error.message : String(error) })
+    }
+  }, [addDialogFilesAsAttachments])
+
   /** 移除待发送文件 */
   const handleRemoveFile = React.useCallback((id: string): void => {
     setPendingFiles((prev) => {
@@ -2013,7 +2062,11 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     // 如果输入为空但有建议，使用建议内容
     const effectiveText = text || suggestion || ''
     const pendingFilesSnapshot = pendingFilesRef.current
-    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+    if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || (!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel))) return
+    if (isHermesRemoteSession && (streaming || backgroundWaiting)) {
+      toast.info('Hermes 远端任务仍在执行，请先停止或等待完成')
+      return
+    }
     if (isLegacyTranscript) {
       toast.info('这是只读历史会话，请新建 Pi 会话继续')
       return
@@ -2024,7 +2077,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       })
       return
     }
-    const additionalDirectoriesForRun = createBaseAdditionalDirectories()
+    const additionalDirectoriesForRun = isHermesRemoteSession ? new Set<string>() : createBaseAdditionalDirectories()
 
     if (streaming) {
       // Agent 正在输出时，用户消息默认进入 Proma 托管队列，不打断当前 turn。
@@ -2127,22 +2180,38 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return map
     })
 
-    // 1. 如果有 pending 文件，先保存到 session 目录
-    const attachmentContext = pendingFilesSnapshot.length > 0
+    const hermesAttachments = isHermesRemoteSession
+      ? pendingFilesSnapshot.map((file) => ({
+          id: file.id,
+          kind: file.mediaType.startsWith('image/') ? ('image' as const) : ('file' as const),
+          name: file.filename,
+          mimeType: file.mediaType || 'application/octet-stream',
+          base64: window.__pendingAgentFileData?.get(file.id) ?? '',
+        }))
+      : []
+    if (isHermesRemoteSession && hermesAttachments.some((attachment) => !attachment.base64)) {
+      toast.error('Hermes 附件数据已失效', { description: '请移除后通过附件按钮重新选择文件' })
+      return
+    }
+
+    // Pi 文件保存到本地 session；Hermes 文件由 main 在同一远端 turn 原子 attach。
+    const attachmentContext = !isHermesRemoteSession && pendingFilesSnapshot.length > 0
       ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
       : null
-    if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
+    if (!isHermesRemoteSession && pendingFilesSnapshot.length > 0 && !attachmentContext) return
     let fileReferences = attachmentContext?.referenceBlock ?? ''
 
-    // 构建引用选中文本：内联 XML 拼入 prompt，对话框不展示（parseAttachedFiles 剥离）
-    const quotedSelection = consumeQuotedSelection()
+    // Hermes 不注入本地选区/目录/mention 上下文。
+    const quotedSelection = isHermesRemoteSession ? null : consumeQuotedSelection()
     if (quotedSelection) {
       fileReferences = fileReferences + buildQuotedSelectionBlock(quotedSelection)
     }
 
     // 2. 构建最终消息
-    const finalMessage = fileReferences + effectiveText
-    const mentions = parseQueuedMessageMentions(effectiveText)
+    const finalMessage = isHermesRemoteSession ? effectiveText : fileReferences + effectiveText
+    const mentions = isHermesRemoteSession
+      ? { cleanedText: effectiveText, mentionedSkills: [], mentionedMcpServers: [], mentionedSessionIds: [], mentionedTodoIds: [], mentionedCalendarEventIds: [] }
+      : parseQueuedMessageMentions(effectiveText)
     // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径，Agent 可读取）；
     // 气泡展示/持久化使用编码原文（remarkMentions 解码显示），与排队路径 rawText/sdkText 分离语义一致。
     const sdkMessage = fileReferences + mentions.cleanedText
@@ -2180,11 +2249,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return map
     })
 
-    // 乐观更新：SDKMessage 格式的用户消息（Phase 4）
+    // 乐观更新：Hermes 附件用结构化 block，本地 Pi 仍使用文本消息。
+    const clientMessageId = crypto.randomUUID()
+    const optimisticUserUuid = crypto.randomUUID()
     const tempUserSDKMsg: SDKMessage = {
       type: 'user',
+      ...(isHermesRemoteSession ? { uuid: optimisticUserUuid } : {}),
       message: {
-        content: [{ type: 'text', text: finalMessage }],
+        content: [
+          ...(isHermesRemoteSession ? pendingFilesSnapshot.filter((file) => file.mediaType.startsWith('image/') && file.previewUrl).map((file) => ({ type: 'image', dataUrl: file.previewUrl })) : []),
+          ...(isHermesRemoteSession ? pendingFilesSnapshot.filter((file) => !file.mediaType.startsWith('image/')).map((file) => ({ type: 'file', name: file.filename })) : []),
+          { type: 'text', text: finalMessage },
+        ],
       },
       parent_tool_use_id: null,
       _createdAt: Date.now(),
@@ -2195,17 +2271,29 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       sessionId,
       userMessage: sdkMessage,
       rawUserMessage: finalMessage,
-      channelId: agentChannelId,
-      modelId: agentModelId || undefined,
-      workspaceId: currentWorkspaceId || undefined,
+      clientMessageId,
+      agentRuntime: isHermesRemoteSession ? 'hermes-remote' : 'pi',
+      ...(isHermesRemoteSession ? { hermesTurn: { clientMessageId, attachments: hermesAttachments } } : {}),
+      channelId: isHermesRemoteSession ? 'hermes-remote' : agentChannelId!,
+      modelId: isHermesRemoteSession ? undefined : agentModelId || undefined,
+      workspaceId: isHermesRemoteSession ? undefined : currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
-      permissionModeOverride: permissionMode,
+      permissionModeOverride: isHermesRemoteSession ? undefined : permissionMode,
       ...(additionalDirectoriesForRun.size > 0 && { additionalDirectories: Array.from(additionalDirectoriesForRun) }),
       ...(mentions.mentionedSkills.length > 0 && { mentionedSkills: mentions.mentionedSkills }),
       ...(mentions.mentionedMcpServers.length > 0 && { mentionedMcpServers: mentions.mentionedMcpServers }),
       ...(mentions.mentionedSessionIds.length > 0 && { mentionedSessionIds: mentions.mentionedSessionIds }),
       ...(mentions.mentionedTodoIds.length > 0 && { mentionedTodoIds: mentions.mentionedTodoIds }),
       ...(mentions.mentionedCalendarEventIds.length > 0 && { mentionedCalendarEventIds: mentions.mentionedCalendarEventIds }),
+    }
+
+    if (isHermesRemoteSession) {
+      pendingHermesTurnsRef.current.set(clientMessageId, { files: pendingFilesSnapshot, userUuid: optimisticUserUuid })
+      for (const file of pendingFilesSnapshot) {
+        if (file.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(file.previewUrl)
+        window.__pendingAgentFileData?.delete(file.id)
+      }
+      setPendingFiles([])
     }
 
     // 清空输入框（仅当发送的是用户自己输入的内容，而非推荐建议时）
@@ -2218,6 +2306,12 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
     window.electronAPI.sendAgentMessage(input).catch((error) => {
       console.error('[AgentView] 发送消息失败:', error)
+      const pendingHermes = pendingHermesTurnsRef.current.get(clientMessageId)
+      if (pendingHermes) {
+        pendingHermesTurnsRef.current.delete(clientMessageId)
+        setPendingFiles((current) => [...pendingHermes.files, ...current])
+        setPersistedSDKMessages((current) => current.filter((message) => !('uuid' in message) || message.uuid !== pendingHermes.userUuid))
+      }
       setStreamingStates((prev) => {
         const current = prev.get(sessionId)
         if (!current) return prev
@@ -2600,7 +2694,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     (allAskUserRequests.get(sessionId)?.length ?? 0) > 0 ||
     (allExitPlanRequests.get(sessionId)?.length ?? 0) > 0
   const hasBlockingRequests = hasBannerOverlay || (allPermissionRequests.get(sessionId)?.length ?? 0) > 0
-  const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests
+  const canSendQueuedNow = !isHermesRemoteSession && messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests
   const autoSendingQueuedRef = React.useRef(false)
   const queuedSendInFlightRef = React.useRef(false)
   const sendingQueuedMessageIdsRef = React.useRef<Set<string>>(new Set())
@@ -2717,7 +2811,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [togglePreviewPanel])
 
   const hasTextInput = inputContent.trim().length > 0
-  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
+  const canSend = isHermesRemoteSession
+    ? messagesLoaded && !messagesRefreshing && !streaming && (hasTextInput || pendingFiles.length > 0)
+    : messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
 
   const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => [
     ...(isCodexFastModeAvailable ? [{
@@ -2774,13 +2870,13 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               variant="ghost"
               size="icon"
               className={inputToolbarButtonClass}
-              onClick={() => void handleAttachContent()}
-              aria-label="附加文件或文件夹"
+              onClick={() => void (isHermesRemoteSession ? handleHermesAttachContent() : handleAttachContent())}
+              aria-label={isHermesRemoteSession ? '附加文件到 Hermes' : '附加文件或文件夹'}
             >
               <Paperclip className="size-[17px]" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="top"><p>附加文件或文件夹</p></TooltipContent>
+          <TooltipContent side="top"><p>{isHermesRemoteSession ? '附加文件到 Hermes' : '附加文件或文件夹'}</p></TooltipContent>
         </Tooltip>
       ),
     },
@@ -2803,7 +2899,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         />
       ),
     },
-  ], [
+  ].filter((item) => !isHermesRemoteSession || item.key === 'speech' || item.key === 'attach-content'), [
+    isHermesRemoteSession,
     planQuotaChannelId,
     planQuotaChannelUpdatedAt,
     isCodexFastModeAvailable,
@@ -2825,6 +2922,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     contextStatus.isCompacting,
     streaming,
     handleAttachContent,
+    handleHermesAttachContent,
     handleCompact,
     agentVoiceInputId,
   ])
@@ -2873,12 +2971,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const inputTrailingNode = (
     <>
       <div className="flex min-w-0 items-center gap-1 [&_.model-selector-trigger>span]:max-w-[min(12rem,30vw)]">
-        <ModelSelector
-          externalSelectedModel={externalSelectedModel}
-          onModelSelect={handleModelSelect}
-          showChannelInTrigger
-          useSharedOpenState
-        />
+        {isHermesRemoteSession ? (
+          <span className="rounded-md px-2 text-xs font-medium text-primary/80">
+            Hermes · {(sessionMeta?.hermesProtocol ?? 'dashboard') === 'dashboard' ? 'Dashboard' : 'API Server'}
+          </span>
+        ) : (
+          <ModelSelector
+            externalSelectedModel={externalSelectedModel}
+            onModelSelect={handleModelSelect}
+            showChannelInTrigger
+            useSharedOpenState
+          />
+        )}
       </div>
       {sendControl}
     </>
@@ -2908,7 +3012,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         {/* 消息区域 */}
         <AgentMessages
           sessionId={sessionId}
-          sessionModelId={agentModelId || undefined}
+          sessionModelId={isHermesRemoteSession ? undefined : agentModelId || undefined}
           messagesLoaded={messagesLoaded}
           persistedSDKMessages={persistedSDKMessages}
           streaming={streaming}
@@ -2921,21 +3025,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           onRetryInNewSession={handleRetryInNewSession}
           onRelinkProjectRoot={handleRelinkProjectRoot}
           onRestoreProjectRoot={() => setRestoreProjectRootDialogOpen(true)}
-          onFork={isLegacyTranscript ? undefined : handleFork}
-          onRewind={isLegacyTranscript ? undefined : handleRewindRequest}
-          onCreateTodo={handleOpenReplyTodoDialog}
-          onCompact={handleCompact}
+          onFork={isLegacyTranscript || isHermesRemoteSession ? undefined : handleFork}
+          onRewind={isLegacyTranscript || isHermesRemoteSession ? undefined : handleRewindRequest}
+          onCreateTodo={isHermesRemoteSession ? undefined : handleOpenReplyTodoDialog}
+          onCompact={isHermesRemoteSession ? undefined : handleCompact}
         />
 
         {/* 权限请求横幅 */}
-        <PermissionBanner sessionId={sessionId} />
+        {!isHermesRemoteSession && <PermissionBanner sessionId={sessionId} />}
 
-        {/* AskUserQuestion 交互式问答横幅 */}
-        <AskUserBanner sessionId={sessionId} />
-
-
-        {/* ExitPlanMode 计划审批横幅 */}
-        <ExitPlanModeBanner sessionId={sessionId} />
+        {/* Pi-only local interaction banners; Hermes interactions are timeline cards. */}
+        {!isHermesRemoteSession && <AskUserBanner sessionId={sessionId} />}
+        {!isHermesRemoteSession && <ExitPlanModeBanner sessionId={sessionId} />}
 
         {/* 输入区域 — 交互横幅显示时隐藏，由横幅替代 */}
         {!hasBannerOverlay && (
@@ -2961,7 +3062,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             )}
 
             {/* 无 Agent 渠道或无可用模型提示 */}
-            {(!agentChannelId || !hasAvailableModel) && (
+            {!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel) && (
               <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 dark:text-amber-400">
                 <Settings size={14} />
                 <span>{!agentChannelId ? '请在设置中选择 Agent 供应商' : '暂无可用模型，请在设置中启用 Agent 渠道并配置模型'}</span>
@@ -2991,7 +3092,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                       siblingIndex={pendingImageFiles.findIndex((f) => f.id === file.id)}
                     />
                   ))}
-                {currentQuotedSelection && (
+                {!isHermesRemoteSession && currentQuotedSelection && (
                   <QuotedSelectionChip
                     text={currentQuotedSelection.text}
                     filePath={currentQuotedSelection.filePath}
@@ -3002,17 +3103,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               </div>
             )}
 
-            <AgentMessageQueue
+            {!isHermesRemoteSession && <AgentMessageQueue
               items={queuedMessages}
               canSendNow={canSendQueuedNow}
               onSendNow={handleSendQueuedNow}
               onRecall={handleRecallQueuedMessage}
               onRemove={handleRemoveQueuedMessage}
               onMove={handleMoveQueuedMessage}
-            />
+            />}
 
             {/* Agent 建议提示 */}
-            {suggestion && !streaming && (
+            {!isHermesRemoteSession && suggestion && !streaming && (
               <div className="px-3 pt-2.5 pb-1.5">
                 <button
                   type="button"
@@ -3047,25 +3148,27 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               voiceInputId={agentVoiceInputId}
               longTextPasteThreshold={longTextPasteAsAttachmentEnabled ? LONG_TEXT_ATTACHMENT_THRESHOLD : undefined}
               placeholder={
-                agentChannelId && hasAvailableModel
-                  ? sendWithCmdEnter
-                    ? '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；⌘/Ctrl+Enter 发送）'
-                    : '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；Enter 发送）'
-                  : !agentChannelId
-                    ? '请先在设置中选择 Agent 供应商'
-                    : '暂无可用模型，请先在设置中启用渠道'
+                isHermesRemoteSession
+                  ? '输入消息...（发送到远端 Hermes 执行）'
+                  : agentChannelId && hasAvailableModel
+                    ? sendWithCmdEnter
+                      ? '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；⌘/Ctrl+Enter 发送）'
+                      : '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；Enter 发送）'
+                    : !agentChannelId
+                      ? '请先在设置中选择 Agent 供应商'
+                      : '暂无可用模型，请先在设置中启用渠道'
               }
-              disabled={isLegacyTranscript || !agentChannelId || !hasAvailableModel}
+              disabled={isLegacyTranscript || (!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel))}
               autoFocusTrigger={sessionId}
               draftScopeKey={sessionId}
               draftSyncVersion={draftSyncVersion}
               collapsible
-              enableMentions
-              workspacePath={sessionPath}
-              workspaceSlug={workspaceSlug}
+              enableMentions={!isHermesRemoteSession}
+              workspacePath={isHermesRemoteSession ? undefined : sessionPath}
+              workspaceSlug={isHermesRemoteSession ? undefined : workspaceSlug}
               sessionId={sessionId}
-              attachedDirs={workspaceMentionPaths}
-              sessionAttachedDirs={sessionMentionPaths}
+              attachedDirs={isHermesRemoteSession ? [] : workspaceMentionPaths}
+              sessionAttachedDirs={isHermesRemoteSession ? [] : sessionMentionPaths}
               htmlValue={inputHtmlContent}
               onHtmlChange={setInputHtmlContent}
               sendWithCmdEnter={sendWithCmdEnter}

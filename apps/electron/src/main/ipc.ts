@@ -11,6 +11,8 @@ import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
+import { registerHermesIpcHandlers } from './lib/hermes/hermes-ipc-handlers'
+import { hermesIpcService } from './lib/hermes/hermes-ipc-service'
 import type {
   QuickTaskSubmitInput,
   VoiceDictationAudioChunkInput,
@@ -256,7 +258,8 @@ import {
   listAgentSessions,
   createAgentSession,
   getAgentSessionMeta,
-  getAgentSessionSDKMessages,
+  getAgentSessionSDKMessagesAfterForRenderer,
+  getAgentSessionSDKMessagesForRenderer,
   updateAgentSessionMeta,
   deleteAgentSession,
   migrateChatToAgentSession,
@@ -2002,8 +2005,32 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.GET_SDK_MESSAGES,
     async (_, id: string): Promise<SDKMessage[]> => {
-      return getAgentSessionSDKMessages(id)
+      const meta = getAgentSessionMeta(id)
+      if (
+        meta?.agentRuntime === 'hermes-remote'
+        && (meta.hermesProtocol ?? 'dashboard') === 'dashboard'
+        && meta.hermesTargetId
+        && meta.hermesRemoteSessionId
+      ) {
+        return hermesIpcService.getRemoteSessionHistory(
+          id,
+          meta.hermesTargetId,
+          meta.hermesRemoteSessionId,
+          meta.hermesProfile,
+        )
+      }
+      return getAgentSessionSDKMessagesForRenderer(id)
     }
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_SDK_MESSAGES_AFTER,
+    async (_, id: string, afterUuid: string): Promise<SDKMessage[] | null> => {
+      if (typeof id !== 'string' || !id || typeof afterUuid !== 'string' || !afterUuid) return null
+      const meta = getAgentSessionMeta(id)
+      if (meta?.agentRuntime === 'hermes-remote') return null
+      return getAgentSessionSDKMessagesAfterForRenderer(id, afterUuid)
+    },
   )
 
   // 更新 Agent 会话标题
@@ -2295,7 +2322,7 @@ export function registerIpcHandlers(): void {
 
       for (const sessionId of affectedSessionIds) {
         if (isAgentSessionActive(sessionId)) {
-          stopAgent(sessionId)
+          await stopAgent(sessionId)
         }
         deleteAgentSession(sessionId)
       }
@@ -2616,12 +2643,22 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.SEND_MESSAGE,
     async (event, input: AgentSendInput): Promise<void> => {
       const session = getAgentSessionMeta(input.sessionId)
-      if (session) {
+      if (input.hermesTurn) {
+        if (typeof input.hermesTurn.clientMessageId !== 'string' || input.hermesTurn.clientMessageId.length > 128) throw new Error('Hermes clientMessageId 无效')
+        if (!Array.isArray(input.hermesTurn.attachments) || input.hermesTurn.attachments.length > 20) throw new Error('Hermes 附件数量超过限制')
+        for (const attachment of input.hermesTurn.attachments) {
+          if (!attachment || (attachment.kind !== 'image' && attachment.kind !== 'file')) throw new Error('Hermes 附件类型无效')
+          if (typeof attachment.base64 !== 'string' || attachment.base64.length > 36 * 1024 * 1024) throw new Error('Hermes 附件编码超过限制')
+          if (typeof attachment.name !== 'string' || attachment.name.length > 255 || attachment.name.includes('\0')) throw new Error('Hermes 附件名称无效')
+          if (typeof attachment.mimeType !== 'string' || attachment.mimeType.length > 255) throw new Error('Hermes 附件 MIME 无效')
+        }
+      }
+      if (session && session.agentRuntime !== 'hermes-remote') {
         await feishuBridgeManager.startSessionMirrorRun(session).catch((error) => {
           console.error('[飞书 Session 镜像] 流式卡片初始化失败:', error)
         })
       }
-      await runAgent(input, event.sender)
+      await runAgent({ ...input, agentRuntime: session?.agentRuntime ?? input.agentRuntime ?? 'pi' }, event.sender)
     }
   )
 
@@ -2630,7 +2667,7 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.STOP_AGENT,
     async (_, sessionId: string): Promise<void> => {
       feishuBridgeManager.stopSessionMirrorRun(sessionId)
-      stopAgent(sessionId)
+      await stopAgent(sessionId)
     }
   )
 
@@ -5175,4 +5212,7 @@ export function registerIpcHandlers(): void {
       await runAutomationNow(id)
     }
   )
+
+  // Hermes Remote owns a separate IPC namespace and never falls back to Pi.
+  registerHermesIpcHandlers()
 }

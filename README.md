@@ -20,6 +20,7 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 - **Agent 模式**：统一使用 Pi Agent Runtime；支持工作区隔离、权限模式、文件操作、长任务流式输出、计划确认和用户追问。
 - **协作与任务**：复杂任务可拆分为可追踪的协作子 Agent / Task，并在消息流中展示调用过程和结果。
 - **Skills、MCP 与项目根目录**：每个 Proma 项目独立配置 Skills 与 MCP Server。项目文件可使用用户选择的本地项目根目录，也可使用 Proma 托管的空白项目目录；本地项目配置不会被自动导入。
+- **Hermes Remote（实验性，`0.16.38-hermes.1`）**：Proma 可作为远端 Hermes Agent 的桌面客户端；支持显式 Dashboard / API Server 协议、Direct / SSH、远端项目与会话、原子附件提交和真实远端停止。Hermes 与本地 Pi 的 Skills、Memory、MCP、Automation 和数据严格隔离。
 - **远程机器人**：支持飞书 / Lark 机器人桥接，并已提供钉钉、微信桥接入口，用手机或群聊触发本机 Agent 工作流。
 - **记忆与工具**：Chat 和 Agent 可共享记忆能力，并支持联网搜索、内置 Chat 工具、Agent 推荐等辅助能力。
 - **本地优先**：会话、工作区、附件、配置、Skills 等默认存储在 `~/.proma/`，使用 JSON / JSONL 文件组织，不依赖本地数据库。
@@ -60,6 +61,7 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 4. Agent 使用 Pi Runtime，可使用任意已启用的模型渠道。
 5. 进入 **设置 > Agent**，选择默认 Agent 渠道、模型和工作区。
 6. 如需记忆、联网搜索、飞书 / 钉钉 / 微信桥接，在设置页对应 Tab 中继续配置。
+7. 使用 Hermes Remote 时，在 **设置 > Hermes 远程** 分别配置 Dashboard URL 与 API Server URL（或 SSH 远端端口）；会话绑定协议后不会透明切换到另一协议或本地 Agent。
 
 ## 模式选择
 
@@ -124,6 +126,16 @@ Proma 的 Agent 模式统一使用 **Pi Agent Runtime**，由 `@earendil-works/p
 | OpenAI 兼容自定义端点 | 支持 | 支持 |
 | ChatGPT 订阅（Codex OAuth） | — | 支持 |
 | xAI 订阅（Grok OAuth） | — | 支持 |
+
+## Hermes Remote（实验性）
+
+`0.16.38-hermes.1` 基于最新上游 Pi-only 架构移植 Hermes Remote。Proma 本地 Agent 仍统一使用 Pi；Hermes 在主进程 service 边界作为显式 external runtime 分流，不进入 Pi provider、工作区上下文或本地 JSONL 历史。
+
+- Dashboard 与 API Server 是能力不同的显式协议端点，不做透明 fallback。
+- 支持 Direct / SSH Tunnel、target-scoped 凭据与 Cookie partition、SSH host-key 确认和受限 SFTP 浏览。
+- Dashboard 会话支持远端 canonical history、实时流式、approval / clarify / sudo / secret 交互、图片与普通文件附件、远端停止和重启媒体恢复。
+- 远端历史 snapshot 是真源；本地缓存可删除重建，Hermes 不读取或追加本地 Agent JSONL。
+- Windows prerelease 及校验信息见 [`v0.16.38-hermes.1`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.16.38-hermes.1)。
 
 ## 技术栈
 

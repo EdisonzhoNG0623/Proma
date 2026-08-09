@@ -652,6 +652,18 @@ export interface AgentSessionMeta {
   channelId?: string
   /** 使用的模型 ID（自动任务子会话恢复输入框模型选择时使用） */
   modelId?: string
+  /** 本地默认 Pi；Hermes 作为显式 external runtime。 */
+  agentRuntime?: import('./agent-provider').AgentRuntime
+  /** Hermes Remote 目标绑定。 */
+  hermesTargetId?: string
+  /** Hermes 会话协议；历史 Hermes 会话缺省为 dashboard。 */
+  hermesProtocol?: import('./hermes').HermesProtocol
+  /** 远端 profile 名。 */
+  hermesProfile?: string
+  /** Hermes 远端持久会话 ID。 */
+  hermesRemoteSessionId?: string
+  /** Hermes 远端工作目录。 */
+  hermesRemoteCwd?: string
   /** SDK 内部会话 ID（用于 resume 衔接上下文） */
   sdkSessionId?: string
   /** Pi session JSONL 的精确路径；避免仅按 session ID 子串定位 artifact。 */
@@ -1080,6 +1092,12 @@ export interface AgentSendInput {
   userMessage: string
   /** 仅用于持久化/展示的原始用户输入（保留 @file 编码原文，省略时回退到 userMessage） */
   rawUserMessage?: string
+  /** Renderer 生成的消息 ID，用于 Hermes 原子提交与精确回滚。 */
+  clientMessageId?: string
+  /** Hermes Remote 附件事务；Pi runtime 不使用。 */
+  hermesTurn?: import('./hermes').HermesTurnInput
+  /** 显式 runtime；缺省为 Pi。 */
+  agentRuntime?: import('./agent-provider').AgentRuntime
   /** 渠道 ID（用于获取 API Key） */
   channelId: string
   /** 模型 ID */
@@ -1233,15 +1251,13 @@ export interface AgentStreamEvent {
 }
 
 /**
- * Agent 流式完成事件载荷（主进程 → 渲染进程）
- * 包含已持久化的消息列表，避免异步重新加载的竞态窗口。
+ * Agent 流式完成事件载荷（主进程 → 渲染进程）。
+ * 仅包含轻量完成元数据；历史消息由 snapshot/delta IPC 单独读取。
  */
 export interface AgentStreamCompletePayload {
   sessionId: string
   /** 触发来源：用于区分顶层会话与父 Agent 委派的子会话完成 */
   triggeredBy?: AgentSendInput['triggeredBy']
-  /** 已持久化的完整消息列表 */
-  messages?: AgentMessage[]
   /** 是否由用户手动中止 */
   stoppedByUser?: boolean
   /** 本轮流式开始时间戳（用于区分新旧流，防止旧流的 complete 事件重置新流状态） */
@@ -1555,6 +1571,8 @@ export const AGENT_IPC_CHANNELS = {
   CREATE_SESSION: 'agent:create-session',
   /** 获取会话 SDKMessage（Phase 4 新格式） */
   GET_SDK_MESSAGES: 'agent:get-sdk-messages',
+  /** 按稳定 UUID 获取 canonical 尾段；边界失效返回 null。 */
+  GET_SDK_MESSAGES_AFTER: 'agent:get-sdk-messages-after',
   /** 更新会话标题 */
   UPDATE_TITLE: 'agent:update-title',
   /** 更新会话模型选择 */

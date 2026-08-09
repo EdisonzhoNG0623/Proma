@@ -46,6 +46,7 @@ import pkg from '../../../package.json' with { type: 'json' }
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { appendSDKMessages, updateAgentSessionMeta, getAgentSessionMeta, getAgentSessionMessages, removeSDKErrorMessage, rewindPiAgentSession, resolveAgentCwd, getAgentCwdMode, getSessionWorkbenchLayout } from './agent-session-manager'
+import { loadCompletionMessagesIfRequested } from './agent-completion-payload'
 import { getAgentWorkspace, getLocalProjectRootStatus, getProjectFilesPath, getWorkspaceMcpConfig, getWorkspaceAttachedDirectories, getWorkspaceAttachedFiles, getWorkspaceAgentsMdPath, readWorkspaceAgentsMd, getWorkspaceMemoryGuidance, isWorkspaceProjectKnowledgeMaintenanceApproved } from './agent-workspace-manager'
 import { getAgentWorkspacePath, getAgentSessionWorkspacePath, getSdkConfigDir, getWorkspaceSkillsDir } from './config-paths'
 import { getRuntimeStatus } from './runtime-init'
@@ -85,8 +86,10 @@ import { claimWorkspaceMemoryRefreshOpportunity } from './agent-memory-refresh-s
 export interface SessionCallbacks {
   /** 发送流式错误 */
   onError: (error: string) => void
-  /** 发送流式完成（携带已持久化的消息列表） */
+  /** 发送流式完成；桌面 UI 默认不读取完整历史。 */
   onComplete: (messages?: AgentMessage[], opts?: { stoppedByUser?: boolean; startedAt?: number; resultSubtype?: string; resultErrors?: string[]; backgroundTasksPending?: boolean }) => void
+  /** 仅 headless/collaboration 等明确需要结果摘要的调用方启用。 */
+  includeMessagesOnComplete?: boolean
   /** 发送标题更新 */
   onTitleUpdated: (title: string) => void
   /** 用户消息已持久化，外部入口可据此通知前端切到实时会话 */
@@ -795,21 +798,22 @@ export class AgentOrchestrator {
         this.queuedMessageUuids.delete(sessionId)
       }
     }
+    const getCompletionMessages = (): AgentMessage[] | undefined => (
+      loadCompletionMessagesIfRequested(callbacks.includeMessagesOnComplete, () => getAgentSessionMessages(sessionId))
+    )
     const completeRun = (
-      messages?: AgentMessage[],
       opts?: { stoppedByUser?: boolean; startedAt?: number; resultSubtype?: string; resultErrors?: string[] },
     ): void => {
       releaseActiveRun()
-      callbacks.onComplete(messages, opts)
+      callbacks.onComplete(getCompletionMessages(), opts)
     }
     const failRun = (
       error: string,
-      messages?: AgentMessage[],
       opts?: { stoppedByUser?: boolean; startedAt?: number; resultSubtype?: string; resultErrors?: string[] },
     ): void => {
       releaseActiveRun()
       callbacks.onError(error)
-      callbacks.onComplete(messages, opts)
+      callbacks.onComplete(getCompletionMessages(), opts)
     }
 
     // 3. 构建 Pi runtime 环境（代理与 Windows shell 配置）。
@@ -1614,7 +1618,7 @@ export class AgentOrchestrator {
                 // 透传归一化后的错误消息到前端，避免 SDK 原始 API Error 直接暴露给用户。
                 this.eventBus.emit(sessionId, { kind: 'sdk_message', message: errorSDKMsg })
                 try { updateAgentSessionMeta(sessionId, {}) } catch { /* 忽略 */ }
-                completeRun(getAgentSessionMessages(sessionId), { startedAt: streamStartedAt })
+                completeRun({ startedAt: streamStartedAt })
                 return
               }
             }
@@ -1744,7 +1748,7 @@ export class AgentOrchestrator {
 
           if (!wasStoppedByUser && visibleRunMessageCount === 0) {
             const errorContent = this.persistEmptyResponseError(sessionId, capturedResultSubtype, capturedResultErrors)
-            failRun(errorContent, getAgentSessionMessages(sessionId), {
+            failRun(errorContent, {
               startedAt: streamStartedAt,
               resultSubtype: EMPTY_RESPONSE_RESULT_SUBTYPE,
               resultErrors: [errorContent],
@@ -1762,7 +1766,7 @@ export class AgentOrchestrator {
           }
 
           // 发送完成信号
-          completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
+          completeRun({ stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
 
           return
 
@@ -1771,7 +1775,7 @@ export class AgentOrchestrator {
             const wasStoppedByUser = this.consumeStoppedByUser(sessionId, runGeneration)
             this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
             try { updateAgentSessionMeta(sessionId, { stoppedByUser: wasStoppedByUser }) } catch { /* 会话可能已删除 */ }
-            completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
+            completeRun({ stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt })
             return
           }
 
@@ -1892,7 +1896,7 @@ export class AgentOrchestrator {
             console.error('[Agent 编排] 保存错误消息失败:', saveError)
           }
 
-          failRun(userFacingError, getAgentSessionMessages(sessionId), { startedAt: streamStartedAt })
+          failRun(userFacingError, { startedAt: streamStartedAt })
 
           // 保留 Pi session ID，确保网络或上游临时失败后的下一轮可继续 resume。
           if (existingSdkSessionId) {
@@ -1915,7 +1919,7 @@ export class AgentOrchestrator {
         _errorTitle: '会话恢复失败',
       } as unknown as SDKMessage
       appendSDKMessages(sessionId, [recoveryError])
-      failRun(recoveryFailure, getAgentSessionMessages(sessionId), { startedAt: streamStartedAt })
+      failRun(recoveryFailure, { startedAt: streamStartedAt })
 
     } finally {
       // 只在 generation 匹配时才清理，防止旧流的 finally 误删新流的注册

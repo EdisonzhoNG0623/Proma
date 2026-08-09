@@ -24,7 +24,7 @@ export function buildLiveGroupSet({
   const result = new Set<MessageGroup>()
 
   for (const group of allGroups) {
-    if (group.type === 'user' || group.type === 'system') {
+    if (group.type === 'user' || group.type === 'system' || group.type === 'hermes-interaction') {
       if (liveSet.has(group.message as SDKMessage)) {
         result.add(group)
       }

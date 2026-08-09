@@ -113,7 +113,8 @@ test('Given a fresh planning database When planning data changes Then isolation,
 
     const result = spawnSync(electronBinary, [outputPath], {
       cwd: repoRoot,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', HOME: home, PROMA_DEV: '1' },
+      // Node's os.homedir() reads USERPROFILE on Windows and HOME on Unix.
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', HOME: home, USERPROFILE: home, PROMA_DEV: '1' },
       encoding: 'utf8',
     })
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)

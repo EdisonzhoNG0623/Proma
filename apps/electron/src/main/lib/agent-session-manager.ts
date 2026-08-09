@@ -61,8 +61,9 @@ interface AgentSessionsIndex {
   openAIThinkingDefaultEnabledMigrationCompleted?: boolean
 }
 
-/** 当前索引版本：v2 将 Claude runtime 退役为 Pi-only。 */
-const INDEX_VERSION = 2
+/** v2 将 Claude runtime 退役；v3 保留/恢复 Hermes external session identity。 */
+const RETIRED_CLAUDE_INDEX_VERSION = 2
+const INDEX_VERSION = 3
 
 /**
  * 会话引用最大返回数。
@@ -170,10 +171,36 @@ function migrateLegacyOpenAIThinkingDefault(index: AgentSessionsIndex): boolean 
  */
 function migrateRetiredClaudeRuntime(index: AgentSessionsIndex): boolean {
   let changed = false
-  const treatMissingRuntimeAsLegacy = index.version < INDEX_VERSION
+  const treatMissingRuntimeAsLegacy = index.version < RETIRED_CLAUDE_INDEX_VERSION
   for (const session of index.sessions) {
-    const raw = session as AgentSessionMeta & { agentRuntime?: unknown }
+    const raw = session as AgentSessionMeta & { agentRuntime?: unknown; hermesTargetId?: unknown }
     const runtime = raw.agentRuntime
+
+    // Hermes is an explicit external runtime, not a retired Claude transcript. Also recover
+    // records briefly read by upstream v2, where agentRuntime was removed but binding survived.
+    if (runtime === 'hermes-remote' || typeof raw.hermesTargetId === 'string') {
+      if (raw.agentRuntime !== 'hermes-remote') {
+        raw.agentRuntime = 'hermes-remote'
+        changed = true
+      }
+      if (session.legacyTranscript?.sourceRuntime === 'claude') {
+        delete session.legacyTranscript
+        changed = true
+      }
+      if (session.sdkSessionId !== undefined) {
+        session.sdkSessionId = undefined
+        changed = true
+      }
+      if (session.piSessionFile !== undefined) {
+        session.piSessionFile = undefined
+        changed = true
+      }
+      if (session.piEntryBindings !== undefined) {
+        session.piEntryBindings = undefined
+        changed = true
+      }
+      continue
+    }
 
     // Pi records written by the previous dual-runtime version keep their artifact.
     if (runtime === 'pi') {
@@ -429,14 +456,39 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
  * 截断超大 SDKMessage 的内容，保留元数据结构。
  * 处理三类膨胀源：超长 text block、超大 tool_result、内嵌 base64 图片。
  */
-function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKMessage {
+function sanitizeOversizedMessage(
+  msg: SDKMessage,
+  originalLength: number,
+  truncationThreshold = MAX_SDK_MESSAGE_LENGTH / 2,
+): SDKMessage {
   const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
-  const truncationThreshold = MAX_SDK_MESSAGE_LENGTH / 2
+  const IMAGE_DATA_MAX = 150 * 1024
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const clone: any = JSON.parse(JSON.stringify(msg))
   const content = clone.message?.content
+  const stripHugeImageData = (node: unknown, depth: number): void => {
+    if (!node || typeof node !== 'object' || depth > 6) return
+    if (Array.isArray(node)) {
+      for (const item of node) stripHugeImageData(item, depth + 1)
+      return
+    }
+    const record = node as Record<string, unknown>
+    for (const key of ['data', 'dataUrl', 'url', 'image_url']) {
+      const value = record[key]
+      if (typeof value === 'string' && value.length > IMAGE_DATA_MAX
+        && /^(data:image\/|[A-Za-z0-9+/=]{200,})/.test(value.slice(0, 400))) {
+        record[key] = undefined
+        record._truncated = true
+        record._originalLength = value.length
+      }
+    }
+    for (const value of Object.values(record)) {
+      if (value && typeof value === 'object') stripHugeImageData(value, depth + 1)
+    }
+  }
   if (Array.isArray(content)) {
+    stripHugeImageData(content, 0)
     for (let i = 0; i < content.length; i++) {
       const block = content[i]
       if (!block || typeof block !== 'object') continue
@@ -496,6 +548,28 @@ export function getAgentSessionSDKMessages(id: string): SDKMessage[] {
   }
 }
 
+const MAX_RENDERER_SDK_MESSAGE_LENGTH = 64 * 1024
+
+/** 只裁剪 IPC 展示副本；磁盘 JSONL 和 Pi resume 真源保持不变。 */
+export function sanitizeSDKMessageForRenderer(message: SDKMessage): SDKMessage {
+  const serializedLength = JSON.stringify(message).length
+  if (serializedLength <= MAX_RENDERER_SDK_MESSAGE_LENGTH) return message
+  return sanitizeOversizedMessage(message, serializedLength, MAX_RENDERER_SDK_MESSAGE_LENGTH)
+}
+
+export function getAgentSessionSDKMessagesForRenderer(id: string): SDKMessage[] {
+  return getAgentSessionSDKMessages(id).map(sanitizeSDKMessageForRenderer)
+}
+
+// getStoredMessageUuid is shared with fork/rewind helpers below.
+
+export function getAgentSessionSDKMessagesAfterForRenderer(id: string, afterUuid: string): SDKMessage[] | null {
+  const messages = getAgentSessionSDKMessages(id)
+  const boundaryIndex = messages.findLastIndex((message) => getStoredMessageUuid(message) === afterUuid)
+  if (boundaryIndex < 0) return null
+  return messages.slice(boundaryIndex + 1).map(sanitizeSDKMessageForRenderer)
+}
+
 /**
  * convertLegacyMessage 已迁移至 @proma/session-core（本文件从该包 import 使用）。
  */
@@ -505,7 +579,7 @@ export function getAgentSessionSDKMessages(id: string): SDKMessage[] {
  */
 export function updateAgentSessionMeta(
   id: string,
-  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'codexFastMode' | 'reasoningLevel' | 'openAIThinkingLevel' | 'workspaceId' | 'pinned' | 'starred' | 'archived' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'stoppedByUser' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal'>>,
+  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'codexFastMode' | 'reasoningLevel' | 'openAIThinkingLevel' | 'workspaceId' | 'pinned' | 'starred' | 'archived' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'stoppedByUser' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'agentRuntime' | 'hermesTargetId' | 'hermesProtocol' | 'hermesProfile' | 'hermesRemoteSessionId' | 'hermesRemoteCwd'>>,
 ): AgentSessionMeta {
   const index = readIndex()
   const idx = index.sessions.findIndex((s) => s.id === id)

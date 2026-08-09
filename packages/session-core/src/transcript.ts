@@ -125,6 +125,19 @@ export function toTranscript(groups: MessageGroup[]): TranscriptTurn[] {
         tokens: estimateTokens(preview),
       }
     }
+    if (group.type === 'hermes-interaction') {
+      const message = group.message as unknown as { message?: string; question?: string; _createdAt?: number }
+      const text = message.message ?? message.question ?? 'Hermes 远端交互请求'
+      return {
+        index,
+        role: 'assistant' as const,
+        createdAt: message._createdAt,
+        text,
+        toolSummaries: [],
+        preview: text,
+        tokens: estimateTokens(text),
+      }
+    }
     const { text, toolSummaries } = buildAssistantContent(group.assistantMessages)
     return {
       index,

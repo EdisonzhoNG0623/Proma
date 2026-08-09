@@ -15,7 +15,7 @@ import { accessSync, constants, existsSync, mkdirSync, writeFileSync } from 'nod
 import { BrowserWindow } from 'electron'
 import type { WebContents } from 'electron'
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
-import { AGENT_IPC_CHANNELS, MAX_ATTACHMENT_SIZE } from '@proma/shared'
+import { AGENT_IPC_CHANNELS, HERMES_IPC_CHANNELS, MAX_ATTACHMENT_SIZE } from '@proma/shared'
 import type {
   AgentSendInput,
   AgentGenerateTitleInput,
@@ -30,6 +30,13 @@ import type {
   AgentMessage,
 } from '@proma/shared'
 import { PiAgentAdapter } from './adapters/pi-agent-adapter'
+import { HermesRuntimeFacade } from './hermes/hermes-runtime-facade'
+import { hermesTargetStore } from './hermes/hermes-target-store'
+import { hermesCredentialStore } from './hermes/hermes-credential-store'
+import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes/hermes-connection'
+import { hermesCredentialBroker } from './hermes/hermes-credential-broker'
+import { hermesDashboardConnectionBroker } from './hermes/hermes-dashboard-connection-broker'
+import { materializeHermesAttachment, type HermesMaterializedAttachment } from './hermes/hermes-attachment-cache'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentOrchestrator } from './agent-orchestrator'
 import { getAgentSessionWorkspacePath } from './config-paths'
@@ -42,8 +49,72 @@ import { sendAgentStreamComplete } from './agent-completion-payload'
 // ===== 实例创建 =====
 
 const eventBus = new AgentEventBus()
+
+/** Hermes stays outside the Pi-only orchestrator and shares only EventBus/IPC projection. */
+const hermesFacade = new HermesRuntimeFacade({
+  getTarget: (targetId) => hermesTargetStore.getTarget(targetId),
+  getCredential: (ref) => (ref ? hermesCredentialStore.getCredential(ref) : null),
+  getTargetCredential: (targetId, slot) => hermesCredentialBroker.getSecret(targetId, slot),
+  dashboardBroker: hermesDashboardConnectionBroker,
+  saveCredential: (ref, secret) => {
+    try { hermesCredentialStore.setCredential('dashboard-cookie', secret, ref) } catch { /* login can retry */ }
+  },
+  readDashboardPassword: (ref) => {
+    const secret = ref ? hermesCredentialStore.getCredential(ref) : null
+    return secret ? parseDashboardPasswordSecret(secret) : null
+  },
+  getBinding: (sessionId) => {
+    const meta = getAgentSessionMeta(sessionId)
+    if (meta?.agentRuntime !== 'hermes-remote' || !meta.hermesTargetId) return null
+    return {
+      targetId: meta.hermesTargetId,
+      protocol: meta.hermesProtocol ?? 'dashboard',
+      profile: meta.hermesProfile,
+      remoteSessionId: meta.hermesRemoteSessionId,
+      remoteCwd: meta.hermesRemoteCwd,
+      title: meta.title,
+    }
+  },
+  persistRemoteSessionId: (sessionId, remoteSessionId, expected) => {
+    try {
+      const current = getAgentSessionMeta(sessionId)
+      if (!current || current.agentRuntime !== 'hermes-remote' || current.hermesTargetId !== expected.targetId) return false
+      if ((current.hermesProtocol ?? 'dashboard') !== (expected.protocol ?? 'dashboard')) return false
+      if ((current.hermesProfile ?? '') !== (expected.profile ?? '')) return false
+      updateAgentSessionMeta(sessionId, { hermesRemoteSessionId: remoteSessionId })
+      return true
+    } catch {
+      return false
+    }
+  },
+  buildTransport: async (target, protocol = 'dashboard') => buildHermesTransport(target, protocol),
+  ensureRemoteCwd: async () => false,
+})
+
 const adapter = new PiAgentAdapter()
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
+
+export function fetchHermesMedia(targetId: string, mediaPath: string): Promise<{ dataUrl?: string } | null> {
+  return hermesFacade.fetchMedia(targetId, mediaPath)
+}
+
+export async function fetchHermesAttachment(sessionId: string, fileRef: string): Promise<HermesMaterializedAttachment | null> {
+  const remote = await hermesFacade.fetchAttachment(sessionId, fileRef)
+  return remote ? materializeHermesAttachment(remote) : null
+}
+
+export function respondHermesInteraction(input: {
+  sessionId: string
+  type: 'approval' | 'clarify' | 'sudo' | 'secret'
+  requestId?: string
+  choice?: 'allow' | 'deny'
+  all?: boolean
+  answer?: string
+  password?: string
+  value?: string
+}): Promise<void> {
+  return hermesFacade.respondInteraction(input)
+}
 
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
 export { eventBus as agentEventBus }
@@ -151,6 +222,51 @@ export interface AgentRunExtensions {
   piCustomTools?: ToolDefinition[]
 }
 
+async function runHermesAgent(input: AgentSendInput, webContents: WebContents): Promise<void> {
+  const startedAt = input.startedAt ?? Date.now()
+  try {
+    for await (const message of hermesFacade.query({
+      agentRuntime: 'hermes-remote',
+      sessionId: input.sessionId,
+      prompt: input.userMessage,
+      hermesTurn: input.hermesTurn,
+      onHermesTurnSubmitState: (state) => {
+        if (!webContents.isDestroyed()) webContents.send(HERMES_IPC_CHANNELS.TURN_SUBMIT_STATE, state)
+      },
+    })) {
+      eventBus.emit(input.sessionId, { kind: 'sdk_message', message })
+    }
+    try {
+      updateAgentSessionMeta(input.sessionId, {
+        completedButUnconfirmed: true,
+        stoppedByUser: false,
+      })
+    } catch { /* wrapper session may be closing */ }
+    if (!webContents.isDestroyed()) {
+      sendAgentStreamComplete(webContents, input, {
+        stoppedByUser: false,
+        startedAt,
+        resultSubtype: 'success',
+        session: getSessionMetaForRenderer(input.sessionId),
+      })
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (!webContents.isDestroyed()) {
+      webContents.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: input.sessionId, error: message })
+      sendAgentStreamComplete(webContents, input, {
+        stoppedByUser: false,
+        startedAt,
+        resultSubtype: 'error',
+        resultErrors: [message],
+        session: getSessionMetaForRenderer(input.sessionId),
+      })
+    }
+  } finally {
+    if (!hermesFacade.isActive(input.sessionId)) sessionWebContents.delete(input.sessionId)
+  }
+}
+
 /**
  * 运行 Agent 并流式推送事件到渲染进程
  *
@@ -181,6 +297,12 @@ export async function runAgent(
       }
     } catch { /* 新会话可能尚未写入索引 */ }
   }
+  const sessionMeta = getAgentSessionMeta(input.sessionId)
+  if (input.agentRuntime === 'hermes-remote' || sessionMeta?.agentRuntime === 'hermes-remote') {
+    await runHermesAgent({ ...input, agentRuntime: 'hermes-remote' }, webContents)
+    return
+  }
+
   try {
     await orchestrator.sendMessage(input, {
       onError: (error) => {
@@ -195,7 +317,6 @@ export async function runAgent(
         publishRunStopped(input.sessionId, opts?.stoppedByUser, opts?.startedAt)
         if (!webContents.isDestroyed()) {
           sendAgentStreamComplete(webContents, input, {
-            messages,
             stoppedByUser: opts?.stoppedByUser ?? false,
             startedAt: opts?.startedAt,
             resultSubtype: opts?.resultSubtype,
@@ -234,7 +355,6 @@ export async function runAgent(
         error: errorMessage,
       })
       sendAgentStreamComplete(webContents, input, {
-        messages: [],
         stoppedByUser: false,
       })
     }
@@ -278,6 +398,7 @@ export async function runAgentHeadless(
 
   try {
     await orchestrator.sendMessage(runInput, {
+      includeMessagesOnComplete: true,
       onError: (error) => {
         callbacks.onError(error)
         // 同步到渲染进程
@@ -294,7 +415,6 @@ export async function runAgentHeadless(
         // 同步到渲染进程
         if (wc && !wc.isDestroyed()) {
           sendAgentStreamComplete(wc, runInput, {
-            messages,
             stoppedByUser: opts?.stoppedByUser ?? false,
             startedAt: opts?.startedAt,
             resultSubtype: opts?.resultSubtype,
@@ -344,7 +464,6 @@ export async function runAgentHeadless(
     if (wc && !wc.isDestroyed()) {
       wc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: runInput.sessionId, error: errorMessage })
       sendAgentStreamComplete(wc, runInput, {
-        messages: [],
         stoppedByUser: false,
         startedAt,
       })
@@ -366,7 +485,15 @@ export async function generateAgentTitle(input: AgentGenerateTitleInput): Promis
 /**
  * 中止指定会话的 Agent 执行
  */
-export function stopAgent(sessionId: string): void {
+export async function stopAgent(sessionId: string): Promise<void> {
+  if (hermesFacade.isActive(sessionId)) {
+    try {
+      await hermesFacade.interruptQuery(sessionId)
+    } finally {
+      hermesFacade.abort(sessionId)
+    }
+    return
+  }
   orchestrator.stop(sessionId)
 }
 
@@ -387,16 +514,19 @@ export async function rewindAgentSession(
  * 检查指定会话是否正在运行
  */
 export function isAgentSessionActive(sessionId: string): boolean {
-  return orchestrator.isActive(sessionId)
+  return hermesFacade.isActive(sessionId) || orchestrator.isActive(sessionId)
 }
 
 /** 是否存在任意运行中 Agent，供更新器等全局生命周期服务安全判断。 */
 export function hasActiveAgentSessions(): boolean {
-  return orchestrator.hasActiveSessions()
+  return hermesFacade.hasActiveTurns() || orchestrator.hasActiveSessions()
 }
 
 /** 中止所有活跃的 Agent 会话（应用退出时调用） */
 export function stopAllAgents(): void {
+  for (const sessionId of hermesFacade.activeSessionIds()) {
+    void hermesFacade.interruptQuery(sessionId).finally(() => hermesFacade.abort(sessionId))
+  }
   orchestrator.stopAll()
 }
 

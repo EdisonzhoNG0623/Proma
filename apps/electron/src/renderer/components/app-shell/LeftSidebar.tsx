@@ -77,6 +77,7 @@ import {
   sessionViewStateMapAtom,
 } from '@/atoms/tab-atoms'
 import { userProfileAtom } from '@/atoms/user-profile'
+import { HermesSidebarProjects } from './HermesSidebarProjects'
 import { sidebarViewModeAtom } from '@/atoms/sidebar-atoms'
 import { searchDialogOpenAtom } from '@/atoms/search-atoms'
 import { hasUpdateAtom, updateStatusAtom, type UpdateStatus } from '@/atoms/updater'
@@ -2855,7 +2856,8 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
           </div>
         </div>
       ) : mode === 'agent' && viewMode === 'active' ? (
-        <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin titlebar-no-drag">
+        <div className="flex min-h-0 flex-1 flex-col titlebar-no-drag">
+          <div data-agent-project-scroll className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
           {pinnedAgentSessions.length > 0 && (
             <div className="pt-2 pb-1 flex-shrink-0 titlebar-no-drag">
               <div className="pl-[18px] pr-3.5 pb-1 text-[13px] font-medium leading-[18px] text-foreground/40 select-none">
@@ -3035,6 +3037,8 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               })}
             </div>
           </div>
+          </div>
+          <HermesSidebarProjects />
         </div>
       ) : (
         <>

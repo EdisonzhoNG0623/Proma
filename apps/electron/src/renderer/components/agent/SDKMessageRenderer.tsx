@@ -17,8 +17,11 @@ import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { ImageLightbox, type LightboxImage } from '@/components/ui/image-lightbox'
 import { ContentBlock } from './ContentBlock'
+import { HermesMediaBlock } from './HermesMediaBlock'
 import { TurnFileChangesSummary, buildTurnFileNameMap } from './TurnFileChangesSummary'
 import { ProcessBlockGroup, buildAssistantTurnRenderItems, buildCompletedToolResultIds } from './ProcessBlockGroup'
+import { extractHermesFiles, stripHermesAttachmentDirectives } from '@/lib/hermes-media-extract'
+
 import { extractToolResultText, TASK_TOOL_NAMES } from './task-progress'
 import { normalizeThinkTagsInContentBlocks } from './thinking-tag-parser'
 // 会话转录的纯逻辑(Turn 分组 / 快照去重 / 预览)已下沉到 @proma/session-core 作为唯一真源。
@@ -50,6 +53,7 @@ import { UserAvatar } from '@/components/chat/UserAvatar'
 import { CopyButton } from '@/components/chat/CopyButton'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
@@ -459,8 +463,15 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
     }
   }
 
+  // 展示层剥离 Hermes @image/@file 指令；原始块仍用于下方媒体提取。
+  const displayTopLevelBlocks = topLevelBlocks.flatMap((block) => {
+    if (block.type !== 'text' || !('text' in block)) return [block]
+    const text = stripHermesAttachmentDirectives((block as { text: string }).text)
+    return text ? [{ ...block, text } as SDKContentBlock] : []
+  })
+
   // 检测是否有主要内容（text 块），用于决定 tool/thinking 是否 dimmed
-  const hasTextContent = topLevelBlocks.some(
+  const hasTextContent = displayTopLevelBlocks.some(
     (b) => b.type === 'text' && 'text' in b && !!(b as { text: string }).text
   )
 
@@ -468,11 +479,11 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
     return buildCompletedToolResultIds(turn.turnMessages)
   }, [turn.turnMessages])
   const renderItems = React.useMemo(() => {
-    return buildAssistantTurnRenderItems(topLevelBlocks, {
+    return buildAssistantTurnRenderItems(displayTopLevelBlocks, {
       isStreaming,
       completedToolResultIds,
     })
-  }, [topLevelBlocks, isStreaming, completedToolResultIds])
+  }, [displayTopLevelBlocks, isStreaming, completedToolResultIds])
 
   // 本轮「文件名 → 绝对路径」映射：与 footer chips 同源，供正文内联文件引用补全裸文件名
   const turnFileMap = React.useMemo(
@@ -557,6 +568,17 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
             )
           })}
         </div>
+        {/* Hermes 会话：消息文本里的图片（MEDIA: / data URL / 远端路径）直接渲染 */}
+        {(() => {
+          const hermesTurnText = topLevelBlocks
+            .filter((b) => b.type === 'text' && 'text' in b)
+            .map((b) => (b as { text: string }).text)
+            .join('\n\n')
+          const hermesSessionId = turn.assistantMessages[0]?.session_id
+          return hermesTurnText
+            ? <HermesMediaBlock text={hermesTurnText} sessionId={hermesSessionId} />
+            : null
+        })()}
         {/* 如果有错误但也有内容块，在末尾以 tail 形式挂错误横幅附错误提示 + 重试按钮，保留正文本身的 markdown 排版 */}
         {hasError && errorContent && topLevelBlocks.length > 0 && (
           <AssistantErrorTail
@@ -727,7 +749,178 @@ export function SDKMessageRenderer({
     return null
   }
 
+  // Hermes 交互请求（approval/clarify/sudo/secret）：渲染确认/输入卡片，回复走 hermes.respondInteraction
+  if (
+    msgType === 'hermes_approval_request' ||
+    msgType === 'hermes_clarify_request' ||
+    msgType === 'hermes_sudo_request' ||
+    msgType === 'hermes_secret_request'
+  ) {
+    return <HermesInteractionCard message={message as HermesInteractionMessage} />
+  }
+
   return null
+}
+
+// ===== Hermes 交互卡片 =====
+
+/** Hermes 交互请求消息（mapper 透传） */
+interface HermesInteractionMessage {
+  type: string
+  requestId?: string
+  message?: string
+  session_id?: string
+  tool_name?: string
+  tool_input?: unknown
+  question?: string
+  choices?: string[]
+  multiSelect?: boolean
+  error?: { message: string }
+}
+
+function HermesInteractionCard({ message }: { message: HermesInteractionMessage }): React.ReactElement {
+  const [responding, setResponding] = React.useState(false)
+  const [done, setDone] = React.useState(false)
+  const [expired, setExpired] = React.useState(false)
+  const [text, setText] = React.useState('')
+  const [selectedChoices, setSelectedChoices] = React.useState<string[]>([])
+  const [error, setError] = React.useState<string | null>(null)
+
+  const hasChoices = Array.isArray(message.choices) && message.choices.length > 0
+
+  const kind = message.type === 'hermes_approval_request' ? 'approval'
+    : message.type === 'hermes_clarify_request' ? 'clarify'
+      : message.type === 'hermes_sudo_request' ? 'sudo'
+        : 'secret'
+  const label = kind === 'approval' ? '远端请求批准' : kind === 'clarify' ? '远端提问' : kind === 'sudo' ? '远端请求 sudo 密码' : '远端请求密钥'
+  const description = message.message || message.question || '请确认后继续'
+
+  const respond = async (payload: { type: 'approval' | 'clarify' | 'sudo' | 'secret'; choice?: 'allow' | 'deny'; all?: boolean; answer?: string; password?: string; value?: string }): Promise<void> => {
+    setResponding(true)
+    setError(null)
+    try {
+      await window.electronAPI.hermes.respondInteraction({
+        sessionId: message.session_id ?? '',
+        requestId: message.requestId,
+        ...payload,
+      })
+      setDone(true)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // Hermes 只接受活跃 turn 中的响应；历史卡片（上一轮请求）已过期
+      if (/no pending|not found|expired|already|无.*请求/i.test(msg)) {
+        setExpired(true)
+        setError('该请求已过期或已处理（Hermes 只接受当前对话中的响应）')
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setResponding(false)
+    }
+  }
+
+  return (
+    <Message from="assistant">
+      <MessageContent>
+        <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-[11px]">{label}</Badge>
+            {message.tool_name && <span className="text-xs text-muted-foreground">工具：{message.tool_name}</span>}
+          </div>
+          <div className="mt-1.5 text-sm">{description}</div>
+          {message.tool_input !== undefined && (
+            <pre className="mt-1.5 max-h-32 overflow-auto rounded bg-background/60 p-2 text-xs text-muted-foreground">
+              {String(JSON.stringify(message.tool_input, null, 2))}
+            </pre>
+          )}
+          {done ? (
+            <div className="mt-2 text-xs text-muted-foreground">✓ 已响应</div>
+          ) : expired ? (
+            <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">⏰ 该请求已过期或已处理（Hermes 只接受当前对话中的响应）</div>
+          ) : kind === 'approval' ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button size="sm" disabled={responding} onClick={() => void respond({ type: 'approval', choice: 'allow' })}>
+                {responding ? '响应中...' : '批准'}
+              </Button>
+              <Button size="sm" variant="outline" disabled={responding} onClick={() => void respond({ type: 'approval', choice: 'deny' })}>
+                拒绝
+              </Button>
+              <Button size="sm" variant="ghost" disabled={responding} title="批准本会话所有待批请求（Hermes 端 all 语义）" onClick={() => void respond({ type: 'approval', choice: 'allow', all: true })}>
+                本会话全部批准
+              </Button>
+            </div>
+          ) : hasChoices ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {message.choices!.map((choice) => {
+                const selected = selectedChoices.includes(choice)
+                return (
+                  <Button
+                    key={choice}
+                    size="sm"
+                    variant={selected ? 'default' : 'outline'}
+                    disabled={responding}
+                    onClick={() => {
+                      if (message.multiSelect) {
+                        setSelectedChoices((prev) => (
+                          prev.includes(choice) ? prev.filter((c) => c !== choice) : [...prev, choice]
+                        ))
+                      } else {
+                        void respond({ type: 'clarify', answer: choice })
+                      }
+                    }}
+                  >
+                    {choice}
+                  </Button>
+                )
+              })}
+              {message.multiSelect && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={responding || selectedChoices.length === 0}
+                  onClick={() => void respond({ type: 'clarify', answer: selectedChoices.join('; ') })}
+                >
+                  {responding ? '提交中...' : '提交选择'}
+                </Button>
+              )}
+              {!message.multiSelect && (
+                <span className="self-center text-[11px] text-muted-foreground/60">或输入自定义回答：</span>
+              )}
+            </div>
+          ) : (
+            <div className="mt-2 flex gap-2">
+              <Input
+                type={kind === 'secret' ? 'password' : 'text'}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder={kind === 'clarify' ? '输入回答...' : kind === 'sudo' ? '输入 sudo 密码' : '输入密钥'}
+                className="h-8 text-sm"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && text.trim()) {
+                    void respond({
+                      type: kind as 'clarify' | 'sudo' | 'secret',
+                      ...(kind === 'clarify' ? { answer: text } : {}),
+                      ...(kind === 'sudo' ? { password: text } : {}),
+                      ...(kind === 'secret' ? { value: text } : {}),
+                    })
+                  }
+                }}
+              />
+              <Button size="sm" disabled={responding || !text.trim()} onClick={() => void respond({
+                type: kind as 'clarify' | 'sudo' | 'secret',
+                ...(kind === 'clarify' ? { answer: text } : {}),
+                ...(kind === 'sudo' ? { password: text } : {}),
+                ...(kind === 'secret' ? { value: text } : {}),
+              })}>
+                {responding ? '提交中...' : '提交'}
+              </Button>
+            </div>
+          )}
+          {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
+        </div>
+      </MessageContent>
+    </Message>
+  )
 }
 
 // ===== 附件解析 =====
@@ -863,6 +1056,94 @@ function AttachedFileChip({ file }: { file: AttachedFileRef }): React.ReactEleme
   )
 }
 
+/** Hermes 历史 @file 附件：点击后从远端真源拉取到本地派生缓存，再复用 Proma 预览器。 */
+function HermesRemoteFileChip({ file, sessionId, openable }: {
+  file: { name: string; remotePath: string }
+  sessionId?: string
+  openable: boolean
+}): React.ReactElement {
+  const openPreview = useOpenPreview()
+  const [loading, setLoading] = React.useState(false)
+  const [failed, setFailed] = React.useState(false)
+
+  const materialize = React.useCallback(async (): Promise<string | null> => {
+    if (!sessionId || !openable || loading) return null
+    setLoading(true)
+    setFailed(false)
+    try {
+      const result = await window.electronAPI.hermes.fetchAttachment(sessionId, file.remotePath)
+      if (!result) {
+        setFailed(true)
+        return null
+      }
+      return result.localPath
+    } catch {
+      setFailed(true)
+      return null
+    } finally {
+      setLoading(false)
+    }
+  }, [file.remotePath, loading, openable, sessionId])
+
+  const handlePreview = React.useCallback(async (): Promise<void> => {
+    if (!sessionId) return
+    const localPath = await materialize()
+    if (!localPath) return
+    const parentPath = getFileParentPath(localPath)
+    openPreview(sessionId, {
+      filePath: localPath,
+      previewOnly: true,
+      readOnly: true,
+      basePaths: parentPath ? [parentPath] : undefined,
+    })
+  }, [materialize, openPreview, sessionId])
+
+  const handleSystemOpen = React.useCallback(async (): Promise<void> => {
+    if (!sessionId || !openable || loading) return
+    setLoading(true)
+    setFailed(false)
+    try {
+      const opened = await window.electronAPI.hermes.openAttachment(sessionId, file.remotePath)
+      if (!opened) setFailed(true)
+    } catch {
+      setFailed(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [file.remotePath, loading, openable, sessionId])
+
+  const disabled = !openable || !sessionId || loading
+  return (
+    <div className={cn('inline-flex overflow-hidden rounded-md bg-muted/60 text-[12px] text-muted-foreground', failed && 'text-destructive')}>
+      <button
+        type="button"
+        onClick={() => { void handlePreview() }}
+        disabled={disabled}
+        className={cn(
+          'inline-flex items-center gap-1.5 px-2.5 py-1',
+          !disabled ? 'cursor-pointer transition-colors hover:bg-muted hover:text-foreground' : 'cursor-default',
+        )}
+        title={failed ? '无法从远端打开附件' : openable ? `在 Proma 中预览 ${file.remotePath}` : file.name}
+      >
+        {loading ? <Loader2 className="size-3.5 shrink-0 animate-spin" /> : <FileText className="size-3.5 shrink-0" />}
+        <span className="truncate max-w-[220px]">{file.name}</span>
+      </button>
+      {openable && sessionId && (
+        <button
+          type="button"
+          onClick={() => { void handleSystemOpen() }}
+          disabled={loading}
+          className="inline-flex items-center border-l border-border/60 px-2 transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait"
+          title="使用本地默认程序打开"
+          aria-label={`使用本地程序打开 ${file.name}`}
+        >
+          <ExternalLink className="size-3.5" />
+        </button>
+      )}
+    </div>
+  )
+}
+
 /** 引用文件 Chip（显示在用户消息中，表示该消息引用了某个文件的选中内容） */
 function QuoteChip({ quote }: { quote: QuotedFileRef }): React.ReactElement {
   const label = quote.label ?? quote.filename
@@ -921,12 +1202,24 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
   const userProfile = useAtomValue(userProfileAtom)
   const rawText = extractUserText(message) ?? ''
   const isScheduledRun = rawText.includes(SCHEDULED_RUN_MARKER)
-  const { files: attachedFiles, quotes, text } = parseAttachedFiles(stripScheduledRunMarker(rawText))
+  const hermesRemoteFiles = extractHermesFiles(rawText).map((file) => ({ ...file, openable: true }))
+  const cleanDirectiveText = stripHermesAttachmentDirectives(stripScheduledRunMarker(rawText))
+  const { files: attachedFiles, quotes, text } = parseAttachedFiles(cleanDirectiveText)
   const imageFiles = attachedFiles.filter((f) => isImageFile(f.filename))
   const activeSessionId = useAtomValue(activeSessionIdAtom)
   const setSessionPendingFiles = useSetAtom(agentSessionPendingFilesAtom)
   const nonImageFiles = attachedFiles.filter((f) => !isImageFile(f.filename))
+  const inlineHermesFiles = Array.isArray(message.message?.content)
+    ? (message.message.content as Array<{ type?: string; name?: string }>).flatMap((block) => (
+        block.type === 'file' && block.name ? [{ name: block.name, remotePath: block.name, openable: false }] : []
+      ))
+    : []
+  const hermesFiles = [...hermesRemoteFiles, ...inlineHermesFiles].filter((file, index, all) => (
+    all.findIndex((candidate) => candidate.remotePath === file.remotePath) === index
+  ))
+  const messageSessionId = (message as unknown as { session_id?: string }).session_id ?? activeSessionId ?? undefined
   const meta = extractMeta(message as unknown as SDKMessage)
+  // Hermes user media is rendered from stable content blocks/directives without debug side effects.
 
   const handleImageEditComplete = React.useCallback((editedDataUrl: string): void => {
     const base64 = editedDataUrl.split(',')[1]
@@ -1004,6 +1297,33 @@ function UserInputMessage({ message }: { message: SDKUserMessage }): React.React
           <div className="flex flex-wrap gap-1.5 mb-2">
             {quotes.map((q, i) => (
               <QuoteChip key={`${q.path}:${i}`} quote={q} />
+            ))}
+          </div>
+        )}
+        {/* Hermes 附件图片（content 里的 image block，data URL 直接显示） */}
+        {Array.isArray(message.message?.content) && (message.message!.content as Array<{ type?: string; dataUrl?: string }>).some((b) => b.type === 'image') && (
+          <div className="flex flex-wrap gap-2.5 mb-2">
+            {(message.message!.content as Array<{ type?: string; dataUrl?: string }>).filter((b) => b.type === 'image').map((block, i) => (
+              <img key={i} src={block.dataUrl} alt="图片" className="h-24 w-24 rounded-md border border-border object-cover" />
+            ))}
+          </div>
+        )}
+        {/* Hermes user 消息：@image:<path> 指令 → 远端图片渲染 */}
+        {(() => {
+          const raw = extractUserText(message) ?? ''
+          const sessionId = (message as unknown as { session_id?: string }).session_id
+          return raw ? <HermesMediaBlock text={raw} sessionId={sessionId} /> : null
+        })()}
+        {/* Hermes 文件附件：乐观消息来自 file block；重启后来自远端 @file 指令。 */}
+        {hermesFiles.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {hermesFiles.map((file) => (
+              <HermesRemoteFileChip
+                key={file.remotePath}
+                file={file}
+                sessionId={messageSessionId}
+                openable={file.openable}
+              />
             ))}
           </div>
         )}
@@ -1408,7 +1728,12 @@ export function getGroupId(group: MessageGroup): string {
     }
     return messageIdCache.get(group.identityMessage)!
   }
-  // assistant-turn：取首条 assistant 消息的 uuid
+  // assistant-turn：取首条 assistant 消息的 uuid（hermes-interaction 用消息 uuid）
+  if (group.type === 'hermes-interaction') {
+    const raw = group.message as unknown as { uuid?: string }
+    if (raw.uuid) return raw.uuid
+    return `hermes-interaction-${fallbackIdCounter++}`
+  }
   const first = group.assistantMessages[0]
   if (first?.uuid) return first.uuid
   const stableKey = first ? (first as unknown as Record<string, unknown>)._promaStableKey : undefined
@@ -1442,6 +1767,14 @@ export function MessageGroupRenderer({ group, allMessages, basePath, onFork, onR
     if (getSDKCompactStatus(group.message)) return <div data-message-id={groupId}><CompactStatusNotice message={group.message} /></div>
     if (subtype === 'permission_denied') return <div data-message-id={groupId}><PermissionDeniedNotice message={group.message} /></div>
     return null
+  }
+
+  if (group.type === 'hermes-interaction') {
+    return (
+      <div data-message-id={groupId} data-message-role="assistant">
+        <HermesInteractionCard message={group.message as HermesInteractionMessage} />
+      </div>
+    )
   }
 
   // assistant-turn

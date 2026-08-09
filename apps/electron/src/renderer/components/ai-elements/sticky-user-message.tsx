@@ -68,7 +68,9 @@ export function StickyUserMessage({ userMessages }: StickyUserMessageProps): Rea
       return
     }
 
+    let frameId: number | null = null
     const check = () => {
+      frameId = null
       const containerRect = el.getBoundingClientRect()
       const nodes = el.querySelectorAll<HTMLElement>('[data-message-role="user"]')
 
@@ -86,13 +88,17 @@ export function StickyUserMessage({ userMessages }: StickyUserMessageProps): Rea
           break
         }
       }
-      setStickyMessage(found)
+      setStickyMessage((previous) => previous === found ? previous : found)
+    }
+    const scheduleCheck = () => {
+      if (frameId !== null) return
+      frameId = requestAnimationFrame(check)
     }
 
-    el.addEventListener('scroll', check, { passive: true })
+    el.addEventListener('scroll', scheduleCheck, { passive: true })
 
-    // 监听容器尺寸变化
-    const resizeObserver = new ResizeObserver(check)
+    // 监听容器尺寸变化；同一帧内的连续 resize 只做一次 DOM 几何扫描。
+    const resizeObserver = new ResizeObserver(scheduleCheck)
     resizeObserver.observe(el)
 
     // 监听内容区域 DOM 变化（流式输出、消息加载后及时检测）
@@ -102,12 +108,12 @@ export function StickyUserMessage({ userMessages }: StickyUserMessageProps): Rea
     }
 
     // 延迟一帧执行初始检查，确保 DOM 已完成渲染
-    const rafId = requestAnimationFrame(check)
+    scheduleCheck()
 
     return () => {
-      el.removeEventListener('scroll', check)
+      el.removeEventListener('scroll', scheduleCheck)
       resizeObserver.disconnect()
-      cancelAnimationFrame(rafId)
+      if (frameId !== null) cancelAnimationFrame(frameId)
     }
   }, [scrollRef, userMessages, messageMap, stickyEnabled])
 

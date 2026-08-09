@@ -66,6 +66,21 @@ export function getChannelsPath(): string {
   return join(getConfigDir(), 'channels.json')
 }
 
+/** Hermes Remote 目标配置文件路径。 */
+export function getHermesTargetsPath(): string {
+  return join(getConfigDir(), 'hermes-targets.json')
+}
+
+/** Hermes Remote 凭据配置文件路径。 */
+export function getHermesCredentialsPath(): string {
+  return join(getConfigDir(), 'hermes-credentials.json')
+}
+
+/** Hermes Remote 独立 known-host trust store。 */
+export function getHermesKnownHostsPath(): string {
+  return join(getConfigDir(), 'hermes-known-hosts.json')
+}
+
 /**
  * 获取对话索引文件路径
  *
