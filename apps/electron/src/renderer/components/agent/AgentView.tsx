@@ -20,6 +20,7 @@ import { toast } from 'sonner'
 import { CornerDownLeft, Square, Settings, X, Copy, Check, Brain, Sparkles, ListTodo, Paperclip } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
+import { AgentRuntimeSelector } from './AgentRuntimeSelector'
 import { AgentMessageQueue } from './AgentMessageQueue'
 import { ContextUsageBadge } from './ContextUsageBadge'
 import { PermissionBanner } from './PermissionBanner'
@@ -107,7 +108,8 @@ import {
   finalizeStreamingActivities,
 } from '@/atoms/agent-atoms'
 import type { AgentContextStatus } from '@/atoms/agent-atoms'
-import { settingsOpenAtom } from '@/atoms/settings-tab'
+import { activeHermesTargetIdAtom, hermesTargetsAtom } from '@/atoms/hermes-atoms'
+import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { todoPlanningGroupsAtom } from '@/atoms/planning-atoms'
@@ -116,7 +118,7 @@ import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
-import type { AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, ModelOption, ReasoningCapability, SDKMessage, SDKUserMessage } from '@proma/shared'
+import type { AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, HermesPublicTarget, ModelOption, ReasoningCapability, SDKMessage, SDKUserMessage } from '@proma/shared'
 import { inferContextWindow, inferReasoningTransport, isCodexFastModeSupportedModel, MAX_ATTACHMENT_SIZE, normalizeReasoningCapabilityLevel, normalizeReasoningLevel, resolveReasoningCapability, resolveReasoningProfile } from '@proma/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
 import { getFilePanelDragData, INSERT_FILE_MENTION_EVENT, type FilePanelDragItem } from '@/lib/file-panel-drag'
@@ -134,6 +136,7 @@ import {
 } from '@/lib/agent-message-queue'
 import type { AgentQueuedAttachment, AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message-queue'
 import { findLastStableSDKMessageUuid, reconcileSDKMessagesAfterBoundary } from '@/lib/agent-message-reconcile'
+import { isCurrentHermesTarget, resolveHermesSwitchProtocol } from '@/lib/agent-runtime-switch'
 
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
 const EMPTY_SDK_MESSAGES: SDKMessage[] = []
@@ -415,7 +418,10 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const agentModelId = sessionMetaModelId ?? sessionModelMap.get(sessionId) ?? defaultModelId
   const [agentThinking, setAgentThinking] = useAtom(agentThinkingAtom)
   const agentEffort = useAtomValue(agentEffortAtom)
+  const hermesTargets = useAtomValue(hermesTargetsAtom)
+  const [activeHermesTargetId, setActiveHermesTargetId] = useAtom(activeHermesTargetIdAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
+  const setSettingsTab = useSetAtom(settingsTabAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const globalWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   // 从会话元数据派生 workspaceId：会话数据已加载时以自身为准，未加载时回退全局 atom
@@ -449,6 +455,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const setWorkspaces = useSetAtom(agentWorkspacesAtom)
   const [restoreProjectRootDialogOpen, setRestoreProjectRootDialogOpen] = React.useState(false)
   const [restoringProjectRoot, setRestoringProjectRoot] = React.useState(false)
+  const [runtimeSwitching, setRuntimeSwitching] = React.useState(false)
   // 保持 channelId 稳定：初始化前使用上次有效值，避免工具栏抖动
   const stableChannelIdRef = React.useRef(agentChannelId)
   if (agentChannelId) stableChannelIdRef.current = agentChannelId
@@ -1997,6 +2004,72 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
   }, [sessionId, streaming, backgroundWaiting, setSessionChannelMap, setSessionModelMap, setDefaultChannelId, setDefaultModelId, setAgentSessions])
 
+  const focusAgentInput = React.useCallback((): void => {
+    requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus())
+  }, [])
+
+  /**
+   * Runtime 切换始终新建独立会话，绝不改写当前会话的 runtime 身份。
+   * 这样 Pi JSONL 与 Hermes canonical snapshot 不会在同一个 session 中交叉读取。
+   */
+  const handleSelectPiRuntime = React.useCallback(async (): Promise<void> => {
+    if (!isHermesRemoteSession) {
+      focusAgentInput()
+      return
+    }
+    if (runtimeSwitching) return
+
+    setRuntimeSwitching(true)
+    try {
+      const created = await window.electronAPI.createAgentSession(
+        undefined,
+        defaultChannelId || undefined,
+        currentWorkspaceId || undefined,
+        defaultModelId || undefined,
+      )
+      setAgentSessions(await window.electronAPI.listAgentSessions())
+      openSession('agent', created.id, created.title, { bypassSettingsGuard: true })
+      toast.success('已切换到 Pi 本地', { description: '已新建独立的本地 Agent 会话' })
+    } catch (error) {
+      console.error('[AgentView] 切换到 Pi 本地失败:', error)
+      toast.error('切换到 Pi 本地失败', { description: getErrorMessage(error) })
+    } finally {
+      setRuntimeSwitching(false)
+    }
+  }, [currentWorkspaceId, defaultChannelId, defaultModelId, focusAgentInput, isHermesRemoteSession, openSession, runtimeSwitching, setAgentSessions])
+
+  const handleSelectHermesRuntime = React.useCallback(async (target: HermesPublicTarget): Promise<void> => {
+    setActiveHermesTargetId(target.id)
+    if (isCurrentHermesTarget(isHermesRemoteSession ? 'hermes-remote' : 'pi', sessionMeta?.hermesTargetId, target.id)) {
+      focusAgentInput()
+      return
+    }
+    if (runtimeSwitching) return
+
+    setRuntimeSwitching(true)
+    try {
+      const created = await window.electronAPI.hermes.createRemoteSession({
+        targetId: target.id,
+        protocol: resolveHermesSwitchProtocol(target),
+        title: `Hermes · ${target.name}`,
+        workspaceId: currentWorkspaceId || undefined,
+      })
+      setAgentSessions(await window.electronAPI.listAgentSessions())
+      openSession('agent', created.id, created.title, { bypassSettingsGuard: true })
+      toast.success(`已切换到 Hermes · ${target.name}`, { description: '已新建独立的远端 Agent 会话' })
+    } catch (error) {
+      console.error('[AgentView] 切换到 Hermes Remote 失败:', error)
+      toast.error('切换到 Hermes Remote 失败', { description: getErrorMessage(error) })
+    } finally {
+      setRuntimeSwitching(false)
+    }
+  }, [currentWorkspaceId, focusAgentInput, isHermesRemoteSession, openSession, runtimeSwitching, sessionMeta?.hermesTargetId, setActiveHermesTargetId, setAgentSessions])
+
+  const handleManageHermes = React.useCallback((): void => {
+    setSettingsTab('hermes')
+    setSettingsOpen(true)
+  }, [setSettingsOpen, setSettingsTab])
+
   const handleCodexFastModeChange = React.useCallback(async (): Promise<void> => {
     if (!isCodexFastModeAvailable || streaming || backgroundWaiting || !sessionMeta) return
 
@@ -2971,11 +3044,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const inputTrailingNode = (
     <>
       <div className="flex min-w-0 items-center gap-1 [&_.model-selector-trigger>span]:max-w-[min(18rem,42vw)]">
-        {isHermesRemoteSession ? (
-          <span className="rounded-md px-2 text-xs font-medium text-primary/80">
-            Hermes · {(sessionMeta?.hermesProtocol ?? 'dashboard') === 'dashboard' ? 'Dashboard' : 'API Server'}
-          </span>
-        ) : (
+        <AgentRuntimeSelector
+          runtime={isHermesRemoteSession ? 'hermes-remote' : 'pi'}
+          currentTargetId={sessionMeta?.hermesTargetId}
+          targets={hermesTargets}
+          activeTargetId={activeHermesTargetId}
+          switching={runtimeSwitching}
+          onSelectPi={() => { void handleSelectPiRuntime() }}
+          onSelectHermes={(target) => { void handleSelectHermesRuntime(target) }}
+          onManageHermes={handleManageHermes}
+        />
+        {!isHermesRemoteSession && (
           <ModelSelector
             externalSelectedModel={externalSelectedModel}
             onModelSelect={handleModelSelect}
