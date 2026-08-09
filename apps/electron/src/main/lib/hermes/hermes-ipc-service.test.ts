@@ -30,7 +30,10 @@ import { HermesCookieSessionManager } from './hermes-cookie-session'
 import { HermesEndpointManager } from './hermes-endpoint-manager'
 import { HermesDashboardConnectionBroker } from './hermes-dashboard-connection-broker'
 import { HermesDashboardWsClient } from './hermes-dashboard-ws-client'
+import { HermesSshConnectionBroker } from './hermes-ssh-connection-broker'
+import type { HermesSshConnection } from './transport/hermes-ssh-connection'
 import type { HermesTransport } from './transport/hermes-transport'
+import type { SFTPWrapper } from 'ssh2'
 
 let dir: string
 let targetStore: HermesTargetStore
@@ -80,6 +83,40 @@ describe('HermesIpcService target CRUD', () => {
     const updated = await service.updateTarget(created.id, { name: 'b' })
     expect(updated.id).toBe(created.id)
     expect(updated.name).toBe('b')
+  })
+})
+
+describe('HermesIpcService 远端项目根目录', () => {
+  test('Given Proma 创建远端项目 When 执行 Then 固定使用 /opt/ai/projects', async () => {
+    const realpaths: string[] = []
+    const createdPaths: string[] = []
+    const sftp = {
+      realpath: (remotePath: string, callback: (error: Error | undefined, resolved: string) => void) => {
+        realpaths.push(remotePath)
+        callback(undefined, remotePath)
+      },
+      mkdir: (remotePath: string, callback: (error?: Error) => void) => {
+        createdPaths.push(remotePath)
+        callback()
+      },
+      end: () => undefined,
+    } as unknown as SFTPWrapper
+    const connection = {
+      openSftp: async () => sftp,
+      close: async () => undefined,
+    } as unknown as HermesSshConnection
+    const sshBroker = new HermesSshConnectionBroker({ connect: async () => connection })
+    const isolated = new HermesIpcService({ targetStore, credentialStore, sshBroker })
+    const target = targetStore.createTarget({
+      name: 'remote-root',
+      mode: 'ssh-tunnel',
+      ssh: { host: 'remote.example.com', port: 22, username: 'ai' },
+    })
+
+    expect(await isolated.createRemoteProject(target.id, 'next-project')).toBe('/opt/ai/projects/next-project')
+    expect(realpaths).toEqual(['/opt/ai/projects', '/opt/ai/projects/next-project'])
+    expect(createdPaths).toEqual(['/opt/ai/projects/next-project'])
+    await sshBroker.disposeAll()
   })
 })
 

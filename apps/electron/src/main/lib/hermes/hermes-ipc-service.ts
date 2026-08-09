@@ -10,6 +10,7 @@
  * - 删除 target 时同步清理关联凭据引用。
  */
 
+import { HERMES_REMOTE_PROJECTS_ROOT } from '@proma/shared'
 import type {
   HermesCapabilities,
   HermesConnectionTestResult,
@@ -410,10 +411,10 @@ export class HermesIpcService {
 
   /** 远端项目根目录约定 */
   private remoteProjectsRoot(_target: HermesTarget): string {
-    return '~/proma-projects'
+    return HERMES_REMOTE_PROJECTS_ROOT
   }
 
-  /** 创建远端项目（在远端建目录 ~/proma-projects/<name>） */
+  /** 创建远端项目（在远端建目录 /opt/ai/projects/<name>） */
   async createRemoteProject(targetId: string, name: string): Promise<string> {
     const target = this.targetStore.getTarget(targetId)
     if (!target) {

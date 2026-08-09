@@ -132,7 +132,7 @@ export function registerHermesIpcHandlers(): void {
     return await hermesIpcService.listRemoteSessions(requireString(targetId, 'targetId'), limit ?? 100)
   })
 
-  // 创建远端项目（SFTP mkdir ~/proma-projects/<name>）
+  // 创建远端项目（SFTP mkdir /opt/ai/projects/<name>）
   ipcMain.handle(HERMES_IPC_CHANNELS.CREATE_REMOTE_PROJECT, async (_, targetId: string, name: string) => {
     return await hermesIpcService.createRemoteProject(requireString(targetId, 'targetId'), requireString(name, 'name'))
   })

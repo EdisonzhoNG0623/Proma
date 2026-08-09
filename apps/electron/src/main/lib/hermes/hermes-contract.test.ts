@@ -130,7 +130,7 @@ describe('Dashboard end-to-end contract', () => {
 
   test('no hidden mkdir/bootstrap prompt before user turn', async () => {
     const targetId = setupTarget()
-    bindings.set('s3', { targetId, protocol: 'dashboard', remoteCwd: '~/proma-projects/demo', title: 'demo' })
+    bindings.set('s3', { targetId, protocol: 'dashboard', remoteCwd: '/opt/ai/projects/demo', title: 'demo' })
     const before = server.wsRequests.length
     const ctx = createFacade()
     await collect(ctx.facade.query({ sessionId: 's3', prompt: '用户消息', agentRuntime: 'hermes-remote' }))

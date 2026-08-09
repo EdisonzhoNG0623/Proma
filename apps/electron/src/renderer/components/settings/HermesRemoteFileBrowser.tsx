@@ -2,7 +2,7 @@
  * HermesRemoteFileBrowser - 远端项目文件浏览器
  *
  * 以 SFTP 直连远端 Hermes，浏览/查看远端项目文件（项目数据在远端，Proma 是前端）。
- * 支持：新建远端项目（~/proma-projects/<name>）、目录浏览、文件内容查看。
+ * 支持：新建远端项目（/opt/ai/projects/<name>）、目录浏览、文件内容查看。
  */
 
 import * as React from 'react'
@@ -16,9 +16,10 @@ import { appModeAtom } from '@/atoms/app-mode'
 import { activeViewAtom } from '@/atoms/active-view'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { useOpenSession } from '@/hooks/useOpenSession'
+import { HERMES_REMOTE_PROJECTS_ROOT } from '@proma/shared'
 import type { HermesTarget, HermesRemoteFileEntry } from '@proma/shared'
 
-const REMOTE_ROOT = '~/proma-projects'
+const REMOTE_ROOT = HERMES_REMOTE_PROJECTS_ROOT
 
 /** 远端文件浏览器 */
 export function HermesRemoteFileBrowser({ target }: { target: HermesTarget }): React.ReactElement {
@@ -133,7 +134,7 @@ export function HermesRemoteFileBrowser({ target }: { target: HermesTarget }): R
         <Input
           value={newProjectName}
           onChange={(e) => setNewProjectName(e.target.value)}
-          placeholder="新建远端项目名称（在 ~/proma-projects 下）"
+          placeholder="新建远端项目名称（在 /opt/ai/projects 下）"
           onKeyDown={(e) => {
             if (e.key === 'Enter') void handleCreateProject()
           }}
@@ -162,7 +163,7 @@ export function HermesRemoteFileBrowser({ target }: { target: HermesTarget }): R
             <div className="px-4 py-4 text-sm text-muted-foreground">加载中...</div>
           ) : entries.length === 0 ? (
             <div className="px-4 py-4 text-sm text-muted-foreground">
-              目录为空。可用「新建远端项目」创建，或确认远端 ~/proma-projects 存在且 SSH 账号有权限。
+              目录为空。可用「新建远端项目」创建，或确认远端 /opt/ai/projects 存在且 SSH 账号有权限。
             </div>
           ) : (
             entries.map((entry) => (
