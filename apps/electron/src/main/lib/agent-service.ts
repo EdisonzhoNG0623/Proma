@@ -31,6 +31,9 @@ import type {
 } from '@proma/shared'
 import { PiAgentAdapter } from './adapters/pi-agent-adapter'
 import { HermesRuntimeFacade } from './hermes/hermes-runtime-facade'
+import { RemoteHostRuntimeFacade } from './remote-host/remote-host-runtime-facade'
+
+const remoteHostFacade = new RemoteHostRuntimeFacade()
 import { hermesTargetStore } from './hermes/hermes-target-store'
 import { hermesCredentialStore } from './hermes/hermes-credential-store'
 import { buildHermesTransport, parseDashboardPasswordSecret } from './hermes/hermes-connection'
@@ -267,6 +270,63 @@ async function runHermesAgent(input: AgentSendInput, webContents: WebContents): 
   }
 }
 
+/** Remote Host external runtime——独立的 IPC 与 session 命名空间，不进入 Pi orchestrator。 */
+async function runRemoteHostAgent(input: AgentSendInput, webContents: WebContents): Promise<void> {
+  const startedAt = input.startedAt ?? Date.now()
+  const sessionMeta = getAgentSessionMeta(input.sessionId)
+  const targetId = sessionMeta?.remoteHostTargetId
+  const hostSessionId = sessionMeta?.remoteHostSessionId
+  if (!targetId || !hostSessionId) {
+    if (!webContents.isDestroyed()) {
+      webContents.send(AGENT_IPC_CHANNELS.STREAM_ERROR, {
+        sessionId: input.sessionId,
+        error: 'Remote Host 会话绑定不完整',
+      })
+    }
+    return
+  }
+  try {
+    for await (const message of remoteHostFacade.query({
+      sessionId: input.sessionId,
+      prompt: input.userMessage,
+      targetId,
+      hostSessionId,
+      clientTurnId: input.clientMessageId ?? `${Date.now()}`,
+    })) {
+      eventBus.emit(input.sessionId, { kind: 'sdk_message', message })
+    }
+    try {
+      updateAgentSessionMeta(input.sessionId, {
+        completedButUnconfirmed: true,
+        stoppedByUser: false,
+      })
+    } catch { /* wrapper session may be closing */ }
+    if (!webContents.isDestroyed()) {
+      sendAgentStreamComplete(webContents, input, {
+        stoppedByUser: false,
+        startedAt,
+        resultSubtype: 'success',
+        session: getSessionMetaForRenderer(input.sessionId),
+      })
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[Remote Host] runRemoteHostAgent 错误:', message)
+    if (!webContents.isDestroyed()) {
+      webContents.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: input.sessionId, error: message })
+      sendAgentStreamComplete(webContents, input, {
+        stoppedByUser: false,
+        startedAt,
+        resultSubtype: 'error',
+        resultErrors: [message],
+        session: getSessionMetaForRenderer(input.sessionId),
+      })
+    }
+  } finally {
+    if (!remoteHostFacade.isActive(input.sessionId)) sessionWebContents.delete(input.sessionId)
+  }
+}
+
 /**
  * 运行 Agent 并流式推送事件到渲染进程
  *
@@ -300,6 +360,11 @@ export async function runAgent(
   const sessionMeta = getAgentSessionMeta(input.sessionId)
   if (input.agentRuntime === 'hermes-remote' || sessionMeta?.agentRuntime === 'hermes-remote') {
     await runHermesAgent({ ...input, agentRuntime: 'hermes-remote' }, webContents)
+    return
+  }
+
+  if (input.agentRuntime === 'remote-host' || sessionMeta?.agentRuntime === 'remote-host') {
+    await runRemoteHostAgent({ ...input, agentRuntime: 'remote-host' }, webContents)
     return
   }
 
