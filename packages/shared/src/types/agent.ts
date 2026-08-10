@@ -675,6 +675,16 @@ export interface AgentSessionMeta {
     sourceRuntime: 'claude'
     continuationRequired: true
   }
+  /** Remote Host 目标绑定。 */
+  remoteHostTargetId?: string
+  /** Remote Host 远端 runtime kind。 */
+  remoteRuntimeKind?: import('./remote-host').RemoteRuntimeKind
+  /** Remote Host 远端 adapter mode。 */
+  remoteAdapterMode?: import('./remote-host').RemoteAdapterMode
+  /** Remote Host 远端项目 ID。 */
+  remoteProjectId?: string
+  /** Remote Host 远端会话 ID。 */
+  remoteHostSessionId?: string
   /** ChatGPT Codex Fast Mode 开关；仅 Pi + ChatGPT OAuth 的受支持模型实际生效。 */
   codexFastMode?: boolean
   /** 本会话的推理深度；未设置时兼容旧版全局思考设置。 */
@@ -1096,6 +1106,8 @@ export interface AgentSendInput {
   clientMessageId?: string
   /** Hermes Remote 附件事务；Pi runtime 不使用。 */
   hermesTurn?: import('./hermes').HermesTurnInput
+  /** Remote Host 附件事务。 */
+  remoteHostTurn?: { clientTurnId: string; attachments: import('./remote-host').RemoteTurnAttachment[] }
   /** 显式 runtime；缺省为 Pi。 */
   agentRuntime?: import('./agent-provider').AgentRuntime
   /** 渠道 ID（用于获取 API Key） */

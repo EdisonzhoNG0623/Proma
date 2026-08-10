@@ -31,6 +31,9 @@ export * from './agent-provider'
 // Hermes Remote external runtime
 export * from './hermes'
 
+// Proma Remote Host external runtime
+export * from './remote-host'
+
 // 环境检测相关类型
 export * from './environment'
 

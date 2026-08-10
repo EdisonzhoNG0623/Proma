@@ -9,7 +9,7 @@ import type { SDKMessage } from './agent'
 
 /** Upstream local runtime remains Pi-only; Hermes is an explicit external runtime. */
 export type LocalAgentRuntime = 'pi'
-export type AgentRuntime = LocalAgentRuntime | 'hermes-remote'
+export type AgentRuntime = LocalAgentRuntime | 'hermes-remote' | 'remote-host'
 
 /** SDK 用户消息（队列消息注入用，匹配 SDK SDKUserMessage 结构） */
 export interface SDKUserMessageInput {

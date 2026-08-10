@@ -81,6 +81,21 @@ export function getHermesKnownHostsPath(): string {
   return join(getConfigDir(), 'hermes-known-hosts.json')
 }
 
+/** Remote Host 目标配置文件路径。 */
+export function getRemoteHostTargetsPath(): string {
+  return join(getConfigDir(), 'remote-host-targets.json')
+}
+
+/** Remote Host 凭据配置文件路径。 */
+export function getRemoteHostCredentialsPath(): string {
+  return join(getConfigDir(), 'remote-host-credentials.json')
+}
+
+/** Remote Host 独立 known-host trust store。 */
+export function getRemoteHostKnownHostsPath(): string {
+  return join(getConfigDir(), 'remote-host-known-hosts.json')
+}
+
 /**
  * 获取对话索引文件路径
  *

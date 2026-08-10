@@ -6,7 +6,7 @@
  */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, HERMES_IPC_CHANNELS } from '@proma/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, HERMES_IPC_CHANNELS, REMOTE_HOST_IPC_CHANNELS } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import type {
   RuntimeStatus,
@@ -1258,6 +1258,38 @@ export interface ElectronAPI {
     fetchAttachment: (sessionId: string, fileRef: string) => Promise<{ localPath: string; name: string; mimeType: string; size: number } | null>
     openAttachment: (sessionId: string, fileRef: string) => Promise<boolean>
     onTurnSubmitState: (callback: (state: import('@proma/shared').HermesTurnSubmitState) => void) => () => void
+  }
+
+  /** Remote Host：Renderer 只接触脱敏 target 与 session-scoped 操作。 */
+  remoteHost: {
+    listTargets: () => Promise<import('@proma/shared').RemoteHostPublicTarget[]>
+    getTarget: (id: string) => Promise<import('@proma/shared').RemoteHostPublicTarget | null>
+    createTarget: (input: import('@proma/shared').RemoteHostTargetCreateInput) => Promise<import('@proma/shared').RemoteHostPublicTarget>
+    updateTarget: (id: string, input: import('@proma/shared').RemoteHostTargetUpdateInput) => Promise<import('@proma/shared').RemoteHostPublicTarget>
+    deleteTarget: (id: string) => Promise<{ removed: boolean; name?: string }>
+    setBearerToken: (targetId: string, token: string) => Promise<void>
+    hasBearerToken: (targetId: string) => Promise<boolean>
+    clearBearerToken: (targetId: string) => Promise<boolean>
+    setSshPassword: (targetId: string, password: string) => Promise<void>
+    setSshPrivateKey: (targetId: string, key: string, passphrase?: string) => Promise<void>
+    hasSshCredential: (targetId: string) => Promise<boolean>
+    probeTarget: (id: string) => Promise<{ hello: import('@proma/shared').RemoteHostHello; target: import('@proma/shared').RemoteHostPublicTarget }>
+    confirmHostKey: (token: string, host: string, port: number) => Promise<void>
+    connectTarget: (id: string) => Promise<{ localPort: number }>
+    disconnectTarget: (id: string) => Promise<void>
+    listProjects: (targetId: string) => Promise<import('@proma/shared').RemoteProjectListResponse>
+    createProject: (targetId: string, input: import('@proma/shared').CreateRemoteProjectInput) => Promise<import('@proma/shared').CreateRemoteProjectResponse>
+    getProjectTree: (targetId: string, projectId: string, path?: string) => Promise<import('@proma/shared').RemoteProjectTreeResponse>
+    readFile: (targetId: string, projectId: string, path: string) => Promise<import('@proma/shared').RemoteTextFileResponse>
+    saveFile: (targetId: string, projectId: string, input: import('@proma/shared').SaveRemoteTextFileInput) => Promise<import('@proma/shared').SaveRemoteTextFileResponse>
+    getGitStatus: (targetId: string, projectId: string) => Promise<import('@proma/shared').RemoteGitStatusResponse>
+    getGitDiff: (targetId: string, projectId: string, input?: import('@proma/shared').RemoteGitDiffInput) => Promise<import('@proma/shared').RemoteGitDiffResponse>
+    listSessions: (targetId: string, params?: { projectId?: string; runtimeKind?: string }) => Promise<import('@proma/shared').RemoteSessionListResponse>
+    createSession: (targetId: string, input: import('@proma/shared').CreateRemoteSessionInput) => Promise<import('@proma/shared').CreateRemoteSessionResponse>
+    getSessionSnapshot: (targetId: string, sessionId: string) => Promise<import('@proma/shared').RemoteSnapshotResponse>
+    submitTurn: (targetId: string, sessionId: string, input: import('@proma/shared').RemoteTurnRequest) => Promise<import('@proma/shared').RemoteTurnStatus>
+    interruptSession: (targetId: string, sessionId: string) => Promise<void>
+    respondToInteraction: (targetId: string, interactionId: string, input: import('@proma/shared').RespondToRemoteInteractionInput) => Promise<import('@proma/shared').RemoteInteractionResponse>
   }
 }
 
@@ -2858,6 +2890,37 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.on(HERMES_IPC_CHANNELS.TURN_SUBMIT_STATE, listener)
       return () => { ipcRenderer.removeListener(HERMES_IPC_CHANNELS.TURN_SUBMIT_STATE, listener) }
     },
+  },
+
+  remoteHost: {
+    listTargets: () => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.LIST_TARGETS),
+    getTarget: (id) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.GET_TARGET, id),
+    createTarget: (input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.CREATE_TARGET, input),
+    updateTarget: (id, input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.UPDATE_TARGET, id, input),
+    deleteTarget: (id) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.DELETE_TARGET, id),
+    setBearerToken: (targetId, token) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.SET_BEARER_TOKEN, targetId, token),
+    hasBearerToken: (targetId) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.HAS_BEARER_TOKEN, targetId),
+    clearBearerToken: (targetId) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.CLEAR_BEARER_TOKEN, targetId),
+    setSshPassword: (targetId, password) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.SET_SSH_PASSWORD, targetId, password),
+    setSshPrivateKey: (targetId, key, passphrase) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.SET_SSH_PRIVATE_KEY, targetId, key, passphrase),
+    hasSshCredential: (targetId) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.HAS_SSH_CREDENTIAL, targetId),
+    probeTarget: (id) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.PROBE_TARGET, id),
+    confirmHostKey: (token, host, port) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.CONFIRM_HOST_KEY, token, host, port),
+    connectTarget: (id) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.CONNECT_TARGET, id),
+    disconnectTarget: (id) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.DISCONNECT_TARGET, id),
+    listProjects: (targetId) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.LIST_PROJECTS, targetId),
+    createProject: (targetId, input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.CREATE_PROJECT, targetId, input),
+    getProjectTree: (targetId, projectId, path) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.GET_PROJECT_TREE, targetId, projectId, path),
+    readFile: (targetId, projectId, path) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.READ_FILE, targetId, projectId, path),
+    saveFile: (targetId, projectId, input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.SAVE_FILE, targetId, projectId, input),
+    getGitStatus: (targetId, projectId) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.GET_GIT_STATUS, targetId, projectId),
+    getGitDiff: (targetId, projectId, input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.GET_GIT_DIFF, targetId, projectId, input),
+    listSessions: (targetId, params) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.LIST_SESSIONS, targetId, params),
+    createSession: (targetId, input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.CREATE_SESSION, targetId, input),
+    getSessionSnapshot: (targetId, sessionId) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.GET_SESSION_SNAPSHOT, targetId, sessionId),
+    submitTurn: (targetId, sessionId, input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.SUBMIT_TURN, targetId, sessionId, input),
+    interruptSession: (targetId, sessionId) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.INTERRUPT_SESSION, targetId, sessionId),
+    respondToInteraction: (targetId, interactionId, input) => ipcRenderer.invoke(REMOTE_HOST_IPC_CHANNELS.RESPOND_TO_INTERACTION, targetId, interactionId, input),
   },
 }
 
