@@ -64,6 +64,7 @@ import { PromptSettings } from "./PromptSettings";
 import { ToolSettings } from "./ToolSettings";
 import { BotHubSettings } from "./BotHubSettings";
 import { HermesSettings } from "./HermesSettings";
+import { RemoteHostSettings } from "./RemoteHostSettings";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { VoiceInputSettings } from "./VoiceInputSettings";
 import { MigrationSettings } from "./MigrationSettings";
@@ -100,6 +101,11 @@ const BOTS_TAB: TabItem = {
 const HERMES_TAB: TabItem = {
   id: "hermes",
   label: "Hermes 远程",
+  icon: <Server size={16} />,
+};
+const REMOTE_HOST_TAB: TabItem = {
+  id: "remote-host",
+  label: "Remote Host",
   icon: <Server size={16} />,
 };
 const TUTORIAL_TAB: TabItem = {
@@ -154,6 +160,8 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
       return <BotHubSettings />;
     case "hermes":
       return <HermesSettings />;
+    case "remote-host":
+      return <RemoteHostSettings />;
     case "shortcuts":
       return <ShortcutSettings />;
     case "voice-input":
@@ -290,6 +298,7 @@ export function SettingsPanel({
         VOICE_INPUT_TAB,
         BOTS_TAB,
         HERMES_TAB,
+        REMOTE_HOST_TAB,
         TUTORIAL_TAB,
         SHORTCUTS_TAB,
         ...TAIL_TABS,
@@ -301,6 +310,7 @@ export function SettingsPanel({
       VOICE_INPUT_TAB,
       BOTS_TAB,
       HERMES_TAB,
+      REMOTE_HOST_TAB,
       TUTORIAL_TAB,
       SHORTCUTS_TAB,
       ...TAIL_TABS,
