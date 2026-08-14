@@ -24,6 +24,7 @@ permissions:
 jobs:
   build-mac-arm64:
     name: build (macos-latest, mac, arm64, --arm64)
+    if: ${{ !contains(github.ref_name, '-hermes.') }}
     runs-on: macos-latest
 
     steps:
@@ -33,7 +34,7 @@ jobs:
       - name: 安装 Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: 安装 Node.js
         uses: actions/setup-node@v4
@@ -79,14 +80,23 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           for i in 1 2 3; do
-            npx electron-builder --mac --arm64 --publish always && break
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
+            if npx electron-builder --mac --arm64 --publish always; then
+              exit 0
+            fi
+
+            if [ "$i" -lt 3 ]; then
+              echo "Attempt $i failed, retrying in 10s..."
+              sleep 10
+            fi
           done
+
+          echo "macOS ARM64 packaging failed after 3 attempts"
+          exit 1
         working-directory: apps/electron
 
   build-mac-x64:
     name: build (macos-15-intel, mac, x64, --x64)
+    if: ${{ !contains(github.ref_name, '-hermes.') }}
     runs-on: macos-15-intel
 
     steps:
@@ -96,7 +106,7 @@ jobs:
       - name: 安装 Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: 安装 Node.js
         uses: actions/setup-node@v4
@@ -142,14 +152,23 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           for i in 1 2 3; do
-            npx electron-builder --mac --x64 --publish always && break
-            echo "Attempt $i failed, retrying in 15s..."
-            sleep 15
+            if npx electron-builder --mac --x64 --publish always; then
+              exit 0
+            fi
+
+            if [ "$i" -lt 3 ]; then
+              echo "Attempt $i failed, retrying in 15s..."
+              sleep 15
+            fi
           done
+
+          echo "macOS x64 packaging failed after 3 attempts"
+          exit 1
         working-directory: apps/electron
 
   merge-mac-yml:
     name: Merge latest-mac.yml (arm64 + x64)
+    if: ${{ !contains(github.ref_name, '-hermes.') }}
     runs-on: ubuntu-latest
     needs: [build-mac-arm64, build-mac-x64]
 
@@ -295,7 +314,7 @@ jobs:
       - name: 安装 Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: 安装 Node.js
         uses: actions/setup-node@v4
@@ -305,13 +324,124 @@ jobs:
       - name: 安装依赖
         run: bun install --frozen-lockfile
 
+      - name: 校验 Hermes 标签与发布日志
+        if: contains(github.ref_name, '-hermes.')
+        shell: pwsh
+        run: |
+          $manifest = Get-Content apps/electron/package.json -Raw | ConvertFrom-Json
+          $expectedTag = "v$($manifest.version)"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "标签 $env:GITHUB_REF_NAME 与应用版本 $expectedTag 不一致"
+          }
+          $notesPath = "release-notes/$($env:GITHUB_REF_NAME).md"
+          if (-not (Test-Path -LiteralPath $notesPath)) {
+            throw "缺少发布日志: $notesPath"
+          }
+
+      - name: 创建 Hermes Draft Release
+        if: contains(github.ref_name, '-hermes.')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $manifest = Get-Content apps/electron/package.json -Raw | ConvertFrom-Json
+          $tag = $env:GITHUB_REF_NAME
+          $notesPath = "release-notes/$tag.md"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --verify-tag --draft --title "Proma $($manifest.version) — Hermes Remote" --notes-file $notesPath
+          }
+
+      - name: 类型检查
+        run: bun run typecheck
+
+      - name: 测试
+        run: bun test
+
       # 构建应用
       - name: 构建 Electron 应用
         run: bun run electron:build
         working-directory: .
 
+      - name: 同步打包运行时依赖
+        run: bun run sync:runtime-deps
+        working-directory: apps/electron
+
       - name: 打包并发布 (Windows)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win --x64 --publish always
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: bunx electron-builder --win --x64 --publish always
         working-directory: apps/electron
+
+      - name: 校验 Hermes Windows 产物
+        if: contains(github.ref_name, '-hermes.')
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/electron/package.json -Raw | ConvertFrom-Json).version
+          $required = @(
+            "apps/electron/out/Proma-Setup-$version.exe",
+            "apps/electron/out/Proma-Setup-$version.exe.blockmap",
+            "apps/electron/out/Proma-$version-portable.zip",
+            "apps/electron/out/latest.yml"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "缺少发布产物: $path" }
+          }
+          $latest = Get-Content apps/electron/out/latest.yml -Raw
+          $versionPattern = '(?m)^version:\s*[''"]?' + [regex]::Escape($version) + '[''"]?\s*$'
+          if ($latest -notmatch $versionPattern) {
+            throw "latest.yml 版本不匹配: $version"
+          }
+          $installer = "Proma-Setup-$version.exe"
+          $installerPattern = '(?m)^path:\s*[''"]?' + [regex]::Escape($installer) + '[''"]?\s*$'
+          if ($latest -notmatch $installerPattern) {
+            throw "latest.yml 未将安装包设为更新入口: $installer"
+          }
+
+      - name: 生成并上传 SHA-256
+        if: contains(github.ref_name, '-hermes.')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content apps/electron/package.json -Raw | ConvertFrom-Json).version
+          $assets = @(
+            "apps/electron/out/Proma-Setup-$version.exe",
+            "apps/electron/out/Proma-Setup-$version.exe.blockmap",
+            "apps/electron/out/Proma-$version-portable.zip",
+            "apps/electron/out/latest.yml"
+          )
+          $lines = foreach ($path in $assets) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            "$hash *$(Split-Path -Leaf $path)"
+          }
+          $checksumPath = "apps/electron/out/SHA256SUMS.txt"
+          $lines | Set-Content -LiteralPath $checksumPath -Encoding utf8NoBOM
+          gh release upload $env:GITHUB_REF_NAME $checksumPath --clobber
+
+      - name: 发布 Hermes Latest Release
+        if: contains(github.ref_name, '-hermes.')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = (Get-Content apps/electron/package.json -Raw | ConvertFrom-Json).version
+          $expected = @(
+            "Proma-Setup-$version.exe",
+            "Proma-Setup-$version.exe.blockmap",
+            "Proma-$version-portable.zip",
+            "latest.yml",
+            "SHA256SUMS.txt"
+          )
+          $actual = gh release view $tag --json assets --jq '.assets[].name'
+          foreach ($name in $expected) {
+            if ($actual -notcontains $name) { throw "Draft Release 缺少资产: $name" }
+          }
+          $notes = Get-Content "release-notes/$tag.md" -Raw
+          $checksums = Get-Content apps/electron/out/SHA256SUMS.txt -Raw
+          $finalNotes = "$notes`n`n## SHA-256`n`n$checksums"
+          $finalNotesPath = Join-Path $env:RUNNER_TEMP 'release-notes-final.md'
+          $finalNotes | Set-Content -LiteralPath $finalNotesPath -Encoding utf8NoBOM
+          gh release edit $tag --notes-file $finalNotesPath --draft=false --prerelease=false --latest

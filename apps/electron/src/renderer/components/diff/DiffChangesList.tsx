@@ -10,7 +10,7 @@ import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { FileTypeIcon } from '@/components/file-browser/FileTypeIcon'
-import { agentDiffUnseenFilesAtom, agentDiffDataAtom, agentSelectedWorktreeAtom } from '@/atoms/agent-atoms'
+import { agentDiffUnseenFilesAtom, agentDiffDataAtom, agentSelectedWorktreeAtom, agentSessionsAtom, workspaceGitDiffRefreshVersionAtom } from '@/atoms/agent-atoms'
 import type { ChangedFileEntry, ChangedFileStatus, ChangeSource, UntrackedFileEntry, WorktreeInfo } from '@proma/shared'
 import { WorktreeSelector } from './WorktreeSelector'
 import { groupSessionFileChanges } from '@/lib/session-file-changes'
@@ -92,23 +92,48 @@ export const DiffChangesList = React.memo(function DiffChangesList({
   // Worktree 选择状态（内联 WorktreeSelector）
   const selectedWorktreeMap = useAtomValue(agentSelectedWorktreeAtom)
   const setSelectedWorktreeMap = useSetAtom(agentSelectedWorktreeAtom)
-  const selectedWorktreePath = selectedWorktreeMap.get(sessionId) ?? null
+  const sessions = useAtomValue(agentSessionsAtom)
+  const setSessions = useSetAtom(agentSessionsAtom)
+  const persistedWorktreePath = sessions.find((session) => session.id === sessionId)?.activeWorktree?.path ?? null
+  const selectedWorktreePath = selectedWorktreeMap.get(sessionId) ?? persistedWorktreePath
   const diffCacheKey = selectedWorktreePath ? `${sessionId}:worktree:${selectedWorktreePath}` : `${sessionId}:session`
   const worktreeMode = React.useMemo(
     () => selectedWorktreePath ? { path: selectedWorktreePath, baseBranch: 'origin/main' } : undefined,
     [selectedWorktreePath],
   )
-  const handleWorktreeSelect = React.useCallback((worktree: WorktreeInfo | null) => {
+
+  React.useEffect(() => {
     setSelectedWorktreeMap((prev) => {
-      const m = new Map(prev)
-      m.set(sessionId, worktree?.path ?? null)
-      return m
+      const previous = prev.get(sessionId) ?? null
+      if (previous === persistedWorktreePath) return prev
+      const next = new Map(prev)
+      next.set(sessionId, persistedWorktreePath)
+      return next
     })
-  }, [sessionId, setSelectedWorktreeMap])
+  }, [persistedWorktreePath, sessionId, setSelectedWorktreeMap])
+
+  const handleWorktreeSelect = React.useCallback(async (worktree: WorktreeInfo | null) => {
+    try {
+      const updated = await window.electronAPI.setAgentSessionActiveWorktree({
+        sessionId,
+        worktreePath: worktree?.path ?? null,
+      })
+      setSessions((previous) => previous.map((session) => session.id === sessionId ? updated : session))
+      setSelectedWorktreeMap((prev) => {
+        const next = new Map(prev)
+        next.set(sessionId, updated.activeWorktree?.path ?? null)
+        return next
+      })
+    } catch (error) {
+      console.error('[DiffChangesList] 保存活动 worktree 失败:', error)
+      window.alert(`切换 worktree 失败：${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }, [sessionId, setSelectedWorktreeMap, setSessions])
 
   // Diff 数据缓存：mount 时若已有上次结果，立即用作初值，避免空数组闪 1s "没有代码改动"
   const diffDataMap = useAtomValue(agentDiffDataAtom)
   const setDiffDataMap = useSetAtom(agentDiffDataAtom)
+  const workspaceGitDiffRefreshVersion = useAtomValue(workspaceGitDiffRefreshVersionAtom)
   const cached = diffDataMap.get(diffCacheKey)
   const [files, setFiles] = React.useState<ChangedFileEntry[]>(() => cached?.files ?? [])
   const [untrackedFiles, setUntrackedFiles] = React.useState<UntrackedFileEntry[]>(() => cached?.untrackedFiles ?? [])
@@ -173,7 +198,7 @@ export const DiffChangesList = React.memo(function DiffChangesList({
 
   React.useEffect(() => {
     fetchChanges()
-  }, [fetchChanges, refreshVersion])
+  }, [fetchChanges, refreshVersion, workspaceGitDiffRefreshVersion])
 
   // 窗口聚焦刷新已统一在 useGlobalAgentListeners 中处理（递增 refreshVersion）
 
@@ -209,8 +234,6 @@ export const DiffChangesList = React.memo(function DiffChangesList({
       ...untrackedFiles.map((file) => ({
         ...file,
         status: 'untracked' as const,
-        additions: 0,
-        deletions: 0,
       })),
     ]
     const filteredFiles = q
@@ -459,7 +482,7 @@ function NonGitFileList({
                 <button
                   type="button"
                   aria-label="在文件夹中显示"
-                  onClick={() => window.electronAPI.showInFolder(change.path, { sessionId }).catch(console.error)}
+                  onClick={() => window.electronAPI.showInFolder(change.path, { sessionId, unrestricted: true }).catch(console.error)}
                   className="mr-1 flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-foreground/[0.08] hover:text-foreground"
                 >
                   <FolderSearch className="size-3.5" />

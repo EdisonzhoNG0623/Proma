@@ -354,6 +354,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, isMessageTail = false, 
       {renderExpandedContent && (
         <div
           ref={contentRef}
+          data-agent-history-selection-excluded={expanded ? undefined : 'true'}
           className="overflow-hidden"
           style={{
             height: measuredHeight !== undefined ? `${measuredHeight}px` : 'auto',

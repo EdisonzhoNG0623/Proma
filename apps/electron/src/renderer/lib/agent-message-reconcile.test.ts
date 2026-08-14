@@ -3,6 +3,7 @@ import type { SDKMessage } from '@proma/shared'
 import {
   findLastStableSDKMessageUuid,
   reconcileSDKMessagesAfterBoundary,
+  reconcileSDKMessagesWithCanonicalPage,
 } from './agent-message-reconcile'
 
 const message = (type: string, uuid?: string, text = type): SDKMessage => ({
@@ -48,5 +49,31 @@ describe('Agent canonical tail reconcile', () => {
 
   test('Given boundary 不在本地缓存 When reconcile Then 返回 null 让调用方 full fallback', () => {
     expect(reconcileSDKMessagesAfterBoundary([message('assistant', 'other')], 'missing', [])).toBeNull()
+  })
+
+  test('Given 已加载更早历史 When canonical 末页包含边界 Then 只替换尾段并保留历史前缀', () => {
+    const earliest = message('user', 'earliest')
+    const boundary = message('assistant', 'boundary')
+    const optimistic = { ...message('user', 'optimistic'), _promaOptimistic: true } as SDKMessage
+    const canonicalUser = message('user', 'canonical-user')
+    const canonicalAssistant = message('assistant', 'canonical-assistant')
+
+    const next = reconcileSDKMessagesWithCanonicalPage(
+      [earliest, boundary, optimistic],
+      'boundary',
+      [message('system', 'page-prefix'), boundary, canonicalUser, canonicalAssistant],
+    )
+
+    expect(next?.[0]).toBe(earliest)
+    expect(next?.[1]).toBe(boundary)
+    expect(next).toEqual([earliest, boundary, canonicalUser, canonicalAssistant])
+  })
+
+  test('Given canonical 末页已不含边界 When reconcile Then 返回 null 让调用方采用分页结果', () => {
+    expect(reconcileSDKMessagesWithCanonicalPage(
+      [message('assistant', 'boundary')],
+      'boundary',
+      [message('assistant', 'newer-only')],
+    )).toBeNull()
   })
 })

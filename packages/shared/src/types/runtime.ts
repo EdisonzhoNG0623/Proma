@@ -122,6 +122,10 @@ export interface ChangedFileEntry {
 export interface UntrackedFileEntry {
   /** 文件路径（相对于仓库根） */
   filePath: string
+  /** 新增行数；二进制或无法安全读取的文件为 0 */
+  additions: number
+  /** 删除行数；未追踪文件始终为 0 */
+  deletions: number
   /** 所属 Git 仓库根目录 */
   gitRoot: string
 }
@@ -180,6 +184,10 @@ export interface DetachedPreviewWindowInput {
   readOnly?: boolean
   /** 候选基础目录（previewOnly 模式下用于路径解析） */
   basePaths?: string[]
+  /** Managed Skill workspace slug for a relocatable relative path. */
+  workspaceSkillSlug?: string
+  /** Original absolute Skill entry path used as a legacy fallback. */
+  legacySkillFilePath?: string
   /** 窗口标题 */
   title?: string
 }
@@ -205,8 +213,17 @@ export interface FileAccessOptions {
   sessionId?: string
   /** 工作区 slug；通常可由 sessionId 推导，少数无 session 调用可显式传入 */
   workspaceSlug?: string
+  /** Stable managed-Skill workspace slug used to resolve a relocatable skill path. */
+  workspaceSkillSlug?: string
+  /** Original absolute Skill entry path retained as a fallback for legacy sessions. */
+  legacySkillFilePath?: string
   /** 路径解析候选目录；主进程会先过滤到已授权目录内再使用 */
   candidateBasePaths?: string[]
+  /**
+   * 文件面板以 Agent 实际可操作的文件系统为准，不再按会话附件二次收窄。
+   * 启用后，调用方可以操作任意已存在的本地路径。
+   */
+  unrestricted?: boolean
 }
 
 /** 已授权本地文件的 proma-file URL */
@@ -346,6 +363,8 @@ export const IPC_CHANNELS = {
   GET_GIT_REPO_STATUS: 'git:get-repo-status',
   /** 获取未暂存的变更文件列表 */
   GET_UNSTAGED_CHANGES: 'git:get-unstaged-changes',
+  /** 失效 Git Diff 扫描缓存；可按文件/目录定向失效 */
+  INVALIDATE_GIT_DIFF_CACHE: 'git:invalidate-diff-cache',
   /** 获取单个文件的 diff */
   GET_FILE_DIFF: 'git:get-file-diff',
   /** 获取未追踪文件内容 */

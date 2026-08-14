@@ -32,6 +32,7 @@ import {
   currentAgentSessionIdAtom,
   workspaceCapabilitiesVersionAtom,
   workspaceFilesVersionAtom,
+  workspaceGitDiffRefreshVersionAtom,
   agentThinkingAtom,
   agentEffortAtom,
   agentMaxBudgetUsdAtom,
@@ -64,6 +65,7 @@ import {
 } from './atoms/markdown-font-size'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useHermesTargetsInitializer } from './hooks/useHermesListeners'
+import { mergeActiveAgentSessions } from './lib/agent-session-list'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
 import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID } from './atoms/tab-atoms'
 import type { TabItem } from './atoms/tab-atoms'
@@ -72,7 +74,7 @@ import { feishuBotStatesAtom } from './atoms/feishu-atoms'
 import { dingtalkBotStatesAtom } from './atoms/dingtalk-atoms'
 import { currentConversationIdAtom, channelsAtom, channelsLoadedAtom, selectedModelAtom } from './atoms/chat-atoms'
 import { appModeAtom } from './atoms/app-mode'
-import type { FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@proma/shared'
+import type { AgentSessionMeta, FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@proma/shared'
 import { Toaster } from './components/ui/sonner'
 import { toast } from 'sonner'
 import { ArrowUpRight } from 'lucide-react'
@@ -85,6 +87,7 @@ import { TabSwitcher } from './components/tabs/TabSwitcher'
 import { htmlToMarkdown, markdownToHtml } from './lib/markdown-rich-text'
 import { PromaLogo } from './lib/model-logo'
 import { initShortcutRegistry, updateShortcutOverrides } from './lib/shortcut-registry'
+import { initializePerformanceMonitor } from './lib/performance-monitor'
 import './styles/globals.css'
 import 'katex/dist/katex.min.css'
 
@@ -94,7 +97,10 @@ const isVoiceDictationIndicatorWindow = new URLSearchParams(window.location.sear
 const isDetachedPreviewWindow = new URLSearchParams(window.location.search).get('window') === 'detached-preview'
 const isPlanningWindow = new URLSearchParams(window.location.search).get('window') === 'planning'
 const isWorkspaceMemoryWindow = new URLSearchParams(window.location.search).get('window') === 'workspace-memory'
-const isMainWindow = !isQuickTaskWindow && !isVoiceDictationIndicatorWindow && !isDetachedPreviewWindow && !isPlanningWindow && !isWorkspaceMemoryWindow
+const isAgentStatusHoverWindow = new URLSearchParams(window.location.search).get('window') === 'agent-status-hover'
+const isMainWindow = !isQuickTaskWindow && !isVoiceDictationIndicatorWindow && !isDetachedPreviewWindow && !isPlanningWindow && !isWorkspaceMemoryWindow && !isAgentStatusHoverWindow
+
+initializePerformanceMonitor()
 
 // 主窗口和独立规划窗口均由内部面板管理滚动，避免页面本身出现第二层滚动。
 if (isMainWindow || isPlanningWindow || isWorkspaceMemoryWindow) {
@@ -175,6 +181,7 @@ function AgentSettingsInitializer(): null {
   const setCurrentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
   const bumpCapabilities = useSetAtom(workspaceCapabilitiesVersionAtom)
   const bumpFiles = useSetAtom(workspaceFilesVersionAtom)
+  const bumpGitDiffRefresh = useSetAtom(workspaceGitDiffRefreshVersionAtom)
   const setThinking = useSetAtom(agentThinkingAtom)
   const setEffort = useSetAtom(agentEffortAtom)
   const setMaxBudget = useSetAtom(agentMaxBudgetUsdAtom)
@@ -324,6 +331,8 @@ function AgentSettingsInitializer(): null {
     })
     const unsubFiles = window.electronAPI.onWorkspaceFilesChanged(() => {
       bumpFiles((v) => v + 1)
+      // watcher 已在主进程失效命中的 repo cache；所有已挂载 Changes 面板由此重新拉取。
+      bumpGitDiffRefresh((v) => v + 1)
       // 外部本地项目目录变动时，主进程在 LIST_WORKSPACES 中重新计算根目录状态。
       // 这里仅响应 watcher 事件刷新一次，避免在侧栏每次渲染时同步访问文件系统。
       window.electronAPI.listAgentWorkspaces().then(setAgentWorkspaces).catch(console.error)
@@ -333,7 +342,7 @@ function AgentSettingsInitializer(): null {
       unsubCapabilities()
       unsubFiles()
     }
-  }, [bumpCapabilities, bumpFiles, currentWorkspaceId, setAgentWorkspaces, workspaces])
+  }, [bumpCapabilities, bumpFiles, bumpGitDiffRefresh, currentWorkspaceId, setAgentWorkspaces, workspaces])
 
   return null
 }
@@ -525,17 +534,24 @@ function PlanningInitializer(): null {
 
 function AutomationInitializer(): null {
   const setAutomations = useSetAtom(automationsAtom)
-  const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const store = useStore()
 
   useEffect(() => {
     const load = (): void => {
       window.electronAPI.listAutomations().then(setAutomations).catch(console.error)
-      window.electronAPI.listAgentSessions().then(setAgentSessions).catch(console.error)
+      window.electronAPI.listAgentSessions('active').then((active) => {
+        const openSessionIds = new Set(
+          store.get(tabsAtom)
+            .filter((tab) => tab.type === 'agent' || tab.type === 'preview')
+            .map((tab) => tab.sessionId),
+        )
+        store.set(agentSessionsAtom, (previous) => mergeActiveAgentSessions(previous, active, openSessionIds))
+      }).catch(console.error)
     }
     load()
     const unsub = window.electronAPI.onAutomationChanged(load)
     return unsub
-  }, [setAutomations, setAgentSessions])
+  }, [setAutomations, store])
 
   return null
 }
@@ -845,9 +861,19 @@ function TabStatePersistenceInitializer(): null {
     Promise.all([
       window.electronAPI.getSettings(),
       window.electronAPI.listConversations(),
-      window.electronAPI.listAgentSessions(),
-    ]).then(([settings, conversations, agentSessions]) => {
+      window.electronAPI.listAgentSessions('active'),
+    ]).then(async ([settings, conversations, activeAgentSessions]) => {
       const tabState = settings.tabState
+      const persistedAgentSessionIds = [...new Set(
+        (tabState?.tabs ?? [])
+          .filter((tab): tab is TabItem => typeof tab === 'object' && tab !== null && 'type' in tab && 'sessionId' in tab && tab.type === 'agent' && typeof tab.sessionId === 'string')
+          .map((tab) => tab.sessionId),
+      )]
+      // 启动恢复只读取持久化 Tab 对应的少量归档 metadata，避免重引入全量归档 IPC。
+      const restoredAgentSessions = (await Promise.all(
+        persistedAgentSessionIds.map((id) => window.electronAPI.getAgentSessionMeta(id)),
+      )).filter((session): session is AgentSessionMeta => session !== undefined)
+      const agentSessions = [...activeAgentSessions, ...restoredAgentSessions.filter((session) => session.archived)]
       if (!tabState?.tabs?.length) {
         restoredRef.current = true
         return
@@ -895,6 +921,20 @@ function TabStatePersistenceInitializer(): null {
       const activeTab = validTabs.find((t) => t.id === restoredActiveTabId) ?? validTabs[0] ?? null
       store.set(tabsAtom, ensureScratchPadTab(activeTab ? [activeTab] : []))
       store.set(activeTabIdAtom, restoredActiveTabId)
+
+      // 常规侧栏只持有 active metadata；恢复中的归档 Tab 仍需要会话级
+      // workspace/model/settings，故只合并这些少量已打开会话，不能丢回整份归档列表。
+      const restoredAgentSessionIds = new Set(
+        validTabs.filter((tab) => tab.type === 'agent').map((tab) => tab.sessionId),
+      )
+      if (restoredAgentSessionIds.size > 0) {
+        const restoredAgentSessions = agentSessions.filter((session) => restoredAgentSessionIds.has(session.id))
+        store.set(agentSessionsAtom, (prev) => {
+          const byId = new Map(prev.map((session) => [session.id, session]))
+          for (const session of restoredAgentSessions) byId.set(session.id, session)
+          return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+        })
+      }
 
       // 同步 appMode 和 currentSessionId
       if (activeTab) {
@@ -1119,6 +1159,15 @@ if (isQuickTaskWindow) {
         <ThemeInitializer />
         <WorkspaceMemoryWindowApp />
         <Toaster position="bottom-right" />
+      </React.StrictMode>
+    )
+  })
+} else if (isAgentStatusHoverWindow) {
+  import('./components/agent-status-hover/HoverPanel').then(({ HoverPanel }) => {
+    ReactDOM.createRoot(document.getElementById('root')!).render(
+      <React.StrictMode>
+        <ThemeInitializer />
+        <HoverPanel />
       </React.StrictMode>
     )
   })

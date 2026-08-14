@@ -6,24 +6,28 @@ It is not just another chat box. Proma is meant to become a long-lived Agent wor
 
 ![Proma Poster](https://img.erlich.fun/personal-blog/uPic/pb.png)
 
-[中文 README](./README.md) | [Beginner Tutorial](./tutorial/tutorial.md) | [Open-Source Release](https://github.com/ErlichLiu/Proma/releases) | [Commercial Version](https://proma.cool/download)
+[中文 README](./README.md) | [Beginner Tutorial](./tutorial/tutorial.md) | [Hermes Windows Release](https://github.com/EdisonzhoNG0623/Proma/releases/latest) | [Official Upstream](https://github.com/proma-ai/Proma) | [Commercial Version](https://proma.cool/download)
 
 ## What Proma Can Do
 
 - **Chat mode**: multi-model conversations, attachments, image input, Markdown / Mermaid / KaTeX / code highlighting, parallel conversations, system prompts, and context controls.
-- **Agent mode**: a unified Pi Agent Runtime with workspace isolation, permission modes, file operations, streaming output, plan confirmation, and ask-user interactions.
-- **Collaboration and tasks**: complex work can be split into traceable collaboration agents and tasks, with calls and results shown in the message stream.
-- **Skills, MCP, and project roots**: each Proma project manages its own Skills and MCP servers. Project files can use a user-selected local project root or a Proma-managed blank-project directory; local project configuration is not imported automatically.
+- **Agent mode**: the Agent core has fully migrated to Proma's built-in Pi Agent Runtime with no third-party Agent runtime; workspace isolation, permission modes, file operations, streaming output, plan confirmation, and ask-user interactions are all supported.
+- **In-app browser automation**: the Agent can directly operate the built-in managed browser—opening pages, inspecting page structure, clicking / filling controls, switching tabs, and opening `localhost` dev services; in-site search, post-login pages, dynamic content, and local HTML previews can all be handled by the Agent without manual copy-paste.
+- **Collaboration and tasks**: complex work can be split into traceable collaboration sub-agents and tasks, with calls and results shown in the message stream.
+- **Skills, MCP, and project instructions**: each Proma project manages its own Skills and MCP servers. Projects can declare trusted project instructions via `AGENTS.md`, and legacy `CLAUDE.md` configurations are auto-migrated. Project files can use a user-selected local project root or a Proma-managed blank-project directory.
+- **Hermes Remote (experimental, `0.17.27-hermes.1`)**: explicitly switch between local Pi and a Hermes target, with Dashboard / API Server protocols, Direct / SSH transports, remote projects and sessions, atomic attachments, interactions, and real remote stop.
 - **Remote bots**: Lark / Feishu bot bridging is supported, with DingTalk and WeChat bridge entry points also present in the app.
-- **Memory and tools**: Chat and Agent can share memory, with web search, built-in Chat tools, and Agent recommendation helpers.
+- **Memory and tools**: Chat and Agent can share workspace memory, with memory changes tracked and refresh prompts shown in the UI; web search, built-in Chat tools, and Agent recommendation helpers are also available.
 - **Local-first data**: conversations, workspaces, attachments, settings, and Skills are stored under `~/.proma/` as JSON / JSONL files, without a local database.
-- **Desktop experience**: auto-update, proxy settings, file preview, global shortcuts, quick task window, voice input, and light / dark / system themes.
+- **Desktop experience**: auto-update, proxy settings, file preview, global shortcuts, quick task window, Agent Island run states, voice input, and light / dark / system themes.
 
 ## Getting Started
 
 ### Download
 
-Download the open-source version from [GitHub Releases](https://github.com/ErlichLiu/Proma/releases), with builds for macOS Apple Silicon, macOS Intel, and Windows.
+Download the Hermes build from this fork's [GitHub Releases](https://github.com/EdisonzhoNG0623/Proma/releases/latest). It provides a Windows x64 NSIS installer and a portable ZIP; extract the ZIP and run `Proma.exe` from its root. Both variants use the same `~/.proma/` settings and data directory.
+
+For official cross-platform builds and upstream source, see [`proma-ai/Proma`](https://github.com/proma-ai/Proma). The current Hermes Windows artifacts are unsigned and may trigger SmartScreen on first launch; verify them against `SHA256SUMS.txt` in the Release.
 
 The open-source version can be used independently with self-configured AI provider channels. If you prefer Proma-provided built-in model channels and subscription options, you can optionally explore the [Proma commercial version](https://proma.cool/download). The two versions support different preferences, and you are free to choose the one that best fits your workflow.
 
@@ -54,6 +58,7 @@ If your organization plans to deploy Proma for hundreds or thousands of employee
 4. Agent uses the Pi Runtime and can use any enabled model channel.
 5. Go to **Settings > Agent** and choose the default Agent channel, model, and workspace.
 6. Configure memory, web search, or Feishu / DingTalk / WeChat bridges from their corresponding settings tabs if needed.
+7. For Hermes Remote, configure the Dashboard URL and API Server URL (or SSH remote ports) separately under **Settings > Hermes Remote**. A session never silently falls back to another protocol or to local Pi.
 
 ## Choosing A Mode
 
@@ -110,7 +115,7 @@ Proma supports Doubao-powered streaming voice input, both inside Proma and acros
 
 ## Agent Runtime and Providers
 
-Proma uses a single **Pi Agent Runtime**, powered by `@earendil-works/pi-coding-agent`, `pi-agent-core`, and `pi-ai`. Enabled Proma channels are dynamically registered as Pi providers, supporting OpenAI Chat Completions / Responses, Google Generative AI, Anthropic Messages, and compatible endpoints. Historical Claude transcripts are retained as read-only records: they can be viewed, but not continued, forked, or rewound.
+Proma's Agent mode is driven by a single **Pi Agent Runtime**, powered by `@earendil-works/pi-coding-agent`, `pi-agent-core`, and `pi-ai`, with no third-party Agent runtime. Enabled Proma channels are dynamically registered as Pi providers, supporting OpenAI Chat Completions / Responses, Google Generative AI, Anthropic Messages, and compatible endpoints. Historical sessions from the early Claude runtime are retained as read-only records: they can be viewed, but not continued, forked, or rewound.
 
 | Channel type | Chat | Pi Agent |
 | --- | --- | --- |
@@ -121,12 +126,25 @@ Proma uses a single **Pi Agent Runtime**, powered by `@earendil-works/pi-coding-
 | ChatGPT subscription (Codex OAuth) | — | Supported |
 | xAI subscription (Grok OAuth) | — | Supported |
 
+## Hermes Remote (Experimental)
+
+`0.17.27-hermes.1` layers Hermes Remote on upstream `main@c52b61a5` (app manifest `0.17.27`, six commits after `v0.17.26`). Local Agent sessions remain Pi-only. Hermes is routed as an explicit external runtime at the main-process service boundary and never enters Pi providers, local workspace context, or local Agent JSONL history.
+
+- The input area provides a dedicated `Local Pi ↔ Hermes Remote` runtime selector and direct Hermes target selection; Claude Code is not restored.
+- Switching runtime or target creates a separate session identity, so Pi JSONL and Hermes canonical snapshots are never mixed.
+- Dashboard and API Server are explicit, capability-distinct protocols with no transparent fallback.
+- Proma-created and browsed Hermes projects use `/opt/ai/projects` rather than the legacy `~/proma-projects` root.
+- Direct and SSH Tunnel transports, target-scoped credentials, cookie partitions, SSH host-key confirmation, and restricted SFTP browsing remain supported.
+- Dashboard sessions retain remote canonical history, live streaming, approval / clarify / sudo / secret interactions, image and file attachments, real remote stop, and media recovery after restart.
+- The remote snapshot is the source of truth; its local derived cache can be rebuilt, and Hermes never reads or appends local Agent JSONL.
+- Windows x64 installer, portable ZIP, and SHA-256 checksums are published in [`v0.17.27-hermes.1`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.17.27-hermes.1).
+
 ## Tech Stack
 
 | Layer | Technology |
 | --- | --- |
 | Runtime | Bun |
-| Desktop | Electron 39 |
+| Desktop | Electron 43 |
 | Frontend | React 18 + TypeScript |
 | State | Jotai |
 | Styling | Tailwind CSS + Radix UI |

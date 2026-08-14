@@ -12,6 +12,8 @@ import {
 interface AgentMessageQueueProps {
   items: AgentQueuedMessage[]
   canSendNow: boolean
+  /** 立即发送是否会打断当前正在执行的 turn（true=会终止正在运行的命令/输出） */
+  interruptsCurrentTurn: boolean
   onSendNow: (messageId: string) => void
   onRecall: (messageId: string) => void
   onRemove: (messageId: string) => void
@@ -21,6 +23,7 @@ interface AgentMessageQueueProps {
 export function AgentMessageQueue({
   items,
   canSendNow,
+  interruptsCurrentTurn,
   onSendNow,
   onRecall,
   onRemove,
@@ -132,7 +135,7 @@ export function AgentMessageQueue({
               </div>
               <div className="flex shrink-0 items-center gap-0.5">
                 <QueueIconButton
-                  label="立即发送"
+                  label={interruptsCurrentTurn ? '立即发送（打断当前执行）' : '立即发送'}
                   disabled={!canSendNow}
                   onClick={() => onSendNow(item.id)}
                 >
@@ -165,6 +168,7 @@ const QUEUED_REFERENCE_STYLES = {
   skill: { icon: Sparkles, className: 'bg-[hsl(270_60%_60%/0.15)] text-[hsl(270_60%_50%)]' },
   mcp: { icon: Server, className: 'bg-[hsl(160_60%_45%/0.15)] text-[hsl(160_60%_35%)]' },
   session: { icon: MessageSquareText, className: 'bg-[hsl(200_80%_50%/0.14)] text-[hsl(200_80%_40%)]' },
+  quote: { icon: Quote, className: 'bg-primary/10 text-primary' },
   todo: { icon: ListTodo, className: 'bg-amber-500/15 text-amber-800 dark:text-amber-200' },
   calendar_event: { icon: CalendarDays, className: 'bg-cyan-500/15 text-cyan-800 dark:text-cyan-200' },
 } as const

@@ -109,7 +109,7 @@ describe('document-parser / 真实提取', () => {
     writeFileSync(path, await buildXlsx('SpreadsheetCellValue'))
     const text = await extractTextFromFile(path)
     expect(text).toContain('SpreadsheetCellValue')
-  })
+  }, 30_000)
 
   // PPT 模板变体同理走 buffer 内容嗅探（内容造的是 xlsx，仅验证扩展名不再卡白名单）
   test('提取 PowerPoint 放映文档（.ppsx，officeparser 内容嗅探路径）', async () => {

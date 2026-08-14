@@ -6,7 +6,7 @@
  */
 
 import { atom } from 'jotai'
-import { atomFamily, atomWithStorage } from 'jotai/utils'
+import { atomFamily, atomWithStorage, selectAtom } from 'jotai/utils'
 import type { AgentSessionMeta, AgentEvent, AgentWorkspace, AgentPendingFile, RetryAttempt, PromaPermissionMode, PermissionRequest, AskUserRequest, ExitPlanModeRequest, ThinkingConfig, AgentEffort, SDKMessage, UnstagedChangesResult } from '@proma/shared'
 import { PROMA_DEFAULT_PERMISSION_MODE } from '@proma/shared'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
@@ -102,6 +102,8 @@ export interface AgentStreamState {
   content: string
   toolActivities: ToolActivity[]
   model?: string
+  /** 本次运行启动时的渠道 ID；运行中切换模型只影响下一轮，不能覆盖它。 */
+  channelId?: string
   /** 当前输入 token 数（上下文使用量） */
   inputTokens?: number
   /** 输出 token 数 */
@@ -300,6 +302,49 @@ export const agentSessionStreamingStateAtomFamily = atomFamily((sessionId: strin
   atom((get) => get(agentStreamingStatesAtom).get(sessionId)),
 )
 
+/** AgentView 输入区/工具栏需要的低频流状态；排除逐 token 变化的 content/toolActivities。 */
+export type AgentViewStreamState = Pick<
+  AgentStreamState,
+  | 'running'
+  | 'backgroundWaiting'
+  | 'inputTokens'
+  | 'outputTokens'
+  | 'cacheReadTokens'
+  | 'cacheCreationTokens'
+  | 'contextWindow'
+  | 'contextUsageIsEstimated'
+  | 'isCompacting'
+>
+
+const EMPTY_AGENT_VIEW_STREAM_STATE: AgentViewStreamState = { running: false }
+
+export function areAgentViewStreamStatesEqual(
+  previous: AgentViewStreamState,
+  next: AgentViewStreamState,
+): boolean {
+  return previous.running === next.running
+    && previous.backgroundWaiting === next.backgroundWaiting
+    && previous.inputTokens === next.inputTokens
+    && previous.outputTokens === next.outputTokens
+    && previous.cacheReadTokens === next.cacheReadTokens
+    && previous.cacheCreationTokens === next.cacheCreationTokens
+    && previous.contextWindow === next.contextWindow
+    && previous.contextUsageIsEstimated === next.contextUsageIsEstimated
+    && previous.isCompacting === next.isCompacting
+}
+
+/**
+ * AgentView 不订阅逐 token content；完整状态只由 AgentMessages 消费。
+ * selectAtom 的 equalityFn 保证纯文本流式更新不会重渲染输入框和工具栏。
+ */
+export const agentSessionViewStreamStateAtomFamily = atomFamily((sessionId: string) =>
+  selectAtom(
+    agentSessionStreamingStateAtomFamily(sessionId),
+    (state): AgentViewStreamState => state ?? EMPTY_AGENT_VIEW_STREAM_STATE,
+    areAgentViewStreamStatesEqual,
+  ),
+)
+
 /**
  * 实时 SDKMessage 累积 Map — Phase 2 新增
  *
@@ -307,6 +352,13 @@ export const agentSessionStreamingStateAtomFamily = atomFamily((sessionId: strin
  * 流式完成后清空（持久化消息从 JSONL 加载）。
  */
 export const liveMessagesMapAtom = atom<Map<string, SDKMessage[]>>(new Map())
+
+const EMPTY_LIVE_SDK_MESSAGES: SDKMessage[] = []
+
+/** 单个 session 的实时消息切片；其他 session 流式更新不唤醒当前历史区。 */
+export const agentLiveMessagesAtomFamily = atomFamily((sessionId: string) =>
+  atom((get) => get(liveMessagesMapAtom).get(sessionId) ?? EMPTY_LIVE_SDK_MESSAGES),
+)
 
 export const agentPendingPromptAtom = atom<AgentPendingPrompt | null>(null)
 
@@ -374,6 +426,9 @@ export const workspaceCapabilitiesVersionAtom = atom(0)
 
 /** 工作区文件版本号 — 文件变化时自增，触发文件浏览器重新加载 */
 export const workspaceFilesVersionAtom = atom(0)
+
+/** Git watcher 触发的全局 Diff 刷新版本，避免按历史会话批量更新 Map。 */
+export const workspaceGitDiffRefreshVersionAtom = atom(0)
 
 // ===== 侧面板 Atoms =====
 

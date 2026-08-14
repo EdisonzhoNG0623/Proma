@@ -49,6 +49,7 @@ export const EXTERNAL_RUNTIME_PACKAGES: readonly string[] = [
   '@earendil-works/pi-ai',
   'pdfjs-dist',
   'sharp',
+  'ssh2',
 ]
 
 const appDir = resolve(import.meta.dir, '..')

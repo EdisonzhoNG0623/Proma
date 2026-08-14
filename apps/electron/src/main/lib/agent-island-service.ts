@@ -32,6 +32,9 @@ import { isMacAgentIslandNativeHostReady, publishMacAgentIslandSnapshot } from '
 import { getAgentIslandTodoAttentionKeys, selectAgentIslandTodos } from './agent-island-planning'
 import { selectAgentIslandCompactPlanQuota } from './agent-island-plan-quota'
 import { getAgentIslandPhasePriority } from './agent-island-priority'
+import { buildVisibilityKey } from './agent-island-visibility'
+import { shouldRetainAgentIslandSession } from './agent-island-session-visibility'
+import { getWindowsAgentIslandSurface } from './windows-agent-island-surface'
 import { listCalendarEvents, listTodos } from './planning-manager'
 import { onPlanningChanged } from './planning-events'
 import { getChannelPlanQuota, listChannels } from './channel-manager'
@@ -110,6 +113,15 @@ function getTitle(sessionId: string): string {
     return meta?.title?.trim() || sessionId.slice(0, 8)
   } catch {
     return sessionId.slice(0, 8)
+  }
+}
+
+/** 协作子会话的结果由父会话汇总，不进入用户级未读收件箱。 */
+function isDelegatedChildSession(sessionId: string): boolean {
+  try {
+    return Boolean(getAgentSessionMeta(sessionId)?.sourceDelegationId)
+  } catch {
+    return false
   }
 }
 
@@ -284,10 +296,11 @@ function handleSdkMessage(sessionId: string, message: import('@proma/shared').SD
       if (aMsg.isReplay) return
       if (aMsg.error) {
         const session = ensureSession(sessionId)
+        const isChildSession = isDelegatedChildSession(sessionId)
         session.phase = 'error'
         session.detail = truncate(aMsg.error.message || '发生错误', 60)
-        session.unread = true
-        session.attention = true
+        session.unread = !isChildSession
+        session.attention = !isChildSession
         session.terminalAt = Date.now()
         session.lastActivityAt = Date.now()
         pushActivity(session, 'status', `❌ ${truncate(aMsg.error.message || '错误', 50)}`)
@@ -331,18 +344,19 @@ function handleSdkMessage(sessionId: string, message: import('@proma/shared').SD
     case 'result': {
       const rMsg = message as import('@proma/shared').SDKResultMessage
       const session = ensureSession(sessionId)
+      const isChildSession = isDelegatedChildSession(sessionId)
       if (rMsg.subtype === 'success') {
         session.phase = 'completed'
         session.detail = '已完成'
-        session.unread = true
-        session.attention = true
+        session.unread = !isChildSession
+        session.attention = !isChildSession
         session.terminalAt = Date.now()
         pushActivity(session, 'status', '✅ 任务完成')
       } else {
         session.phase = 'error'
         session.detail = truncate(rMsg.errors?.[0] || rMsg.terminal_reason || '执行出错', 60)
-        session.unread = true
-        session.attention = true
+        session.unread = !isChildSession
+        session.attention = !isChildSession
         session.terminalAt = Date.now()
         pushActivity(session, 'status', `❌ ${truncate(rMsg.errors?.[0] || rMsg.terminal_reason || '错误', 50)}`)
       }
@@ -413,14 +427,12 @@ function handleSdkMessage(sessionId: string, message: import('@proma/shared').SD
 
 function isIslandSession(session: InternalSessionSnapshot, now: number): boolean {
   if (now - session.lastActivityAt >= 24 * 60 * 60_000) return false
+  // 委派子会话只在需要用户交互时露出；执行和结束均由父会话收敛。
+  if (isDelegatedChildSession(session.sessionId)) return session.phase === 'needs-interaction'
   // Running is deliberately visible: the island is also a live execution pulse,
-  // not only a handoff/error inbox. Terminal sessions retain their existing
-  // unread window to avoid becoming permanent history.
-  if (session.phase === 'running' || session.phase === 'needs-interaction' || session.phase === 'error') return true
-  return session.phase === 'completed'
-    && session.unread
-    && session.terminalAt !== undefined
-    && now - session.terminalAt < UNREAD_RETAIN_MS
+  // not only a handoff/error inbox. Viewed errors leave the Island immediately,
+  // while completed sessions retain their unread window to avoid permanent history.
+  return shouldRetainAgentIslandSession(session, now, UNREAD_RETAIN_MS)
 }
 
 function attentionScore(session: InternalSessionSnapshot): number {
@@ -582,16 +594,6 @@ function getImminentPlanningKeys(now: number): string[] {
   ]
 }
 
-function buildVisibilityKey(state: AgentIslandState, planningKeys: string[]): string {
-  const agentKey = state.sessions
-    .map((session) => `${session.sessionId}:${session.phase}:${session.lastActivityAt}:${session.detail}`)
-    .join('|')
-  const recentKey = state.recentSessions
-    .map((session) => `${session.sessionId}:${session.lastActivityAt}`)
-    .join('|')
-  return `${agentKey}/${recentKey}#${planningKeys.join('|')}`
-}
-
 function isIslandVisible(state: AgentIslandState, planningKeys: string[]): boolean {
   const requiresAgentHandoff = state.sessions.length > 0
   if (!requiresAgentHandoff && planningKeys.length === 0 && !state.idleDashboard) return false
@@ -632,9 +634,19 @@ function pushState(): void {
   if (json === lastStateJson) return
   lastStateJson = json
 
-  // macOS 原生 helper 是唯一的 Island surface；helper 不可用时直接停止投影。
-  if (!isMacAgentIslandNativeHostReady()) return
-  publishMacAgentIslandSnapshot(buildNativeSnapshot(state, planning))
+  const snapshot = buildNativeSnapshot(state, planning)
+
+  if (isMacAgentIslandNativeHostReady()) {
+    publishMacAgentIslandSnapshot(snapshot)
+  }
+
+  if (process.platform === 'win32') {
+    publishWindowsAgentIslandSnapshot(snapshot)
+  }
+}
+
+function publishWindowsAgentIslandSnapshot(snapshot: NativeAgentIslandSnapshot): void {
+  getWindowsAgentIslandSurface().onSnapshot(snapshot)
 }
 
 /**
@@ -790,7 +802,6 @@ export function initAgentIslandService(deps: AgentIslandServiceDeps): void {
 
   // 订阅 Agent 事件流
   disposeEventBus = agentEventBus.on((sessionId, payload) => {
-    if (deps.enabled?.() === false) return
     handleAgentEvent(sessionId, payload)
     schedulePush(requiresImmediateAgentIslandPush(payload) ? PUSH_THROTTLE_MS : AGENT_STREAM_PUSH_THROTTLE_MS)
   })
@@ -803,12 +814,14 @@ export function initAgentIslandService(deps: AgentIslandServiceDeps): void {
 }
 
 /**
- * 完成态的未读由主进程管理；主应用确认用户已经看过结果后，在此统一清除。
- * 错误和需要交互的会话必须保留 attention，不能被普通查看动作吞掉。
+ * 完成和异常态的未读由主进程管理；主应用确认用户已经看过后，在此统一清除。
+ * 待接手会话仍保持 attention，直到用户实际完成权限确认、回答或计划审批。
  */
-function markAgentIslandSessionViewed(sessionId: string): void {
+export function markAgentIslandSessionViewed(sessionId: string): void {
   const session = sessions.get(sessionId)
-  if (session?.phase !== 'completed' || !session.unread) return
+  if (!session || (session.phase !== 'completed' && session.phase !== 'error')) return
+  if (session.phase === 'completed' && !session.unread) return
+  if (!session.attention && !session.unread) return
   session.unread = false
   session.attention = false
   schedulePush()

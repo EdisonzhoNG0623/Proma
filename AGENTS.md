@@ -61,7 +61,9 @@ release-notes/                    版本发布日志
 
 ### Agent 与项目指令
 
-- Proma 仅使用 **Pi Agent runtime**。不要重新引入 Claude Agent SDK 或其专属配置、session 语义和打包依赖。
+- Proma 本地 Agent 仅使用 **Pi Agent runtime**。Hermes Remote 是在主进程 service 边界显式分流的 external runtime；不要将 Hermes 注册为 Pi provider，也不要重新引入 Claude Agent SDK 或其专属配置、session 语义和打包依赖。
+- Pi 会话以本地 JSONL 为真源；Hermes Dashboard 会话以远端 canonical snapshot 为真源。两者不得互相读取、追加或迁移，Hermes 本地附件/媒体缓存只能作为可重建派生数据。
+- Runtime 或 Hermes Target 切换必须创建独立会话身份；不得原地改写现有会话的 runtime/target。
 - 用户项目的 `AGENTS.md` 由 `project-instruction-resolver.ts` 在已授权项目根内显式解析；禁止恢复 cwd、祖先目录或附加目录的环境式规则发现。
 - Proma 受管工作区的 `AGENTS.md` 与用户项目的 `AGENTS.md` 有不同所有权边界，均须通过已验证的显式路径注入。
 - 旧项目 `CLAUDE.md` 仅是兼容输入，不能自动覆盖、合并或删除用户文件。
@@ -70,6 +72,15 @@ release-notes/                    版本发布日志
 ### 默认 Skills
 
 修改 `apps/electron/default-skills/<skill>/` 的任何内容时，必须同步递增该 Skill `SKILL.md` frontmatter 的 `version`（patch +1），否则老工作区不会收到升级。
+
+### Hermes Windows 发布
+
+- Hermes 正式标签使用 `v<上游版本>-hermes.<序号>`；当前基线为 `v0.17.27-hermes.1` / 上游 `main@c52b61a5`。
+- CI 与本地发布验证固定使用 Bun `1.3.14`。Windows x64 必须同时生成 NSIS 安装包和 electron-builder `zip` 免安装包。
+- 产物名固定为 `Proma-Setup-${version}.exe`、对应 `.blockmap`、`Proma-${version}-portable.zip`、`latest.yml` 和 `SHA256SUMS.txt`。
+- `latest.yml` 必须指向 NSIS 安装包；ZIP 只供手动下载。发布目标和应用内更新/Release Notes 均为 `EdisonzhoNG0623/Proma`。
+- 发布前需验证 ZIP 根目录包含 `Proma.exe`，ASAR、Pi runtime、Sharp/native 文件和 Proma CLI 齐全。当前 Windows 产物未签名，文档必须保留 SmartScreen 提示。
+- 安装版与免安装版都使用 `~/.proma/`；不得为 portable 构建改写数据目录，也不得迁移或删除现有用户数据。
 
 ## 版本、提交与文档
 

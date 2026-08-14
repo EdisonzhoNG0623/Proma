@@ -28,3 +28,23 @@ export function reconcileSDKMessagesAfterBoundary(
   if (boundaryIndex < 0) return null
   return [...previous.slice(0, boundaryIndex + 1), ...canonicalTail]
 }
+
+/**
+ * 将包含稳定边界的 canonical 末页拼回已加载历史；边界不在该页时返回 null，
+ * 由调用方退回该 canonical 页及其分页游标。
+ */
+export function reconcileSDKMessagesWithCanonicalPage(
+  previous: SDKMessage[],
+  boundaryUuid: string,
+  canonicalPage: SDKMessage[],
+): SDKMessage[] | null {
+  const boundaryIndex = canonicalPage.findLastIndex(
+    (message) => getSDKMessageUuid(message) === boundaryUuid,
+  )
+  if (boundaryIndex < 0) return null
+  return reconcileSDKMessagesAfterBoundary(
+    previous,
+    boundaryUuid,
+    canonicalPage.slice(boundaryIndex + 1),
+  )
+}
