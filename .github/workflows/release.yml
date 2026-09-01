@@ -404,6 +404,9 @@ jobs:
             gh release create $tag --verify-tag --draft --title "Proma $($manifest.version) — Hermes Remote" --notes-file $notesPath
           }
 
+      - name: 下载 Electron 二进制
+        run: bunx electron --version
+
       - name: 类型检查
         run: bun run typecheck
 

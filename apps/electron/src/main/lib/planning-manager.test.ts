@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -8,13 +8,26 @@ import { dirname, join } from 'node:path'
 const managerModulePath = join(import.meta.dir, 'planning-manager.ts')
 const repoRoot = dirname(dirname(dirname(dirname(dirname(import.meta.dir)))))
 const nodeRequire = createRequire(import.meta.url)
-const electronPackageDir = dirname(nodeRequire.resolve('electron/package.json'))
-// 不读取 electron 模块导出，避免其它测试的 module mock 污染可执行文件路径。
-const electronBinary = join(
-  electronPackageDir,
-  'dist',
-  readFileSync(join(electronPackageDir, 'path.txt'), 'utf8').trim(),
-)
+
+function resolveElectronBinary(): string {
+  const electronPackageDir = dirname(nodeRequire.resolve('electron/package.json'))
+  const pathFile = join(electronPackageDir, 'path.txt')
+  // bun install 不会下载 Electron 二进制；CI 和干净环境需要先跑官方 install 脚本。
+  if (!existsSync(pathFile)) {
+    const result = spawnSync(process.execPath, [join(electronPackageDir, 'install.js')], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: process.env,
+    })
+    if (result.status !== 0 || !existsSync(pathFile)) {
+      throw new Error(`Electron 二进制下载失败: ${(result.stderr || result.stdout || '').trim()}`)
+    }
+  }
+  // 不读取 electron 模块导出，避免其它测试的 module mock 污染可执行文件路径。
+  return join(electronPackageDir, 'dist', readFileSync(pathFile, 'utf8').trim())
+}
+
+const electronBinary = resolveElectronBinary()
 
 /**
  * planning-manager 的数据库连接是模块级单例，而 node:sqlite 仅由 Electron 的 Node 22 提供。
