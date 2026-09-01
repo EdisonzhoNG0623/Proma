@@ -431,8 +431,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: bunx electron-builder --win --x64 --publish always
         working-directory: apps/electron
+        shell: pwsh
+        run: |
+          foreach ($i in 1, 2, 3) {
+            bunx electron-builder --win --x64 --publish always
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($i -lt 3) {
+              Write-Host "Attempt $i failed, retrying in 15s..."
+              Start-Sleep -Seconds 15
+            }
+          }
+          throw "Windows packaging failed after 3 attempts"
 
       - name: 校验 Hermes Windows 产物
         if: contains(github.ref_name, '-hermes.')
