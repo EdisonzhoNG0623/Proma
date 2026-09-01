@@ -4,13 +4,16 @@
  * 主题模式、IPC 通道等设置相关定义。
  */
 
-import type { EnvironmentCheckResult, ThinkingConfig, AgentEffort, AgentThinkingLevel, FeishuSessionMirrorSettings, WindowsShellPreference } from '@proma/shared'
+import type { EnvironmentCheckResult, ThinkingConfig, AgentEffort, AgentThinkingLevel, FeishuSessionMirrorSettings, TerminalProfile, WindowsShellPreference } from '@proma/shared'
 
 /** 通知音场景类型 */
 export type NotificationSoundType = 'taskComplete' | 'permissionRequest' | 'exitPlanMode' | 'planningReminder'
 
+/** UI SFX 音效主题。旧 ID 保留用于兼容已有设置。 */
+export type NotificationSoundPackId = 'minimal' | 'soft' | 'glass' | 'arcade' | 'mechanical' | 'organic' | 'dreamy' | 'scifi' | 'rubber' | 'cinematic' | 'studio' | 'zen'
+
 /** 可选通知音 ID */
-export type NotificationSoundId = 'ding' | 'ding-dong' | 'discord' | 'done' | 'down-power' | 'food' | 'lite' | 'quiet' | 'none'
+export type NotificationSoundId = NotificationSoundPackId | 'ding' | 'ding-dong' | 'discord' | 'done' | 'down-power' | 'food' | 'lite' | 'quiet' | 'none'
 
 /** 各场景通知音配置 */
 export interface NotificationSoundSettings {
@@ -242,12 +245,6 @@ export const DEFAULT_THEME_MODE: ThemeMode = 'dark'
 /** 默认特殊风格 */
 export const DEFAULT_THEME_STYLE: ThemeStyle = 'default'
 
-/** 界面风格：经典保留旧版视觉，现代使用当前更克制的 UI */
-export type InterfaceVariant = 'classic' | 'modern'
-
-/** 默认界面风格 */
-export const DEFAULT_INTERFACE_VARIANT: InterfaceVariant = 'modern'
-
 /** Markdown 预览字号档位 */
 export type MarkdownFontSize = 'small' | 'medium' | 'large'
 
@@ -270,6 +267,29 @@ export interface VisionRelaySettings {
   modelId?: string
 }
 
+/** 可在通用设置中关闭的本地生产力工具；缺省保持开启以兼容已有用户。 */
+export interface ProductivityToolsSettings {
+  todosEnabled: boolean
+  calendarEnabled: boolean
+  obsidianEnabled: boolean
+}
+
+export const DEFAULT_PRODUCTIVITY_TOOLS_SETTINGS: ProductivityToolsSettings = {
+  todosEnabled: true,
+  calendarEnabled: true,
+  obsidianEnabled: true,
+}
+
+/** 容错读取旧配置与手写 settings.json，未知或缺失字段默认开启。 */
+export function normalizeProductivityToolsSettings(input: unknown): ProductivityToolsSettings {
+  const raw = input && typeof input === 'object' ? input as Partial<ProductivityToolsSettings> : {}
+  return {
+    todosEnabled: typeof raw.todosEnabled === 'boolean' ? raw.todosEnabled : true,
+    calendarEnabled: typeof raw.calendarEnabled === 'boolean' ? raw.calendarEnabled : true,
+    obsidianEnabled: typeof raw.obsidianEnabled === 'boolean' ? raw.obsidianEnabled : true,
+  }
+}
+
 /** 提升此版本可要求用户重新确认更新后的受管浏览器风险告知。 */
 export const BROWSER_RISK_DISCLAIMER_VERSION = 1
 
@@ -279,14 +299,14 @@ export interface AppSettings {
   themeMode: ThemeMode
   /** 特殊风格主题 */
   themeStyle?: ThemeStyle
-  /** 界面风格 */
-  interfaceVariant?: InterfaceVariant
   /** Agent 默认渠道 ID（由当前 Agent Core 解释） — 当前选中的渠道 */
   agentChannelId?: string
   /** Agent 默认模型 ID */
   agentModelId?: string
   /** Agent 当前工作区 ID */
   agentWorkspaceId?: string
+  /** Windows 上用户最近一次明确选择的 Agent 终端 Shell；未设置时使用系统默认。 */
+  lastWindowsTerminalProfile?: TerminalProfile
   /** Windows 上 Agent Bash 工具的运行环境；默认自动选择 Git Bash，WSL 需用户显式启用。 */
   windowsShellPreference?: WindowsShellPreference
   /** 侧栏「自动任务」合成项目组在项目列表中的位置索引（默认 0 = 最靠前；可拖拽调整） */
@@ -329,8 +349,6 @@ export interface AppSettings {
   sendWithCmdEnter?: boolean
   /** 用户自定义快捷键覆盖 */
   shortcutOverrides?: ShortcutOverrides
-  /** 是否显示用户消息悬浮置顶条（默认 true） */
-  stickyUserMessageEnabled?: boolean
   /** 左侧会话列表悬浮预览迷你地图（默认 false，需手动开启） */
   sessionHoverPreviewEnabled?: boolean
   /** 粘贴超过阈值的长文本时是否自动转为附件（默认 false） */
@@ -339,8 +357,6 @@ export interface AppSettings {
   richTextRenderingEnabled?: boolean
   /** Markdown 预览字号档位（默认 'medium'，对应 15px） */
   markdownFontSize?: MarkdownFontSize
-  /** 上次是否在 Scratch Pad 页（用于重启恢复） */
-  scratchPadActive?: boolean
   /** 应用图标变体 ID（dock + window icon），'default' 或 logo 变体 id */
   appIconVariant?: string
   /** 语音输入设置（Access Token 以加密态存储，由专用服务解密后返回渲染进程） */
@@ -351,10 +367,10 @@ export interface AppSettings {
   visionRelay?: VisionRelaySettings
   /** 已确认的受管浏览器风险告知版本；低于当前版本时首次使用会再次要求确认。 */
   browserRiskDisclaimerVersion?: number
-  /** 用户手动关闭的 Proma 内置 MCP ID 列表（针对默认开启的内置 MCP） */
-  builtinMcpDisabledIds?: string[]
-  /** 用户手动开启的 Proma 内置 MCP ID 列表（针对默认关闭的内置 MCP，如 nano-banana、mem） */
+  /** 用户手动开启的 Proma 内置能力 ID 列表（默认关闭的 Nano Banana）。 */
   builtinMcpEnabledIds?: string[]
+  /** Todo、日程与 Obsidian 的可见性和 Agent 工具注入开关，默认全部开启。 */
+  productivityTools: ProductivityToolsSettings
   /** 启动时自动清理临时文件（proma-preview、proma-installers），默认 true */
   autoCleanupTempOnStart?: boolean
   /** 自动清理 N 天前已归档会话的 SDK 数据（0 = 禁用，默认 0） */
@@ -369,8 +385,6 @@ export interface AppSettings {
   agentIsland?: AgentIslandSettings
   /** 主窗口状态（大小、位置、是否最大化） */
   mainWindowState?: MainWindowState
-  /** 独立任务/日程窗口状态（大小、位置、是否最大化） */
-  planningWindowState?: MainWindowState
 }
 
 /** 当前发布的 Onboarding 内容版本。提升该值可让所有用户重新完成新版引导。 */

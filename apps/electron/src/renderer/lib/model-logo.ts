@@ -62,9 +62,8 @@ import GrokDarkLogo from '@/assets/models/grok_dark.png'
 // Kimi
 import KimiLogo from '@/assets/models/moonshot.png'
 
-// Doubao / 豆包
-import DoubaoLogo from '@/assets/models/doubao.png'
-import DoubaoDarkLogo from '@/assets/models/doubao_dark.png'
+// Volcengine / 火山引擎
+import VolcengineLogo from '@/assets/models/volcengine.svg'
 
 // Zhipu / 智谱
 import ZhipuLogo from '@/assets/models/zhipu.png'
@@ -177,10 +176,10 @@ const MODEL_LOGO_MAP: Record<string, string> = {
   // === Kimi ===
   kimi: KimiLogo,
 
-  // === Doubao / 豆包 ===
-  doubao: DoubaoLogo,
-  'ep-202': DoubaoLogo,
-  seed: DoubaoLogo,
+  // === Volcengine / 火山引擎 ===
+  doubao: VolcengineLogo,
+  'ep-202': VolcengineLogo,
+  seed: VolcengineLogo,
 
   // === Zhipu / 智谱 ===
   zhipu: ZhipuLogo,
@@ -247,9 +246,10 @@ const PROVIDER_LOGO_MAP: Record<ProviderType, string> = {
   zhipu: ZhipuLogo,
   'zhipu-coding': ZhipuLogo,
   'zhipu-coding-team': ZhipuLogo,
-  'ark-coding-plan': DoubaoLogo,
+  'ark-coding-plan': VolcengineLogo,
   minimax: MiniMaxLogo,
-  doubao: DoubaoLogo,
+  doubao: VolcengineLogo,
+  'doubao-api': VolcengineLogo,
   qwen: QwenLogo,
   'qwen-anthropic': QwenLogo,
   'qwen-token-plan': QwenLogo,
@@ -323,7 +323,7 @@ const URL_LOGO_MAP: Array<[RegExp, string]> = [
   [/bigmodel\.cn|zhipuai/i, ZhipuLogo],
   [/minimax/i, MiniMaxLogo],
   [/xiaomimimo|mimo/i, XiaomiLogo],
-  [/volces\.com|volcengine/i, DoubaoLogo],
+  [/volces\.com|volcengine/i, VolcengineLogo],
   [/dashscope|aliyuncs/i, QwenLogo],
   [/deepseek/i, DeepSeekLogo],
   [/openai\.com/i, OpenAILogo],
@@ -369,12 +369,11 @@ export function getChannelLogo(channel: { provider: ProviderType; baseUrl: strin
 /**
  * 根据模型 ID 在渠道列表中查找显示名称
  *
- * 提供 channelId 时仅在该渠道内查找，避免同名模型落到另一渠道；
- * 未提供时保持旧会话的全渠道 fallback。
+ * 优先返回别名（name !== id），未找到则返回原始 modelId。
+ * 用于将 SDK 返回的 model ID 转为用户友好的显示名称。
  */
-export function resolveModelDisplayName(modelId: string, channels: import('@proma/shared').Channel[], channelId?: string): string {
+export function resolveModelDisplayName(modelId: string, channels: import('@proma/shared').Channel[]): string {
   for (const channel of channels) {
-    if (channelId && channel.id !== channelId) continue
     for (const model of channel.models) {
       if (model.id === modelId && model.name && model.name !== model.id) {
         return model.name
@@ -385,11 +384,10 @@ export function resolveModelDisplayName(modelId: string, channels: import('@prom
 }
 
 /**
- * 根据模型 ID 在渠道列表中查找供应商类型；提供 channelId 时只查该渠道。
+ * 根据模型 ID 在渠道列表中查找供应商类型
  */
-export function resolveModelProvider(modelId: string, channels: import('@proma/shared').Channel[], channelId?: string): ProviderType | undefined {
+export function resolveModelProvider(modelId: string, channels: import('@proma/shared').Channel[]): ProviderType | undefined {
   for (const channel of channels) {
-    if (channelId && channel.id !== channelId) continue
     for (const model of channel.models) {
       if (model.id === modelId) {
         return channel.provider

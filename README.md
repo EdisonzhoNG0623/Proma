@@ -21,7 +21,7 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 - **内嵌浏览器自动化**：Agent 可以直接操作内置受管浏览器——打开网页、观察页面结构、点击 / 填写控件、切换标签页，并支持打开 `localhost` 本地开发服务；站内搜索、登录后页面、动态内容和本地 HTML 预览都能交给 Agent 完成，无需手动复制粘贴。
 - **协作与任务**：复杂任务可拆分为可追踪的协作子 Agent / Task，并在消息流中展示调用过程和结果。
 - **Skills、MCP 与项目指令**：每个 Proma 项目独立配置 Skills 与 MCP Server；项目可通过 `AGENTS.md` 声明受信项目指令，旧 `CLAUDE.md` 配置自动迁移。项目文件可使用用户选择的本地项目根目录，也可使用 Proma 托管的空白项目目录。
-- **Hermes Remote（实验性，`0.17.27-hermes.1`）**：Proma 可作为远端 Hermes Agent 的桌面客户端；输入区可显式切换 `Pi 本地` 与 Hermes Target，并支持 Dashboard / API Server 协议、Direct / SSH、远端项目与会话、原子附件提交和真实远端停止。Proma 创建和浏览的 Hermes 远端项目统一位于 `/opt/ai/projects`。Hermes 与本地 Pi 的 Skills、Memory、MCP、Automation 和数据严格隔离。
+- **Hermes Remote（实验性，`0.19.16-hermes.1`）**：Proma 可作为远端 Hermes Agent 的桌面客户端；输入区可显式切换 `Pi 本地` 与 Hermes Target，并支持 Dashboard / API Server 协议、Direct / SSH、远端项目与会话、原子附件提交和真实远端停止。Proma 创建和浏览的 Hermes 远端项目统一位于 `/opt/ai/projects`。Hermes 与本地 Pi 的 Skills、Memory、MCP、Automation 和数据严格隔离。
 - **远程机器人**：支持飞书 / Lark 机器人桥接，并已提供钉钉、微信桥接入口，用手机或群聊触发本机 Agent 工作流。
 - **记忆与工具**：Chat 和 Agent 可共享工作区记忆，记忆变更自动追踪并在界面提示刷新；支持联网搜索、内置 Chat 工具、Agent 推荐等辅助能力。
 - **本地优先**：会话、工作区、附件、配置、Skills 等默认存储在 `~/.proma/`，使用 JSON / JSONL 文件组织，不依赖本地数据库。
@@ -33,7 +33,7 @@ Proma 是一个本地优先的 AI 桌面应用，把多模型 Chat、通用 Agen
 
 Hermes 版本请从本 fork 的 [GitHub Releases](https://github.com/EdisonzhoNG0623/Proma/releases/latest) 下载，提供 Windows x64 NSIS 安装包和 ZIP 免安装包。免安装版解压后运行根目录中的 `Proma.exe`，仍与安装版共用 `~/.proma/` 配置和数据目录。
 
-官方跨平台版本及上游源码见 [`proma-ai/Proma`](https://github.com/proma-ai/Proma)。当前 Hermes Windows 产物未签名，首次运行可能触发 SmartScreen，请先核对 Release 中的 `SHA256SUMS.txt`。
+官方跨平台版本及上游源码见 [`proma-ai/Proma`](https://github.com/proma-ai/Proma)，提供 macOS、Windows、Ubuntu/Debian x86_64 的 `.deb` 安装包和 Linux x86_64 AppImage。Linux 的安装、安全边界和支持范围见 [Linux 说明](./docs/linux.md)。当前 Hermes Windows 产物未签名，首次运行可能触发 SmartScreen，请先核对 Release 中的 `SHA256SUMS.txt`。
 
 开源版可独立使用，并支持自行配置 AI 供应商渠道。如果你更希望使用 Proma 提供的内置模型渠道和订阅方案，也可以按需了解 [Proma 商业版](https://proma.cool/download)。两个版本面向不同的使用偏好，你可以自由选择适合自己的版本。
 
@@ -132,7 +132,7 @@ Proma 的 Agent 模式由 **Pi Agent Runtime** 单一驱动，内核来自 `@ear
 
 ## Hermes Remote（实验性）
 
-`0.17.27-hermes.1` 基于上游 `main@c52b61a5`（应用清单 `0.17.27`，比 `v0.17.26` 多 6 个提交）叠加 Hermes Remote。Proma 本地 Agent 仍统一使用 Pi；Hermes 在主进程 service 边界作为显式 external runtime 分流，不进入 Pi provider、工作区上下文或本地 JSONL 历史。
+`0.19.16-hermes.1` 基于上游 `main@9415c521`（应用清单 `0.19.16`）叠加 Hermes Remote。Proma 本地 Agent 仍统一使用 Pi；Hermes 在主进程 service 边界作为显式 external runtime 分流，不进入 Pi provider、工作区上下文或本地 JSONL 历史。
 
 - Agent 输入区提供独立的 `Pi 本地 ↔ Hermes Remote` Runtime Selector，并可直接选择 Hermes Target；不恢复 Claude Code。
 - Runtime/Target 切换会新建独立会话，不改写当前会话身份，避免 Pi JSONL 与 Hermes canonical snapshot 混用。
@@ -141,7 +141,7 @@ Proma 的 Agent 模式由 **Pi Agent Runtime** 单一驱动，内核来自 `@ear
 - 支持 Direct / SSH Tunnel、target-scoped 凭据与 Cookie partition、SSH host-key 确认和受限 SFTP 浏览。
 - Dashboard 会话支持远端 canonical history、实时流式、approval / clarify / sudo / secret 交互、图片与普通文件附件、远端停止和重启媒体恢复。
 - 远端历史 snapshot 是真源；本地缓存可删除重建，Hermes 不读取或追加本地 Agent JSONL。
-- Windows x64 安装版、ZIP 免安装版及 SHA-256 校验信息见 [`v0.17.27-hermes.1`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.17.27-hermes.1)。两种版本共用 `~/.proma/`，ZIP 不会将数据写入解压目录。
+- Windows x64 安装版、ZIP 免安装版及 SHA-256 校验信息见 [`v0.19.16-hermes.1`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.19.16-hermes.1)。两种版本共用 `~/.proma/`，ZIP 不会将数据写入解压目录。
 
 ## 技术栈
 
@@ -235,9 +235,6 @@ Pi 运行时在主进程中作为 esbuild external 依赖运行。`apps/electron
 
 - [Shiki](https://shiki.style/)：代码高亮。
 - [Beautiful Mermaid](https://github.com/lukilabs/beautiful-mermaid) 与 [Mermaid](https://mermaid.js.org/)：Mermaid 图表渲染与官方兜底渲染。
-- [Cherry Studio](https://github.com/CherryHQ/cherry-studio)：多供应商桌面 AI 产品启发。
-- [Lobe Icons](https://github.com/lobehub/lobe-icons)：AI / LLM 品牌图标。
-- [Craft Agents OSS](https://github.com/lukilabs/craft-agents-oss)：Agent SDK 集成模式参考。
 
 ## 许可证
 

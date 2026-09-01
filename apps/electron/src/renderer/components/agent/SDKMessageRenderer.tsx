@@ -20,9 +20,8 @@ import { ContentBlock } from './ContentBlock'
 import { HermesMediaBlock } from './HermesMediaBlock'
 import { TurnFileChangesSummary, buildTurnFileNameMap } from './TurnFileChangesSummary'
 import { TurnSkillUsageSummary } from './TurnSkillUsageSummary'
-import { ProcessBlockGroup, buildAssistantTurnRenderItems, buildCompletedToolResultIds } from './ProcessBlockGroup'
+import { ProcessBlockGroup, buildAssistantTurnRenderItems } from './ProcessBlockGroup'
 import { extractHermesFiles, stripHermesAttachmentDirectives } from '@/lib/hermes-media-extract'
-
 import { extractToolResultText, TASK_TOOL_NAMES } from './task-progress'
 import { normalizeThinkTagsInContentBlocks } from './thinking-tag-parser'
 // 会话转录的纯逻辑(Turn 分组 / 快照去重 / 预览)已下沉到 @proma/session-core 作为唯一真源。
@@ -62,8 +61,7 @@ import { channelsAtom, modelSelectorOpenAtom } from '@/atoms/chat-atoms'
 import { agentSessionPendingFilesAtom, agentSessionsAtom, agentWorkspacesAtom } from '@/atoms/agent-atoms'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { automationsAtom, automationFormAtom, automationToDraft } from '@/atoms/automation-atoms'
-import { activeViewAtom } from '@/atoms/active-view'
-import { planningTabAtom } from '@/atoms/planning-atoms'
+import { openWorkspaceComponentAtom } from '@/atoms/agent-atoms'
 import { environmentCheckDialogOpenAtom } from '@/atoms/environment'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
 import { useOpenPreview } from '@/components/diff/preview-opener'
@@ -270,12 +268,12 @@ function extractToolResultForTask(message: SDKUserMessage, resultBlock: SDKToolR
 
 // ===== 助手头像 =====
 
-function AssistantLogo({ model, channelId }: { model?: string; channelId?: string }): React.ReactElement {
+export function AssistantLogo({ model }: { model?: string }): React.ReactElement {
   const channels = useAtomValue(channelsAtom)
   if (model) {
     return (
       <img
-        src={getModelLogo(model, resolveModelProvider(model, channels, channelId))}
+        src={getModelLogo(model, resolveModelProvider(model, channels))}
         alt={model}
         className="size-[35px] rounded-[25%] object-cover"
       />
@@ -475,15 +473,11 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
     (b) => b.type === 'text' && 'text' in b && !!(b as { text: string }).text
   )
 
-  const completedToolResultIds = React.useMemo(() => {
-    return buildCompletedToolResultIds(turn.turnMessages)
-  }, [turn.turnMessages])
   const renderItems = React.useMemo(() => {
-    return buildAssistantTurnRenderItems(displayTopLevelBlocks, {
+    return buildAssistantTurnRenderItems(topLevelBlocks, {
       isStreaming,
-      completedToolResultIds,
     })
-  }, [displayTopLevelBlocks, isStreaming, completedToolResultIds])
+  }, [topLevelBlocks, isStreaming])
 
   // 本轮「文件名 → 绝对路径」映射：与 footer chips 同源，供正文内联文件引用补全裸文件名
   const turnFileMap = React.useMemo(
@@ -542,9 +536,9 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
   return (
     <Message from="assistant">
       <MessageHeader
-        model={turn.model ? resolveModelDisplayName(turn.model, channels, turn.channelId) : undefined}
+        model={turn.model ? resolveModelDisplayName(turn.model, channels) : undefined}
         time={turn.createdAt ? formatMessageTime(turn.createdAt) : undefined}
-        logo={<AssistantLogo model={turn.model} channelId={turn.channelId} />}
+        logo={<AssistantLogo model={turn.model} />}
       />
       <MessageContent>
         <TurnFileMapProvider map={turnFileMap}>
@@ -556,15 +550,19 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
 
             const groupBlocks = item.items.map((groupItem) => groupItem.block)
             const firstIndex = item.items[0]?.index ?? 0
+            const groupKey = `process-${firstIndex}`
             return (
               <ProcessBlockGroup
-                key={`process-${firstIndex}`}
+                key={groupKey}
                 blocks={groupBlocks}
                 isStreaming={isStreaming}
+                renderChildren={() => item.items.map((groupItem) => (
+                  <React.Fragment key={groupItem.index}>
+                    {renderProcessGroupBlock(groupItem.block, groupItem.index)}
+                  </React.Fragment>
+                ))}
                 isMessageTail={itemIndex === renderItems.length - 1}
-              >
-                {item.items.map((groupItem) => renderProcessGroupBlock(groupItem.block, groupItem.index))}
-              </ProcessBlockGroup>
+              />
             )
           })}
         </div>
@@ -628,7 +626,7 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, onR
               </MessageAction>
             )}
             {onFork && lastUuid && (
-              <MessageAction tooltip="按当前模型从此处分叉" onClick={() => onFork(lastUuid)}>
+              <MessageAction tooltip="从此处探索（保留主线，结论可带回）" onClick={() => onFork(lastUuid)}>
                 <Split className="size-3.5" />
               </MessageAction>
             )}
@@ -705,9 +703,9 @@ export function SDKMessageRenderer({
       <Message from="assistant">
         {showHeader && (
           <MessageHeader
-            model={model ? resolveModelDisplayName(model, channels, aMsg._channelId) : undefined}
+            model={model ? resolveModelDisplayName(model, channels) : undefined}
             time={meta.createdAt ? formatMessageTime(meta.createdAt) : undefined}
-            logo={<AssistantLogo model={model} channelId={aMsg._channelId} />}
+            logo={<AssistantLogo model={model} />}
           />
         )}
         <MessageContent>
@@ -1176,8 +1174,7 @@ function ScheduledRunBadge(): React.ReactElement {
   const sessions = useAtomValue(agentSessionsAtom)
   const automations = useAtomValue(automationsAtom)
   const setForm = useSetAtom(automationFormAtom)
-  const setActiveView = useSetAtom(activeViewAtom)
-  const setPlanningTab = useSetAtom(planningTabAtom)
+  const openWorkspaceComponent = useSetAtom(openWorkspaceComponentAtom)
 
   const session = sessions.find((s) => s.id === activeSessionId)
   const automation = session?.sourceAutomationId && !session.sourceDelegationId
@@ -1186,8 +1183,7 @@ function ScheduledRunBadge(): React.ReactElement {
 
   const handleClick = (): void => {
     if (!automation) return
-    setActiveView('planning')
-    setPlanningTab('automations')
+    openWorkspaceComponent('automations')
     setForm({
       open: true,
       draft: automationToDraft(automation),

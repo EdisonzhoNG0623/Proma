@@ -13,9 +13,7 @@
  * 本服务只负责 Agent 会话状态，保持职责单一。
  */
 
-import { ipcMain } from 'electron'
 import {
-  AGENT_ISLAND_IPC_CHANNELS,
   type AgentIslandActivityLine,
   type AgentIslandPillSnapshot,
   type AgentIslandSessionSnapshot,
@@ -165,8 +163,10 @@ function setToolDetail(session: InternalSessionSnapshot, toolName: string): void
 function handleAgentEvent(sessionId: string, payload: AgentStreamPayload): void {
   if (payload.kind === 'proma_event') {
     handlePromaEvent(sessionId, payload.event)
-  } else {
+  } else if (payload.kind === 'sdk_message') {
     handleSdkMessage(sessionId, payload.message)
+  } else {
+    // Delta 仅用于 renderer 的实时内容；灵动岛等待终态 SDK message 更新。
   }
 }
 
@@ -763,6 +763,7 @@ function requiresImmediateAgentIslandPush(payload: AgentStreamPayload): boolean 
   if (payload.kind === 'proma_event') {
     return ['permission_request', 'ask_user_request', 'exit_plan_mode_request', 'run_stopped'].includes(payload.event.type)
   }
+  if (payload.kind !== 'sdk_message') return false
   const message = payload.message
   return message.type === 'result' || (message.type === 'assistant' && Boolean((message as import('@proma/shared').SDKAssistantMessage).error))
 }
@@ -776,8 +777,6 @@ export interface AgentIslandServiceDeps {
   showAndFocusMainWindow: () => void
   /** 打开指定 Agent 会话（转发到主窗口渲染进程） */
   openAgentSession: (sessionId: string, title: string) => void
-  /** 打开独立 Planning 窗口（原生岛的日程入口）。 */
-  openPlanning?: () => void
   /** 是否允许启用灵动岛（如设置开关） */
   enabled?: () => boolean
 }
@@ -804,12 +803,6 @@ export function initAgentIslandService(deps: AgentIslandServiceDeps): void {
   disposeEventBus = agentEventBus.on((sessionId, payload) => {
     handleAgentEvent(sessionId, payload)
     schedulePush(requiresImmediateAgentIslandPush(payload) ? PUSH_THROTTLE_MS : AGENT_STREAM_PUSH_THROTTLE_MS)
-  })
-
-  // 仅保留主应用用于确认“完成会话已查看”的 IPC。
-  ipcMain.handle(AGENT_ISLAND_IPC_CHANNELS.MARK_SESSION_VIEWED, (_event, sessionId: unknown) => {
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return
-    markAgentIslandSessionViewed(sessionId)
   })
 }
 
@@ -920,12 +913,6 @@ export function handleNativeAgentIslandEvent(event: NativeAgentIslandEvent): voi
       break
     case 'open-session':
       openAgentIslandSession(event.sessionId)
-      break
-    case 'open-planning':
-      // Native islands prefer the focused Planning window, while deployments
-      // without that optional surface still retain a useful main-window route.
-      if (serviceDeps.openPlanning) serviceDeps.openPlanning()
-      else serviceDeps.showAndFocusMainWindow()
       break
     case 'dismiss':
       dismissAgentIsland()

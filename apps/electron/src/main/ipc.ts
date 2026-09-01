@@ -9,7 +9,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { existsSync, realpathSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, MAX_ATTACHMENT_SIZE, isPromaPermissionMode, normalizePathForCompare } from '@proma/shared'
+import { createHash } from 'node:crypto'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, VAULT_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, MAX_ATTACHMENT_SIZE, isPromaPermissionMode, normalizePathForCompare, TERMINAL_IPC_CHANNELS } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, WINDOWS_AGENT_ISLAND_IPC_CHANNELS, TRAY_IPC_CHANNELS } from '../types'
 import { registerHermesIpcHandlers } from './lib/hermes/hermes-ipc-handlers'
 import { hermesIpcService } from './lib/hermes/hermes-ipc-service'
@@ -49,6 +50,7 @@ import type {
   FileOrFolderDialogResult,
   RecentMessagesResult,
   AgentSessionMeta,
+  AgentActiveSessionSnapshot,
   SetAgentSessionActiveWorktreeInput,
   AgentSendInput,
   AgentThinkingLevel,
@@ -61,9 +63,6 @@ import type {
   AgentAttachFileInput,
   WorkspaceAttachDirectoryInput,
   WorkspaceAttachFileInput,
-  GetTaskOutputInput,
-  GetTaskOutputResult,
-  StopTaskInput,
   WorkspaceMcpConfig,
   SkillMeta,
   BulkImportSkillItemResult,
@@ -135,7 +134,6 @@ import type {
   CreateTodoInput,
   StartTodoAgentInput,
   StartTodoAgentResult,
-  TodoAgentSessionActivation,
   UpdateTodoInput,
   CreateCalendarEventInput,
   UpdateCalendarEventInput,
@@ -161,9 +159,25 @@ import type {
 import type { UserProfile, AppSettings } from '../types'
 import { getRuntimeStatus, getGitRepoStatus, reinitializeRuntime } from './lib/runtime-init'
 import { browserController } from './lib/browser-controller'
+import { acknowledgeTerminalOutput, closeTerminalsForSession, createTerminal, getTerminalSnapshot, killTerminal, resizeTerminal, writeTerminal } from './lib/terminal-service'
+import { getMainWindow } from './lib/main-window-store'
 import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
 import { getUnstagedChanges, invalidateGitDiffCache, getFileDiff, getUntrackedContent, revertFile, getDiffContents, listWorktrees, getWorktreeChanges, getMainRepoRoot } from './lib/git-diff-service'
 import { registerPromaDirectoryPath, registerPromaFilePath } from './lib/local-file-protocol'
+import {
+  authorizeDiscoveredVault,
+  configureVault,
+  createUntitledVaultFile,
+  createUntitledVaultFileInFolder,
+  createVaultFolder,
+  discoverObsidianVaultCandidates,
+  discoverVaultCandidates,
+  selectDefaultVault,
+  getConfiguredVaultFileSystem,
+  getVaultSummary,
+  setVaultUserContext,
+  clearVaultUserContext,
+} from './lib/vault-service'
 import { registerUpdaterIpc } from './lib/updater/updater-ipc'
 import {
   listChannels,
@@ -186,6 +200,7 @@ import {
   listConversations,
   createConversation,
   getConversationMessages,
+  getConversationMessagesAround,
   getRecentMessages,
   updateConversationMeta,
   deleteConversation,
@@ -194,6 +209,7 @@ import {
   updateContextDividers,
   autoArchiveConversations,
   searchConversationMessages,
+  searchConversationSessionMessages,
 } from './lib/conversation-manager'
 import { sendMessage, stopGeneration, generateTitle } from './lib/chat-service'
 import {
@@ -268,12 +284,12 @@ import {
 import { runPlanningNativeSync } from './lib/planning-native-sync-coordinator'
 import {
   listAgentSessions,
+  listActiveAgentSessions,
+  listArchivedAgentSessions,
+  countArchivedAgentSessions,
   createAgentSession,
   getAgentSessionMeta,
-  getAgentSessionSDKMessagesAfterForRenderer,
-  getAgentSessionSDKMessagesForRenderer,
-  getAgentSessionCounts,
-  getAgentSessionSDKMessagesPage,
+  getAgentSessionSDKMessages,
   updateAgentSessionMeta,
   deleteAgentSession,
   migrateChatToAgentSession,
@@ -283,9 +299,11 @@ import {
   cleanupStaleAttachedPaths,
   searchAgentSessionMessages,
   searchAgentSessionReferences,
+  resolveAgentCwd,
 } from './lib/agent-session-manager'
-import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, setVisibleAgentSession } from './lib/agent-service'
+import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, isAgentSessionBusy, listActiveAgentSessionSnapshots, listQueuedAgentMessages, reserveAgentSessionStart, queueAgentMessage, submitOrEnqueueAgentMessage, enqueueAgentQueuedMessage, cancelAgentQueuedMessage, moveAgentQueuedMessage, clearAgentQueuedMessages, updateAgentPermissionMode, rewindAgentSession, setVisibleAgentSession } from './lib/agent-service'
 import { permissionService } from './lib/agent-permission-service'
+import { resolvePathAgainstAgentCwd } from './lib/agent-file-path'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
 import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getWorkspaceSkillsDir, getScratchPadPath } from './lib/config-paths'
@@ -294,6 +312,7 @@ import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/s
 import type { CleanupOptions } from './lib/storage-service'
 import {
   listAgentWorkspaces,
+  listAgentWorkspacesWithProjectRootStatus,
   createAgentWorkspace,
   updateAgentWorkspace,
   relinkAgentWorkspaceProjectRoot,
@@ -303,6 +322,8 @@ import {
   ensureDefaultWorkspace,
   getWorkspaceMcpConfig,
   saveWorkspaceMcpConfig,
+  getDisabledCliIntegrationIds,
+  setCliIntegrationEnabled,
   getAllWorkspaceSkills,
   getOtherWorkspaceSkills,
   getDefaultSkillSlugs,
@@ -313,6 +334,7 @@ import {
   importSkillFromWorkspace,
   batchImportSkillsFromWorkspaces,
   updateSkillFromSource,
+  getWorkspaceSkillFolder,
   readWorkspaceSkillContent,
   writeWorkspaceSkillContent,
   toggleWorkspaceSkill,
@@ -343,10 +365,54 @@ import {
 import { movePathSafely } from './lib/file-move-service'
 import { subscribeWorkspaceMemoryChanges } from './lib/workspace-memory-change-watcher'
 import { confirmWorkspaceMemoryWindowClose, markWorkspaceMemoryWindowReady } from './lib/workspace-memory-window'
+import { deleteMcpCredential, startMcpOAuth, saveMcpApiKey } from './lib/mcp-oauth-service'
 
 /** Renderer-scoped subscriptions; disposed on explicit tab cleanup or renderer destruction. */
 const workspaceMemoryWatchSubscriptions = new Map<number, Map<string, () => void>>()
 const workspaceMemoryWatchDestroyedListeners = new Set<number>()
+
+/**
+ * 每次保存或刷新都会推进工作区代数，使较早的异步 MCP 刷新不能回写较新的配置。
+ * 该代数仅用于进程内竞态保护，不写入用户的 mcp.json。
+ */
+const workspaceMcpRefreshGenerations = new Map<string, number>()
+const workspaceMcpPendingValidations = new Map<string, Map<string, import('@proma/shared').McpServerEntry>>()
+
+function advanceWorkspaceMcpRefreshGeneration(workspaceSlug: string): number {
+  const generation = (workspaceMcpRefreshGenerations.get(workspaceSlug) ?? 0) + 1
+  workspaceMcpRefreshGenerations.set(workspaceSlug, generation)
+  return generation
+}
+
+function getWorkspaceMcpPendingValidation(workspaceSlug: string, name: string): import('@proma/shared').McpServerEntry | undefined {
+  return workspaceMcpPendingValidations.get(workspaceSlug)?.get(name)
+}
+
+function setWorkspaceMcpPendingValidation(workspaceSlug: string, name: string, entry: import('@proma/shared').McpServerEntry): void {
+  const pending = workspaceMcpPendingValidations.get(workspaceSlug) ?? new Map<string, import('@proma/shared').McpServerEntry>()
+  pending.set(name, entry)
+  workspaceMcpPendingValidations.set(workspaceSlug, pending)
+}
+
+function clearWorkspaceMcpPendingValidation(workspaceSlug: string, name: string): void {
+  const pending = workspaceMcpPendingValidations.get(workspaceSlug)
+  if (!pending) return
+  pending.delete(name)
+  if (pending.size === 0) workspaceMcpPendingValidations.delete(workspaceSlug)
+}
+
+function clearMissingWorkspaceMcpPendingValidations(workspaceSlug: string, serverNames: ReadonlySet<string>): void {
+  const pending = workspaceMcpPendingValidations.get(workspaceSlug)
+  if (!pending) return
+  for (const name of pending.keys()) {
+    if (!serverNames.has(name)) pending.delete(name)
+  }
+  if (pending.size === 0) workspaceMcpPendingValidations.delete(workspaceSlug)
+}
+
+function isWorkspaceMcpRefreshCurrent(workspaceSlug: string, generation: number): boolean {
+  return workspaceMcpRefreshGenerations.get(workspaceSlug) === generation
+}
 
 function stopWorkspaceMemoryWatch(webContentsId: number, workspaceSlug: string): void {
   const subscriptions = workspaceMemoryWatchSubscriptions.get(webContentsId)
@@ -543,6 +609,15 @@ async function resolveFileAccessPath(filePath: string, options?: FileAccessOptio
   return resolveFilePath(filePath, getPreviewCandidateBasePaths(options)) ?? resolve(filePath)
 }
 
+/** 当前 Agent 的 Write/Edit 相对路径必须按实际运行 cwd 解析。 */
+function getAgentCwdForFileAccess(options?: FileAccessOptions): string | undefined {
+  if (!options?.sessionId) return undefined
+  const session = getAgentSessionMeta(options.sessionId)
+  if (!session?.workspaceId) return undefined
+  const workspace = getAgentWorkspace(session.workspaceId)
+  return resolveAgentCwd(workspace, session.id, session.agentCwdMode, session.activeWorktree)
+}
+
 async function getAccessRootMainRepo(root: string): Promise<string | null> {
   if (!existsSync(root)) return null
   let probePath = root
@@ -709,6 +784,196 @@ async function runCmd(
       child.stdin.end(stdin)
     }
   })
+}
+
+type CliCommandResult = { status: number | null; stdout: string }
+type CliCommandRunner = (bin: string, args: string[], opts: { timeoutMs?: number }) => Promise<CliCommandResult>
+
+/**
+ * npm-installed CLIs are commonly exposed as .cmd shims on Windows. Keep the
+ * cmd.exe path isolated to fixed catalog commands instead of enabling a shell
+ * for the general-purpose runCmd helper.
+ */
+export function getCliProbeInvocation(
+  bin: string,
+  args: string[],
+  platform = process.platform,
+  comSpec = process.env.ComSpec,
+): { bin: string; args: string[] } {
+  if (platform !== 'win32') return { bin, args }
+  return {
+    bin: comSpec || 'cmd.exe',
+    args: ['/d', '/s', '/c', [bin, ...args].join(' ')],
+  }
+}
+
+async function runCliCommand(bin: string, args: string[], opts: { timeoutMs?: number }): Promise<CliCommandResult> {
+  const invocation = getCliProbeInvocation(bin, args)
+  return runCmd(invocation.bin, invocation.args, opts)
+}
+
+interface McpRefreshValidation {
+  name: string
+  fingerprint: string
+  lastTestResult: NonNullable<import('@proma/shared').McpServerEntry['lastTestResult']>
+}
+
+/**
+ * 生成 MCP 可运行配置的稳定摘要。摘要只用于内存中比较，绝不记录或返回，避免暴露 headers/env 中的敏感值。
+ */
+export function getMcpEntryFingerprint(entry: import('@proma/shared').McpServerEntry): string {
+  const sortedEntries = (record: Record<string, string> | undefined): Array<[string, string]> =>
+    Object.entries(record ?? {}).sort(([left], [right]) => left.localeCompare(right))
+
+  const canonical = {
+    type: entry.type,
+    command: entry.command ?? null,
+    args: entry.args ? [...entry.args] : null,
+    url: entry.url ?? null,
+    headers: sortedEntries(entry.headers),
+    env: sortedEntries(entry.env),
+    timeout: entry.timeout ?? null,
+    enabled: entry.enabled,
+    isBuiltin: entry.isBuiltin ?? false,
+  }
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+}
+
+/** 在固定上限内并发执行任务，保留输入顺序，避免同时启动过多 MCP 进程或网络连接。 */
+export async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  maxConcurrency: number,
+  mapper: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+    throw new Error('maxConcurrency 必须是正整数')
+  }
+
+  const results = new Array<R>(values.length)
+  let nextIndex = 0
+  const worker = async (): Promise<void> => {
+    while (nextIndex < values.length) {
+      const index = nextIndex++
+      results[index] = await mapper(values[index]!, index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(maxConcurrency, values.length) }, worker))
+  return results
+}
+
+/**
+ * 只合并仍与验证开始时完全一致的条目。调用方还必须检查 refresh generation，
+ * 因而同名服务器被编辑、禁用、删除或被后一次刷新取代时，旧结果不会落盘。
+ */
+export function mergeMcpRefreshResults(
+  currentConfig: import('@proma/shared').WorkspaceMcpConfig,
+  validations: readonly McpRefreshValidation[],
+): import('@proma/shared').WorkspaceMcpConfig {
+  const servers = { ...currentConfig.servers }
+  for (const validation of validations) {
+    const currentEntry = servers[validation.name]
+    if (currentEntry?.enabled && getMcpEntryFingerprint(currentEntry) === validation.fingerprint) {
+      servers[validation.name] = {
+        ...currentEntry,
+        enabled: validation.lastTestResult.success,
+        lastTestResult: validation.lastTestResult,
+      }
+    }
+  }
+  return { servers }
+}
+
+/**
+ * Validates an enabled candidate while the persisted entry remains disabled. If
+ * the configuration changed while validation was in flight, return that latest
+ * snapshot instead of overwriting it. A failed validation is persisted as a
+ * disabled entry, so invalid MCPs are never loaded by the runtime.
+ */
+async function validateAndConditionallyPersistMcp(
+  workspaceSlug: string,
+  name: string,
+  candidateEntry: import('@proma/shared').McpServerEntry,
+  expectedPersistedFingerprint: string,
+  expectedRefreshGeneration: number,
+): Promise<import('@proma/shared').McpConnectionMutationResult> {
+  const { validateMcpServer } = await import('./lib/mcp-validator')
+  const result = await validateMcpServer(name, candidateEntry, workspaceSlug)
+  const verification = {
+    success: result.valid,
+    message: result.valid ? (result.message ?? 'MCP 连接成功') : (result.reason ?? 'MCP 连接失败'),
+  }
+  const current = getWorkspaceMcpConfig(workspaceSlug)
+  const currentEntry = current.servers[name]
+  if (
+    !isWorkspaceMcpRefreshCurrent(workspaceSlug, expectedRefreshGeneration) ||
+    !currentEntry ||
+    getMcpEntryFingerprint(currentEntry) !== expectedPersistedFingerprint
+  ) {
+    return { config: current, verification }
+  }
+
+  const nextEntry = {
+    ...candidateEntry,
+    enabled: verification.success,
+    lastTestResult: { ...verification, timestamp: Date.now() },
+  }
+  const config = { servers: { ...current.servers, [name]: nextEntry } }
+  clearWorkspaceMcpPendingValidation(workspaceSlug, name)
+  saveWorkspaceMcpConfig(workspaceSlug, config)
+  return { config, verification }
+}
+
+async function runCliProbe(
+  runner: CliCommandRunner,
+  bin: string,
+  args: string[],
+): Promise<CliCommandResult> {
+  try {
+    return await runner(bin, args, { timeoutMs: 2_000 })
+  } catch {
+    return { status: null, stdout: '' }
+  }
+}
+
+/**
+ * `dws auth status --format json` 是官方的非交互认证探测。只接受其完整、成功且 token 有效的结果；
+ * 不读取、返回或持久化 CLI 输出中的任何身份字段。
+ */
+function isDingTalkCliAuthenticated(result: CliCommandResult): boolean {
+  if (result.status !== 0) return false
+
+  try {
+    const status = JSON.parse(result.stdout) as {
+      success?: unknown
+      authenticated?: unknown
+      token_valid?: unknown
+    }
+    return status.success === true && status.authenticated === true && status.token_valid === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 仅将可由 CLI 本身的认证探测确认的集成标记为已连接；命令不存在、超时、未认证和未知探测均保守为 false。
+ */
+export async function getCliIntegrationStatuses(
+  runner: CliCommandRunner = runCliCommand,
+  disabledIds: ReadonlySet<string> = new Set(),
+): Promise<import('@proma/shared').CliIntegrationStatus[]> {
+  const [wecom, dingtalk, github, feishu] = await Promise.all([
+    runCliProbe(runner, 'wecom-cli', ['auth', 'show', '--status']),
+    runCliProbe(runner, 'dws', ['auth', 'status', '--format', 'json']),
+    runCliProbe(runner, 'gh', ['auth', 'status', '--active']),
+    runCliProbe(runner, 'lark-cli', ['auth', 'status', '--verify']),
+  ])
+
+  return [
+    { id: 'wecom-cli', connected: wecom.status === 0 && wecom.stdout.trim().toLowerCase() === 'authorized', enabled: !disabledIds.has('wecom-cli') },
+    { id: 'dingtalk-cli', connected: isDingTalkCliAuthenticated(dingtalk), enabled: !disabledIds.has('dingtalk-cli') },
+    { id: 'github-cli', connected: github.status === 0, enabled: !disabledIds.has('github-cli') },
+    { id: 'feishu-cli', connected: feishu.status === 0, enabled: !disabledIds.has('feishu-cli') },
+  ]
 }
 
 function parseWindowsRegistryValue(stdout: string): string {
@@ -1019,6 +1284,41 @@ async function withOAuthDeviceCodeQr<T extends CodexOAuthDeviceCode | XaiOAuthDe
 }
 
 export function registerIpcHandlers(): void {
+  // ===== 本地终端（仅主 renderer 可操作，不能指定可执行文件） =====
+  const assertMainTerminalRenderer = (senderId: number): void => {
+    const mainWindow = getMainWindow()
+    if (!mainWindow || mainWindow.webContents.id !== senderId) {
+      throw new Error('仅主窗口可以操作本地终端。')
+    }
+  }
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.CREATE, async (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    if (!input.sessionId || !getAgentSessionMeta(input.sessionId)) {
+      throw new Error('终端所属 Agent 会话不存在。')
+    }
+    return createTerminal(input)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.INPUT, async (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return writeTerminal(input)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.RESIZE, async (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return resizeTerminal(input)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.KILL, async (event, terminalId: string) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return killTerminal(terminalId)
+  })
+  ipcMain.handle(TERMINAL_IPC_CHANNELS.SNAPSHOT, async (event, terminalId: string) => {
+    assertMainTerminalRenderer(event.sender.id)
+    return getTerminalSnapshot(terminalId)
+  })
+  ipcMain.on(TERMINAL_IPC_CHANNELS.ACK_OUTPUT, (event, input) => {
+    assertMainTerminalRenderer(event.sender.id)
+    acknowledgeTerminalOutput(input)
+  })
+
   console.log('[IPC] 正在注册 IPC 处理器...')
 
   // ===== 运行时相关 =====
@@ -1478,6 +1778,14 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  // 获取搜索命中附近的有限消息窗口
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.GET_MESSAGES_AROUND,
+    async (_, id: string, messageId: string, radius?: number): Promise<ChatMessage[]> => {
+      return getConversationMessagesAround(id, messageId, radius)
+    }
+  )
+
   // 更新对话标题
   ipcMain.handle(
     CHAT_IPC_CHANNELS.UPDATE_TITLE,
@@ -1536,11 +1844,19 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 搜索对话消息内容
+  // 搜索所有对话消息内容
   ipcMain.handle(
     CHAT_IPC_CHANNELS.SEARCH_MESSAGES,
     async (_, query: string) => {
       return searchConversationMessages(query)
+    }
+  )
+
+  // 搜索当前对话的完整持久化历史（只返回命中元数据，避免传输整份 JSONL）
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.SEARCH_SESSION_MESSAGES,
+    async (_, conversationId: string, query: string) => {
+      return searchConversationSessionMessages(conversationId, query)
     }
   )
 
@@ -1564,8 +1880,8 @@ export function registerIpcHandlers(): void {
   // 注意：通过 event.sender 获取 webContents 用于推送流式事件
   ipcMain.handle(
     CHAT_IPC_CHANNELS.SEND_MESSAGE,
-    async (event, input: ChatSendInput): Promise<void> => {
-      await sendMessage(input, event.sender)
+    async (event, input: ChatSendInput): Promise<boolean> => {
+      return sendMessage(input, event.sender)
     }
   )
 
@@ -1771,11 +2087,10 @@ export function registerIpcHandlers(): void {
       }
 
       // 主题相关设置变化时，广播给所有窗口（跨窗口同步，如 Quick Task 面板）
-      if (updates.themeMode !== undefined || updates.themeStyle !== undefined || updates.interfaceVariant !== undefined) {
+      if (updates.themeMode !== undefined || updates.themeStyle !== undefined) {
         const payload = {
           themeMode: result.themeMode,
           themeStyle: result.themeStyle,
-          interfaceVariant: result.interfaceVariant,
         }
         BrowserWindow.getAllWindows().forEach((win) => {
           // 跳过发起者窗口，避免重复应用
@@ -2055,27 +2370,42 @@ export function registerIpcHandlers(): void {
 
   // ===== Agent 会话管理相关 =====
 
-  // renderer 热路径显式取 active；保留 all 默认值以兼容低频既有调用。
+  // 获取 Agent 会话列表
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_SESSIONS,
-    async (_, scope: 'active' | 'archived' | 'all' = 'all'): Promise<AgentSessionMeta[]> => listAgentSessions(scope)
+    async (): Promise<AgentSessionMeta[]> => listAgentSessions()
   )
 
+  // 获取未归档会话列表（侧栏 active 视图）
   ipcMain.handle(
-    AGENT_IPC_CHANNELS.GET_SESSION_META,
-    async (_, id: string): Promise<AgentSessionMeta | undefined> => getAgentSessionMeta(id),
+    AGENT_IPC_CHANNELS.LIST_ACTIVE_SESSIONS,
+    async (): Promise<AgentSessionMeta[]> => listActiveAgentSessions(),
   )
 
+  // 获取当前主进程仍在执行的 Agent 会话快照，供 renderer 重载后恢复运行态
   ipcMain.handle(
-    AGENT_IPC_CHANNELS.GET_SESSION_COUNTS,
-    async (): Promise<{ active: number; archived: number }> => getAgentSessionCounts(),
+    AGENT_IPC_CHANNELS.ACTIVE_SESSIONS_SNAPSHOT,
+    async (): Promise<AgentActiveSessionSnapshot[]> => listActiveAgentSessionSnapshots(),
+  )
+
+  // 获取归档会话列表（进入归档视图时按需加载）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.LIST_ARCHIVED_SESSIONS,
+    async (): Promise<AgentSessionMeta[]> => listArchivedAgentSessions(),
+  )
+
+  // 获取归档会话数量（active 视图只展示计数）
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.COUNT_ARCHIVED_SESSIONS,
+    async (): Promise<number> => countArchivedAgentSessions(),
   )
 
   // 创建 Agent 会话
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CREATE_SESSION,
-    async (_, title?: string, channelId?: string, workspaceId?: string, modelId?: string): Promise<AgentSessionMeta> => {
-      const session = createAgentSession(title, channelId, workspaceId, modelId)
+    async (_, title?: string, channelId?: string, workspaceId?: string, modelId?: string, isDraft?: boolean): Promise<AgentSessionMeta> => {
+      if (isDraft !== undefined && typeof isDraft !== 'boolean') throw new Error('Agent 草稿状态非法')
+      const session = createAgentSession(title, channelId, workspaceId, modelId, undefined, undefined, isDraft)
       feishuBridgeManager.ensureSessionMirror(session).catch((error) => {
         console.error('[飞书 Session 镜像] 新会话建群失败:', error)
       })
@@ -2122,6 +2452,13 @@ export function registerIpcHandlers(): void {
       if (!layout || typeof layout.sessionId !== 'string' || !layout.bounds || !Number.isSafeInteger(layout.revision)) throw new Error('无效的浏览器布局。')
       await assertBrowserSessionAccess(event.sender.id, layout.sessionId)
       browserController.setLayout(layout)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.MINIMIZE_BROWSER,
+    async (event, sessionId: string): Promise<void> => {
+      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      browserController.minimize(sessionId)
     },
   )
   ipcMain.handle(
@@ -2185,41 +2522,8 @@ export function registerIpcHandlers(): void {
           meta.hermesProfile,
         )
       }
-      return getAgentSessionSDKMessagesForRenderer(id)
+      return getAgentSessionSDKMessages(id)
     }
-  )
-
-  ipcMain.handle(
-    AGENT_IPC_CHANNELS.GET_SDK_MESSAGES_AFTER,
-    async (_, id: string, afterUuid: string): Promise<SDKMessage[] | null> => {
-      if (typeof id !== 'string' || !id || typeof afterUuid !== 'string' || !afterUuid) return null
-      const meta = getAgentSessionMeta(id)
-      if (meta?.agentRuntime === 'hermes-remote') return null
-      return getAgentSessionSDKMessagesAfterForRenderer(id, afterUuid)
-    },
-  )
-
-  // 渲染器消息区默认从尾部按页读取，避免长 transcript 全量读取、解析和 IPC。
-  ipcMain.handle(
-    AGENT_IPC_CHANNELS.GET_SDK_MESSAGES_PAGE,
-    async (_, id: string, input?: { before?: number; limit?: number }) => {
-      const meta = getAgentSessionMeta(id)
-      if (
-        meta?.agentRuntime === 'hermes-remote'
-        && (meta.hermesProtocol ?? 'dashboard') === 'dashboard'
-        && meta.hermesTargetId
-        && meta.hermesRemoteSessionId
-      ) {
-        const messages = await hermesIpcService.getRemoteSessionHistory(
-          id,
-          meta.hermesTargetId,
-          meta.hermesRemoteSessionId,
-          meta.hermesProfile,
-        )
-        return { messages }
-      }
-      return getAgentSessionSDKMessagesPage(id, input)
-    },
   )
 
   // 更新 Agent 会话标题
@@ -2296,7 +2600,9 @@ export function registerIpcHandlers(): void {
       askUserService.clearSessionPending(id)
       // 清理 ExitPlanMode 服务中的待处理请求
       exitPlanService.clearSessionPending(id)
+      clearAgentQueuedMessages(id)
       await browserController.close(id)
+      closeTerminalsForSession(id)
       deleteAgentSession(id)
       releaseAttachedFileWatchers(attachedFiles)
     }
@@ -2322,6 +2628,10 @@ export function registerIpcHandlers(): void {
       const updates: Partial<AgentSessionMeta> = { pinned: newPinned }
       if (newPinned && current.archived) {
         updates.archived = false
+      }
+      // 用户明确置顶临时草稿时，将其提升为普通会话，避免被草稿过滤后不可见。
+      if (newPinned && current.isDraft) {
+        updates.isDraft = false
       }
       return updateAgentSessionMeta(id, updates)
     }
@@ -2366,6 +2676,10 @@ export function registerIpcHandlers(): void {
       if (newArchived && current.pinned) {
         updates.pinned = false
       }
+      // 手动归档是明确的保留意图；将草稿提升为普通归档会话，保留可见入口。
+      if (newArchived && current.isDraft) {
+        updates.isDraft = false
+      }
       return updateAgentSessionMeta(id, updates)
     }
   )
@@ -2390,15 +2704,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.MOVE_SESSION_TO_WORKSPACE,
     async (_, input: MoveSessionToWorkspaceInput): Promise<AgentSessionMeta> => {
-      // 渲染进程的 running 状态可能比主进程 activeSessions 清理更早变为 false
-      // （STREAM_COMPLETE 在 finally 之前发送），短暂等待后重试一次
-      if (isAgentSessionActive(input.sessionId)) {
-        await new Promise((r) => setTimeout(r, 500))
-        if (isAgentSessionActive(input.sessionId)) {
-          throw new Error('会话正在运行中，请停止后再迁移')
-        }
+      if (isAgentSessionBusy(input.sessionId)) {
+        throw new Error('会话正在启动、运行或仍有排队消息，请停止或清空队列后再迁移')
       }
-      return moveSessionToWorkspace(input.sessionId, input.targetWorkspaceId)
+      const moved = moveSessionToWorkspace(input.sessionId, input.targetWorkspaceId)
+      feishuBridgeManager.syncWorkspaceForSession(moved.id, moved.workspaceId!)
+      return moved
     }
   )
 
@@ -2436,7 +2747,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_WORKSPACES,
     async (): Promise<AgentWorkspace[]> => {
-      const workspaces = listAgentWorkspaces()
+      const workspaces = await listAgentWorkspacesWithProjectRootStatus()
       for (const workspace of workspaces) {
         if (workspace.projectRootPath) watchAttachedDirectory(workspace.projectRootPath)
         for (const filePath of getWorkspaceAttachedFiles(workspace.slug)) {
@@ -2451,7 +2762,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CREATE_WORKSPACE,
     async (_, input: import('@proma/shared').CreateAgentWorkspaceInput): Promise<AgentWorkspace> => {
-      const workspace = createAgentWorkspace(input)
+      const workspace = await createAgentWorkspace(input)
       if (workspace.projectRootPath) watchAttachedDirectory(workspace.projectRootPath)
       return workspace
     }
@@ -2461,7 +2772,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CREATE_PROJECT,
     async (_, input: import('@proma/shared').CreateAgentWorkspaceInput, channelId?: string, modelId?: string): Promise<import('@proma/shared').CreateAgentProjectResult> => {
-      const workspace = createAgentWorkspace(input)
+      const workspace = await createAgentWorkspace(input)
       if (workspace.projectRootPath) watchAttachedDirectory(workspace.projectRootPath)
 
       try {
@@ -2494,7 +2805,7 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.RELINK_WORKSPACE_PROJECT_ROOT,
     async (_, id: string, projectRootPath: string): Promise<AgentWorkspace> => {
       const previousRoot = getAgentWorkspace(id)?.projectRootPath
-      const updated = relinkAgentWorkspaceProjectRoot(id, projectRootPath)
+      const updated = await relinkAgentWorkspaceProjectRoot(id, projectRootPath)
       if (previousRoot && previousRoot !== updated.projectRootPath) {
         releaseDirectoryWatcherIfUnreferenced(previousRoot)
       }
@@ -2507,7 +2818,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.RESTORE_WORKSPACE_PROJECT_ROOT,
     async (_, id: string): Promise<AgentWorkspace> => {
-      const updated = restoreAgentWorkspaceProjectRoot(id)
+      const updated = await restoreAgentWorkspaceProjectRoot(id)
       if (updated.projectRootPath) watchAttachedDirectory(updated.projectRootPath)
       return updated
     }
@@ -2560,6 +2871,7 @@ export function registerIpcHandlers(): void {
         if (isAgentSessionActive(sessionId)) {
           await stopAgent(sessionId)
         }
+        closeTerminalsForSession(sessionId)
         deleteAgentSession(sessionId)
       }
       for (const automationId of affectedAutomationIds) {
@@ -2601,23 +2913,222 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 保存工作区 MCP 配置
+  // Save full MCP configurations defensively: renderer-provided test results are
+  // display data, not authorization to load an MCP. Newly enabled or changed
+  // entries are persisted disabled and receive the same real validation as a
+  // card toggle before they can become enabled.
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SAVE_MCP_CONFIG,
-    async (_, workspaceSlug: string, config: WorkspaceMcpConfig): Promise<void> => {
-      return saveWorkspaceMcpConfig(workspaceSlug, config)
+    async (_, workspaceSlug: string, config: WorkspaceMcpConfig, options?: import('@proma/shared').SaveWorkspaceMcpConfigOptions): Promise<void> => {
+      for (const name of options?.explicitlyDisabledServerNames ?? []) {
+        clearWorkspaceMcpPendingValidation(workspaceSlug, name)
+      }
+      const pendingValidations: Array<{ name: string; candidate: import('@proma/shared').McpServerEntry }> = []
+      const servers: WorkspaceMcpConfig['servers'] = {}
+
+      const configServerNames = new Set(Object.keys(config.servers))
+      clearMissingWorkspaceMcpPendingValidations(workspaceSlug, configServerNames)
+      for (const [name, entry] of Object.entries(config.servers)) {
+        const entryWithoutTestResult = { ...entry }
+        delete entryWithoutTestResult.lastTestResult
+        const candidate = { ...entryWithoutTestResult, enabled: true }
+        if (entry.enabled) {
+          // `lastTestResult` is renderer-visible display data, not proof that an
+          // MCP can be loaded. Re-validate every enabled entry, including
+          // configs created by earlier app versions or manually edited on disk.
+          servers[name] = { ...entryWithoutTestResult, enabled: false }
+          pendingValidations.push({ name, candidate })
+          setWorkspaceMcpPendingValidation(workspaceSlug, name, candidate)
+        } else {
+          const pendingCandidate = getWorkspaceMcpPendingValidation(workspaceSlug, name)
+          const pendingEntry = pendingCandidate ? { ...pendingCandidate, enabled: false } : undefined
+          if (pendingEntry && getMcpEntryFingerprint(pendingEntry) === getMcpEntryFingerprint(entry)) {
+            servers[name] = pendingEntry
+            pendingValidations.push({ name, candidate: pendingCandidate! })
+          } else {
+            clearWorkspaceMcpPendingValidation(workspaceSlug, name)
+            // Do not persist renderer-provided verification data for disabled entries.
+            servers[name] = entryWithoutTestResult
+          }
+        }
+      }
+
+      const pendingConfig = { servers }
+      const refreshGeneration = advanceWorkspaceMcpRefreshGeneration(workspaceSlug)
+      saveWorkspaceMcpConfig(workspaceSlug, pendingConfig)
+      for (const validation of pendingValidations) {
+        await validateAndConditionallyPersistMcp(
+          workspaceSlug,
+          validation.name,
+          validation.candidate,
+          getMcpEntryFingerprint(pendingConfig.servers[validation.name]!),
+          refreshGeneration,
+        )
+      }
     }
+  )
+
+  // Atomically toggle one MCP. Any later save advances the workspace refresh
+  // generation, while fingerprint matching protects this entry's validation writeback.
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SET_MCP_ENABLED_AND_VALIDATE,
+    async (_, workspaceSlug: string, name: string, enabled: boolean): Promise<import('@proma/shared').McpConnectionMutationResult> => {
+      const current = getWorkspaceMcpConfig(workspaceSlug)
+      const entry = current.servers[name]
+      if (!entry) throw new Error('找不到 MCP 配置')
+
+      const entryWithoutTestResult = { ...entry }
+      delete entryWithoutTestResult.lastTestResult
+      if (!enabled) {
+        const config = { servers: { ...current.servers, [name]: { ...entry, enabled: false } } }
+        advanceWorkspaceMcpRefreshGeneration(workspaceSlug)
+        clearWorkspaceMcpPendingValidation(workspaceSlug, name)
+        saveWorkspaceMcpConfig(workspaceSlug, config)
+        return { config, verification: { success: true, message: 'MCP 已关闭' } }
+      }
+
+      // Keep the entry disabled until the real handshake succeeds. This prevents
+      // the runtime from repeatedly starting a known-invalid server.
+      const pendingEntry = { ...entryWithoutTestResult, enabled: false }
+      const pendingConfig = { servers: { ...current.servers, [name]: pendingEntry } }
+      // Keep this candidate in memory so an unrelated full-config save during
+      // the handshake preserves and resumes the validation instead of treating
+      // the temporary disabled entry as a user-requested disable.
+      const refreshGeneration = advanceWorkspaceMcpRefreshGeneration(workspaceSlug)
+      setWorkspaceMcpPendingValidation(workspaceSlug, name, { ...entryWithoutTestResult, enabled: true })
+      saveWorkspaceMcpConfig(workspaceSlug, pendingConfig)
+      return validateAndConditionallyPersistMcp(
+        workspaceSlug,
+        name,
+        { ...entryWithoutTestResult, enabled: true },
+        getMcpEntryFingerprint(pendingEntry),
+        refreshGeneration,
+      )
+    },
+  )
+
+  // Atomically install a catalog MCP. Existing configs win instead of being
+  // replaced by a stale renderer snapshot.
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.INSTALL_MCP_AND_VALIDATE,
+    async (_, workspaceSlug: string, name: string, entry: import('@proma/shared').McpServerEntry): Promise<import('@proma/shared').McpInstallMutationResult> => {
+      const current = getWorkspaceMcpConfig(workspaceSlug)
+      if (current.servers[name]) {
+        return {
+          installed: false,
+          config: current,
+          verification: { success: Boolean(current.servers[name]?.lastTestResult?.success), message: 'MCP 已存在' },
+        }
+      }
+
+      const entryWithoutTestResult = { ...entry }
+      delete entryWithoutTestResult.lastTestResult
+      if (!entry.enabled) {
+        const config = { servers: { ...current.servers, [name]: entryWithoutTestResult } }
+        advanceWorkspaceMcpRefreshGeneration(workspaceSlug)
+        saveWorkspaceMcpConfig(workspaceSlug, config)
+        return { installed: true, config, verification: { success: true, message: 'MCP 已添加，等待配置' } }
+      }
+
+      // Newly installed catalog MCPs are also kept disabled until validation.
+      const pendingEntry = { ...entryWithoutTestResult, enabled: false }
+      const pendingConfig = { servers: { ...current.servers, [name]: pendingEntry } }
+      // Keep this candidate in memory so an unrelated full-config save during
+      // the handshake preserves and resumes the validation instead of treating
+      // the temporary disabled entry as a user-requested disable.
+      const refreshGeneration = advanceWorkspaceMcpRefreshGeneration(workspaceSlug)
+      setWorkspaceMcpPendingValidation(workspaceSlug, name, { ...entryWithoutTestResult, enabled: true })
+      saveWorkspaceMcpConfig(workspaceSlug, pendingConfig)
+      const result = await validateAndConditionallyPersistMcp(
+        workspaceSlug,
+        name,
+        { ...entryWithoutTestResult, enabled: true },
+        getMcpEntryFingerprint(pendingEntry),
+        refreshGeneration,
+      )
+      return { installed: true, ...result }
+    },
+  )
+
+  // 刷新并持久化工作区 MCP 真实连接状态
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.REFRESH_MCP_CONNECTIONS,
+    async (_, workspaceSlug: string): Promise<WorkspaceMcpConfig> => {
+      const refreshGeneration = advanceWorkspaceMcpRefreshGeneration(workspaceSlug)
+      const config = getWorkspaceMcpConfig(workspaceSlug)
+      const entries = Object.entries(config.servers).filter(([, entry]) => entry.enabled)
+      const { validateMcpServer } = await import('./lib/mcp-validator')
+      const validations = await mapWithConcurrency(entries, 4, async ([name, entry]) => {
+        const result = await validateMcpServer(name, entry, workspaceSlug)
+        return {
+          name,
+          fingerprint: getMcpEntryFingerprint(entry),
+          lastTestResult: {
+            success: result.valid,
+            message: result.valid ? (result.message ?? 'MCP 连接成功') : (result.reason ?? 'MCP 连接失败'),
+            timestamp: Date.now(),
+          },
+        }
+      })
+
+      // 保存或更晚发起的刷新会使本次 generation 过期；直接返回最新完整配置，不写任何旧验证结果。
+      if (!isWorkspaceMcpRefreshCurrent(workspaceSlug, refreshGeneration)) {
+        return getWorkspaceMcpConfig(workspaceSlug)
+      }
+
+      const refreshed = mergeMcpRefreshResults(getWorkspaceMcpConfig(workspaceSlug), validations)
+      saveWorkspaceMcpConfig(workspaceSlug, refreshed)
+      return refreshed
+    },
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.START_MCP_OAUTH,
+    async (_, input: import('@proma/shared').StartMcpOAuthInput): Promise<import('@proma/shared').McpOAuthStartResult> => {
+      return startMcpOAuth(input)
+    }
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SAVE_MCP_API_KEY,
+    async (_, input: import('@proma/shared').SaveMcpApiKeyInput): Promise<void> => {
+      return saveMcpApiKey(input)
+    }
+  )
+
+  // The renderer removes the transport config first, then calls this handler
+  // to remove only the matching encrypted Keychain payload.
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.DELETE_MCP_CREDENTIAL,
+    async (_, workspaceSlug: string, serverName: string): Promise<void> => {
+      return deleteMcpCredential(workspaceSlug, serverName)
+    }
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_CLI_INTEGRATION_STATUSES,
+    async (_, workspaceSlug: string): Promise<import('@proma/shared').CliIntegrationStatus[]> => {
+      return getCliIntegrationStatuses(undefined, getDisabledCliIntegrationIds(workspaceSlug))
+    }
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SET_CLI_INTEGRATION_ENABLED,
+    async (_, workspaceSlug: string, id: string, enabled: boolean): Promise<import('@proma/shared').CliIntegrationStatus[]> => {
+      setCliIntegrationEnabled(workspaceSlug, id, enabled)
+      return getCliIntegrationStatuses(undefined, getDisabledCliIntegrationIds(workspaceSlug))
+    },
   )
 
   // 测试 MCP 服务器连接
   ipcMain.handle(
     AGENT_IPC_CHANNELS.TEST_MCP_SERVER,
-    async (_, name: string, entry: import('@proma/shared').McpServerEntry): Promise<{ success: boolean; message: string }> => {
+    async (_, workspaceSlug: string, name: string, entry: import('@proma/shared').McpServerEntry): Promise<{ success: boolean; message: string }> => {
       const { validateMcpServer } = await import('./lib/mcp-validator')
-      const result = await validateMcpServer(name, entry)
+      const result = await validateMcpServer(name, entry, workspaceSlug)
       return {
         success: result.valid,
-        message: result.valid ? '连接成功' : (result.reason || '连接失败'),
+        message: result.valid ? (result.message ?? '连接成功') : (result.reason || '连接失败'),
       }
     }
   )
@@ -2644,6 +3155,15 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.GET_SKILLS_DIR,
     async (_, workspaceSlug: string): Promise<string> => {
       return getWorkspaceSkillsDir(workspaceSlug)
+    }
+  )
+
+  // 由主进程按 workspace + slug 重新定位目录，避免 renderer 的异步 Skills 根路径过期。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.OPEN_SKILL_FOLDER,
+    async (_, workspaceSlug: string, skillSlug: string): Promise<void> => {
+      const error = await shell.openPath(getWorkspaceSkillFolder(workspaceSlug, skillSlug))
+      if (error) throw new Error(`无法打开 Skill 目录: ${error}`)
     }
   )
 
@@ -2779,8 +3299,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.WRITE_WORKSPACE_AGENTS_MD,
-    async (_, workspaceSlug: string, content: string): Promise<void> => {
-      writeWorkspaceAgentsMd(workspaceSlug, content)
+    async (_, workspaceSlug: string, content: string, expectedContent?: string): Promise<void> => {
+      writeWorkspaceAgentsMd(workspaceSlug, content, expectedContent)
     }
   )
 
@@ -2800,8 +3320,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.WRITE_WORKSPACE_AUTO_MEMORY_FILE,
-    async (_, workspaceSlug: string, relativePath: string, content: string): Promise<void> => {
-      writeWorkspaceAutoMemoryFile(workspaceSlug, relativePath, content)
+    async (_, workspaceSlug: string, relativePath: string, content: string, expectedContent?: string): Promise<void> => {
+      writeWorkspaceAutoMemoryFile(workspaceSlug, relativePath, content, expectedContent)
     }
   )
 
@@ -2879,23 +3399,33 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SEND_MESSAGE,
     async (event, input: AgentSendInput): Promise<void> => {
-      const session = getAgentSessionMeta(input.sessionId)
-      if (input.hermesTurn) {
-        if (typeof input.hermesTurn.clientMessageId !== 'string' || input.hermesTurn.clientMessageId.length > 128) throw new Error('Hermes clientMessageId 无效')
-        if (!Array.isArray(input.hermesTurn.attachments) || input.hermesTurn.attachments.length > 20) throw new Error('Hermes 附件数量超过限制')
-        for (const attachment of input.hermesTurn.attachments) {
-          if (!attachment || (attachment.kind !== 'image' && attachment.kind !== 'file')) throw new Error('Hermes 附件类型无效')
-          if (typeof attachment.base64 !== 'string' || attachment.base64.length > 36 * 1024 * 1024) throw new Error('Hermes 附件编码超过限制')
-          if (typeof attachment.name !== 'string' || attachment.name.length > 255 || attachment.name.includes('\0')) throw new Error('Hermes 附件名称无效')
-          if (typeof attachment.mimeType !== 'string' || attachment.mimeType.length > 255) throw new Error('Hermes 附件 MIME 无效')
+      const releaseStart = reserveAgentSessionStart(input.sessionId)
+      try {
+        const session = getAgentSessionMeta(input.sessionId)
+        if (input.hermesTurn) {
+          if (typeof input.hermesTurn.clientMessageId !== 'string' || input.hermesTurn.clientMessageId.length > 128) throw new Error('Hermes clientMessageId 无效')
+          if (!Array.isArray(input.hermesTurn.attachments) || input.hermesTurn.attachments.length > 20) throw new Error('Hermes 附件数量超过限制')
+          for (const attachment of input.hermesTurn.attachments) {
+            if (!attachment || (attachment.kind !== 'image' && attachment.kind !== 'file')) throw new Error('Hermes 附件类型无效')
+            if (typeof attachment.base64 !== 'string' || attachment.base64.length > 36 * 1024 * 1024) throw new Error('Hermes 附件编码超过限制')
+            if (typeof attachment.name !== 'string' || attachment.name.length > 255 || attachment.name.includes('\0')) throw new Error('Hermes 附件名称无效')
+            if (typeof attachment.mimeType !== 'string' || attachment.mimeType.length > 255) throw new Error('Hermes 附件 MIME 无效')
+          }
         }
+        if (session && session.agentRuntime !== 'hermes-remote') {
+          await feishuBridgeManager.startSessionMirrorRun(session).catch((error) => {
+            console.error('[飞书 Session 镜像] 流式卡片初始化失败:', error)
+          })
+        }
+        // runGeneration 是主进程内部运行身份；renderer IPC 绝不能指定或复用它。
+        const { runGeneration: _ignoredRunGeneration, ...publicInput } = input as AgentSendInput & { runGeneration?: unknown }
+        await runAgent({
+          ...publicInput,
+          agentRuntime: session?.agentRuntime ?? publicInput.agentRuntime ?? 'pi',
+        }, event.sender)
+      } finally {
+        releaseStart()
       }
-      if (session && session.agentRuntime !== 'hermes-remote') {
-        await feishuBridgeManager.startSessionMirrorRun(session).catch((error) => {
-          console.error('[飞书 Session 镜像] 流式卡片初始化失败:', error)
-        })
-      }
-      await runAgent({ ...input, agentRuntime: session?.agentRuntime ?? input.agentRuntime ?? 'pi' }, event.sender)
     }
   )
 
@@ -2929,24 +3459,42 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // ===== Agent 后台任务管理 =====
-
-  // 获取任务输出（保留接口，供未来扩展）
+  // 主进程原子决定立即注入活跃 Agent 或进入 deferred queue。
   ipcMain.handle(
-    AGENT_IPC_CHANNELS.GET_TASK_OUTPUT,
-    async (_, input: GetTaskOutputInput): Promise<GetTaskOutputResult> => {
-      try {
-        // TODO: 实现通过 SDK 的 TaskOutput 获取任务输出
-        console.warn('[IPC] GET_TASK_OUTPUT: 当前版本暂未实现，返回空输出')
-        return {
-          output: '',
-          isComplete: false,
-        }
-      } catch (error) {
-        console.error('[IPC] 获取任务输出失败:', error)
-        throw error
-      }
-    }
+    AGENT_IPC_CHANNELS.SUBMIT_OR_ENQUEUE_MESSAGE,
+    async (event, input: import('@proma/shared').AgentSubmitOrEnqueueInput): Promise<import('@proma/shared').AgentSubmitOrEnqueueResult> => {
+      return submitOrEnqueueAgentMessage(input, event.sender)
+    },
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_QUEUED_MESSAGES,
+    async (_, sessionId: string): Promise<import('@proma/shared').AgentQueuedMessageSnapshot[]> => {
+      if (!sessionId || typeof sessionId !== 'string') return []
+      return listQueuedAgentMessages(sessionId)
+    },
+  )
+
+  // 兼容旧调用：将消息交给主进程 deferred queue。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.ENQUEUE_QUEUED_MESSAGE,
+    async (event, input: import('@proma/shared').AgentDeferredQueueMessageInput): Promise<void> => {
+      enqueueAgentQueuedMessage(input, event.sender)
+    },
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.CANCEL_QUEUED_MESSAGE,
+    async (_, input: import('@proma/shared').AgentQueuedMessageControlInput): Promise<boolean> => {
+      return cancelAgentQueuedMessage(input)
+    },
+  )
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.MOVE_QUEUED_MESSAGE,
+    async (_, input: import('@proma/shared').AgentMoveQueuedMessageInput): Promise<boolean> => {
+      return moveAgentQueuedMessage(input)
+    },
   )
 
   // ===== Agent 权限系统 =====
@@ -2964,23 +3512,6 @@ export function registerIpcHandlers(): void {
           sessionId,
           payload: { kind: 'proma_event', event: { type: 'permission_resolved', requestId, behavior } },
         })
-      }
-    }
-  )
-
-  // 停止任务
-  ipcMain.handle(
-    AGENT_IPC_CHANNELS.STOP_TASK,
-    async (_, input: StopTaskInput): Promise<void> => {
-      try {
-        if (input.type === 'shell') {
-          console.warn('[IPC] STOP_TASK: Shell 任务停止功能待实现')
-        } else {
-          console.warn('[IPC] STOP_TASK: Agent 任务暂不支持单独停止')
-        }
-      } catch (error) {
-        console.error('[IPC] 停止任务失败:', error)
-        throw error
       }
     }
   )
@@ -3556,10 +4087,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SHOW_IN_FOLDER,
     async (_, filePath: string, access?: FileAccessOptions): Promise<void> => {
-      const { resolve } = await import('node:path')
-
-      const safePath = resolve(filePath)
-      if (!isPathAllowed(safePath, normalizeFileAccessOptions(access))) {
+      const options = normalizeFileAccessOptions(access)
+      const safePath = resolvePathAgainstAgentCwd(filePath, getAgentCwdForFileAccess(options))
+      if (!existsSync(safePath)) {
+        throw new Error('文件不存在或已被移动')
+      }
+      if (!isPathAllowed(safePath, options)) {
         throw new Error('访问路径超出当前会话的授权范围')
       }
 
@@ -3616,7 +4149,7 @@ export function registerIpcHandlers(): void {
   // 解析文件路径并读取内容（供内联预览使用）
   ipcMain.handle(
     'file:resolve-and-read',
-    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<{ resolvedPath: string; content: string; isBinary: boolean; isTooLarge: boolean } | null> => {
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<import('@proma/shared').FilePreviewReadResult | null> => {
       const { resolveAndReadFile, resolveFilePath } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
       const resolved = resolveFilePath(filePath, getPreviewCandidateBasePaths(options))
@@ -3645,6 +4178,24 @@ export function registerIpcHandlers(): void {
       writeFileSync(resolved, content, 'utf-8')
       return true
     }
+  )
+
+  // 解析当前 Markdown 同目录内的相对图片。该接口不接受 unrestricted，避免
+  // Markdown 文本中的任意路径借通用预览接口换取本地文件 token。
+  ipcMain.handle(
+    'file:resolve-markdown-media',
+    async (_, markdownFilePath: string, src: string, access?: FileAccessOptions | string[]): Promise<ResolvedFileUrl | null> => {
+      const { resolveMarkdownRelativeMediaPath } = await import('./lib/markdown-media-service')
+      const options = normalizeFileAccessOptions(access)
+      const result = resolveMarkdownRelativeMediaPath(markdownFilePath, src, options)
+      if (!result) return null
+      try {
+        return { url: registerPromaFilePath(result) }
+      } catch (err) {
+        console.warn('[IPC] file:resolve-markdown-media 无法注册图片，跳过:', result, err instanceof Error ? err.message : err)
+        return null
+      }
+    },
   )
 
   // 仅解析文件路径（供 PDF/图片等用 proma-file:// 加载）
@@ -3700,22 +4251,7 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // DOCX 转 HTML（内联预览使用 mammoth）
-  ipcMain.handle(
-    'file:docx-to-html',
-    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<{ resolvedPath: string; html: string } | null> => {
-      const { convertDocxToHtml, resolveFilePath } = await import('./lib/file-preview-service')
-      const options = normalizeFileAccessOptions(access)
-      const resolved = resolveFilePath(filePath, getPreviewCandidateBasePaths(options))
-      if (!resolved) {
-        return null
-      }
-      const result = await convertDocxToHtml(resolved)
-      return result
-    }
-  )
-
-  // XLSX/PPTX 转 HTML（内联预览使用 OOXML 解析）
+  // Office 文件转高保真 HTML（内联预览；失败时由服务层降级到内置解析器）
   ipcMain.handle(
     'file:office-to-html',
     async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<import('@proma/shared').OfficePreviewResult | null> => {
@@ -4395,8 +4931,8 @@ export function registerIpcHandlers(): void {
   // 测试飞书连接
   ipcMain.handle(
     FEISHU_IPC_CHANNELS.TEST_CONNECTION,
-    async (_, appId: string, appSecret: string): Promise<FeishuTestResult> => {
-      return feishuBridgeManager.testConnection(appId, appSecret)
+    async (_, appId: string, appSecret: string, domain?: import('@proma/shared').FeishuDomain): Promise<FeishuTestResult> => {
+      return feishuBridgeManager.testConnection(appId, appSecret, domain)
     }
   )
 
@@ -5050,11 +5586,6 @@ export function registerIpcHandlers(): void {
     return query
   }
 
-  ipcMain.handle(PLANNING_IPC_CHANNELS.OPEN_WINDOW, async (): Promise<void> => {
-    const { showPlanningWindow } = await import('./lib/planning-window')
-    showPlanningWindow()
-  })
-
   ipcMain.handle(PLANNING_IPC_CHANNELS.LIST_TODOS, async (_, input?: unknown): Promise<Todo[]> => listTodos(parseTodoListQuery(input)))
   ipcMain.handle(PLANNING_IPC_CHANNELS.CREATE_TODO, async (_, input: CreateTodoInput): Promise<Todo> => {
     if (!input || !isPlanningTitle(input.title)) throw new Error('Todo 标题不能为空且不能超过 500 字')
@@ -5066,8 +5597,8 @@ export function registerIpcHandlers(): void {
     return todo
   })
   // Todo 项目归属更新与 Agent 会话创建必须在一次主进程同步处理内完成，
-  // 避免多个 Planning 窗口之间在校验、更新和创建会话的间隙发生 TOCTOU。
-  ipcMain.handle(PLANNING_IPC_CHANNELS.START_TODO_AGENT, (event, input: StartTodoAgentInput): StartTodoAgentResult => {
+  // 避免项目选择、Todo 更新与会话创建之间出现状态竞争。
+  ipcMain.handle(PLANNING_IPC_CHANNELS.START_TODO_AGENT, (_, input: StartTodoAgentInput): StartTodoAgentResult => {
     if (!input || typeof input.todoId !== 'string' || !input.todoId.trim()) throw new Error('Todo id 必填')
     if (typeof input.workspaceId !== 'string' || !input.workspaceId.trim()) throw new Error('项目 id 必填')
     if (!isPlanningTimestamp(input.expectedUpdatedAt)) throw new Error('Todo expectedUpdatedAt 非法')
@@ -5087,7 +5618,7 @@ export function registerIpcHandlers(): void {
         expectedUpdatedAt: existing.updatedAt,
       })
     if (!todo) throw new Error('Todo 不存在')
-    if (todo !== existing) broadcastPlanningChanged(['todos', 'reminders'])
+    if (todo !== existing) broadcastPlanningChanged(['todos', 'reminders'], { todo })
 
     const session = createAgentSession(
       `处理：${todo.title}`,
@@ -5100,25 +5631,6 @@ export function registerIpcHandlers(): void {
       console.error('[飞书 Session 镜像] Todo 启动会话建群失败:', error)
     })
 
-    // 独立规划窗口没有 AgentView，需由主窗口接手打开会话并消费自动启动提示。
-    try {
-      const sourceWindowKind = new URL(event.sender.getURL()).searchParams.get('window')
-      if (sourceWindowKind === 'planning') {
-        const mainWindow = BrowserWindow.getAllWindows().find((win) => {
-          if (win.isDestroyed() || win.webContents.id === event.sender.id) return false
-          return new URL(win.webContents.getURL()).searchParams.get('window') === null
-        })
-        if (mainWindow) {
-          if (mainWindow.isMinimized()) mainWindow.restore()
-          mainWindow.show()
-          mainWindow.focus()
-          const activation: TodoAgentSessionActivation = { todo, session }
-          mainWindow.webContents.send(PLANNING_IPC_CHANNELS.TODO_AGENT_SESSION_READY, activation)
-        }
-      }
-    } catch (error) {
-      console.error('[任务/日程] 转交 Todo Agent 会话到主窗口失败:', error)
-    }
     return { todo, session }
   })
   ipcMain.handle(PLANNING_IPC_CHANNELS.UPDATE_TODO, async (_, input: UpdateTodoInput): Promise<Todo | undefined> => {
@@ -5129,7 +5641,7 @@ export function registerIpcHandlers(): void {
     if (input.dueAt !== undefined && input.dueAt !== null && !isPlanningTimestamp(input.dueAt)) throw new Error('Todo dueAt 非法')
     if (input.expectedUpdatedAt !== undefined && !isPlanningTimestamp(input.expectedUpdatedAt)) throw new Error('Todo expectedUpdatedAt 非法')
     const todo = updateTodo(input)
-    if (todo) broadcastPlanningChanged(['todos', 'reminders'])
+    if (todo) broadcastPlanningChanged(['todos', 'reminders'], { todo })
     return todo
   })
   ipcMain.handle(PLANNING_IPC_CHANNELS.DELETE_TODO, async (_, id: string): Promise<boolean> => {
@@ -5438,6 +5950,148 @@ export function registerIpcHandlers(): void {
       await runAutomationNow(id)
     }
   )
+
+  // ===== Agent Island =====
+
+  // Renderer 在主窗口创建后即可上报“已查看”，而 Island 状态机稍后才初始化，
+  // 且在不支持的平台也不会初始化。handler 必须在 IPC 注册阶段无条件存在，避免启动竞态。
+  ipcMain.handle(
+    AGENT_ISLAND_IPC_CHANNELS.MARK_SESSION_VIEWED,
+    async (_, sessionId: unknown): Promise<void> => {
+      if (!isNonEmptyString(sessionId)) return
+      markAgentIslandSessionViewed(sessionId)
+    }
+  )
+
+  // ===== 用户授权的 Markdown Vault =====
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.GET_CONFIG, async () => getVaultSummary())
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.SELECT_DEFAULT, async () => selectDefaultVault())
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.LIST_CANDIDATES, async () => discoverVaultCandidates())
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.SELECT, async (_, options: unknown) => {
+    const input = options && typeof options === 'object' ? options as Record<string, unknown> : {}
+    const inboxPath = typeof input.inboxPath === 'string' ? input.inboxPath : undefined
+    const allowAgentWrites = input.allowAgentWrites === true
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openDirectory'],
+      title: '选择 Vault 文件夹',
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return configureVault(result.filePaths[0]!, { inboxPath, allowAgentWrites })
+  })
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.AUTHORIZE_CANDIDATE, async (_, rootPath: unknown, options: unknown) => {
+    if (typeof rootPath !== 'string') throw new Error('Vault 候选路径非法')
+    const input = options && typeof options === 'object' ? options as Record<string, unknown> : {}
+    return authorizeDiscoveredVault(rootPath, {
+      inboxPath: typeof input.inboxPath === 'string' ? input.inboxPath : undefined,
+      allowAgentWrites: input.allowAgentWrites === true,
+    })
+  })
+
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.LIST_FILES, async () => getConfiguredVaultFileSystem().listFiles())
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.READ_FILE, async (_, relativePath: unknown) => {
+    if (typeof relativePath !== 'string') throw new Error('Vault relativePath 必填')
+    return getConfiguredVaultFileSystem().readFile(relativePath)
+  })
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.RESOLVE_MEDIA, async (_, noteRelativePath: unknown, src: unknown): Promise<ResolvedFileUrl | null> => {
+    if (typeof noteRelativePath !== 'string' || typeof src !== 'string') return null
+    const resolvedPath = getConfiguredVaultFileSystem().resolveMedia(noteRelativePath, src)
+    return resolvedPath ? { url: registerPromaFilePath(resolvedPath) } : null
+  })
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.SAVE_PASTED_IMAGE, async (_, input: unknown): Promise<{ src: string } | null> => {
+    if (!input || typeof input !== 'object') return null
+    const value = input as Record<string, unknown>
+    if (typeof value.noteRelativePath !== 'string' || typeof value.mimeType !== 'string' || typeof value.base64 !== 'string') return null
+    return getConfiguredVaultFileSystem().savePastedImage({
+      noteRelativePath: value.noteRelativePath,
+      mimeType: value.mimeType,
+      base64: value.base64,
+    })
+  })
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.WRITE_FILE, async (_, input: unknown) => {
+    if (!input || typeof input !== 'object') throw new Error('Vault 写入参数非法')
+    const value = input as Record<string, unknown>
+    if (typeof value.relativePath !== 'string' || typeof value.content !== 'string') {
+      throw new Error('Vault relativePath 和 content 必填')
+    }
+    return getConfiguredVaultFileSystem().writeFile({
+      relativePath: value.relativePath,
+      content: value.content,
+      expectedSha256: typeof value.expectedSha256 === 'string' ? value.expectedSha256 : undefined,
+      createOnly: value.createOnly === true,
+    })
+  })
+
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.CREATE_UNTITLED_FILE, async () => createUntitledVaultFile())
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.CREATE_UNTITLED_FILE_IN_FOLDER, async (_, folderPath: unknown) => {
+    if (typeof folderPath !== 'string') throw new Error('Vault 文件夹路径非法')
+    return createUntitledVaultFileInFolder(folderPath)
+  })
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.CREATE_FOLDER, async (_, relativePath: unknown): Promise<void> => {
+    if (typeof relativePath !== 'string') throw new Error('Vault 文件夹路径非法')
+    createVaultFolder(relativePath)
+  })
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.RENAME_FILE, async (_, input: unknown) => {
+    if (!input || typeof input !== 'object') throw new Error('Vault 重命名参数非法')
+    const value = input as Record<string, unknown>
+    if (typeof value.relativePath !== 'string' || typeof value.name !== 'string') {
+      throw new Error('Vault relativePath 和 name 必填')
+    }
+    return getConfiguredVaultFileSystem().renameFile({
+      relativePath: value.relativePath,
+      name: value.name,
+      expectedSha256: typeof value.expectedSha256 === 'string' ? value.expectedSha256 : undefined,
+    })
+  })
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.DELETE_FILE, async (_, input: unknown): Promise<void> => {
+    if (!input || typeof input !== 'object') throw new Error('Vault 删除参数非法')
+    const value = input as Record<string, unknown>
+    if (typeof value.relativePath !== 'string') throw new Error('Vault relativePath 必填')
+    getConfiguredVaultFileSystem().deleteFile({
+      relativePath: value.relativePath,
+      expectedSha256: typeof value.expectedSha256 === 'string' ? value.expectedSha256 : undefined,
+    })
+  })
+
+
+
+  ipcMain.handle(VAULT_IPC_CHANNELS.SET_USER_CONTEXT, async (_, sessionId: unknown, focus: unknown, open: unknown): Promise<void> => {
+    if (typeof sessionId !== 'string' || sessionId.trim().length === 0) throw new Error('Vault 会话 ID 非法')
+    if (open === false || focus === null || focus === undefined) {
+      clearVaultUserContext(sessionId)
+      return
+    }
+    if (!focus || typeof focus !== 'object') throw new Error('Vault focus 非法')
+    const value = focus as Record<string, unknown>
+    if (
+      (value.kind !== 'file' && value.kind !== 'folder')
+      || typeof value.relativePath !== 'string'
+      || !Number.isSafeInteger(value.sequence)
+    ) {
+      throw new Error('Vault focus 非法')
+    }
+    setVaultUserContext(sessionId, {
+      kind: value.kind,
+      relativePath: value.relativePath,
+      sequence: value.sequence as number,
+    })
+  })
 
   // Hermes Remote owns a separate IPC namespace and never falls back to Pi.
   registerHermesIpcHandlers()

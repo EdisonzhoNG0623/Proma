@@ -1,12 +1,9 @@
 import type { AgentSessionMeta } from '@proma/shared'
 import type { AgentStreamState } from '@/atoms/agent-atoms'
+import type { TabItem } from '@/atoms/tab-atoms'
 
-export interface ExternalAgentRunTab {
-  id: string
-  type: 'chat' | 'agent' | 'scratch' | 'preview' | 'tutorial'
-  sessionId: string
-  title: string
-}
+/** 顶部入口与 TabItem 保持同一类型契约，避免已删除的入口类型回流。 */
+export type ExternalAgentRunTab = TabItem
 
 export interface ExternalAgentRunActivationInput {
   tabs: ExternalAgentRunTab[]
@@ -15,9 +12,8 @@ export interface ExternalAgentRunActivationInput {
   title?: string
   workspaceId?: string
   modelId?: string
-  /** 实际启动本轮的渠道；可能与 session metadata 不同。 */
-  channelId?: string
   startedAt: number
+  runGeneration?: number
   currentStreamState?: AgentStreamState
 }
 
@@ -34,13 +30,32 @@ export interface ExternalAgentRunActivation {
 export function shouldActivateExternalAgentRun(
   currentStreamState: AgentStreamState | undefined,
   startedAt: number,
+  runGeneration?: number,
 ): boolean {
   if (!currentStreamState || currentStreamState.startedAt == null) return true
+  if (currentStreamState.runGeneration != null && runGeneration != null) {
+    if (currentStreamState.runGeneration > runGeneration) return false
+    if (currentStreamState.runGeneration === runGeneration) {
+      return currentStreamState.running && !currentStreamState.backgroundWaiting
+    }
+    return true
+  }
   if (currentStreamState.startedAt > startedAt) return false
   if (currentStreamState.startedAt === startedAt) {
     return currentStreamState.running && !currentStreamState.backgroundWaiting
   }
   return true
+}
+
+/**
+ * 自动派生的协作子会话只能在其父会话正处于用户前台视图时展开。
+ * 后台父会话的事件仍会更新运行状态和侧栏树，但绝不能改变用户当前焦点。
+ */
+export function shouldRevealDelegatedSession(
+  parentSessionId: string,
+  activeSessionId: string | null,
+): boolean {
+  return parentSessionId === activeSessionId
 }
 
 export function buildExternalAgentRunActivation(
@@ -59,16 +74,14 @@ export function buildExternalAgentRunActivation(
     tabs,
     activeTabId,
     title,
-    workspaceId: input.workspaceId ?? session?.workspaceId,
+    workspaceId: session?.workspaceId ?? input.workspaceId,
     modelId: input.modelId,
     streamState: {
       ...input.currentStreamState,
       running: true,
-      content: input.currentStreamState?.content ?? '',
-      toolActivities: input.currentStreamState?.toolActivities ?? [],
       model: input.modelId ?? input.currentStreamState?.model,
-      channelId: input.channelId ?? input.currentStreamState?.channelId,
       startedAt: input.startedAt,
+      ...(input.runGeneration != null ? { runGeneration: input.runGeneration } : {}),
     },
   }
 }

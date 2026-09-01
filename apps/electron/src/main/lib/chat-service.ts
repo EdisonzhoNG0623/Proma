@@ -193,7 +193,7 @@ function filterHistory(
 export async function sendMessage(
   input: ChatSendInput,
   webContents: WebContents,
-): Promise<void> {
+): Promise<boolean> {
   const {
     conversationId, userMessage, channelId,
     modelId, systemMessage, contextLength, contextDividers, attachments,
@@ -208,7 +208,7 @@ export async function sendMessage(
       conversationId,
       error: '渠道不存在',
     })
-    return
+    return false
   }
 
   // Subscription OAuth uses Pi provider-specific transports, which Chat mode does
@@ -220,7 +220,7 @@ export async function sendMessage(
       conversationId,
       error: `Chat 模式暂不支持 ${providerName}，请切换到 Agent 模式使用。`,
     })
-    return
+    return false
   }
 
   // 2. 解密 API Key
@@ -232,7 +232,7 @@ export async function sendMessage(
       conversationId,
       error: '解密 API Key 失败',
     })
-    return
+    return false
   }
 
   // 3. 先读取历史消息（在追加用户消息之前，避免 adapter 重复发送当前消息）
@@ -451,6 +451,7 @@ export async function sendMessage(
       model: modelId,
       messageId: (accumulatedContent.trim() || accumulatedGeneratedAttachments.length > 0) ? assistantMsgId : undefined,
     })
+    return true
   } catch (error) {
     // 被中止的请求：保存已输出的部分内容，通知前端停止
     if (controller.signal.aborted) {
@@ -488,7 +489,7 @@ export async function sendMessage(
           model: modelId,
         })
       }
-      return
+      return true
     }
 
     const errorMessage = error instanceof Error ? error.message : '未知错误'
@@ -541,6 +542,7 @@ export async function sendMessage(
       conversationId,
       error: errorMessage,
     })
+    return false
   } finally {
     activeControllers.delete(conversationId)
   }
@@ -612,8 +614,8 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     apiKey = await resolveChannelRuntimeApiKey(channelId)
   } catch {
     console.warn('[标题生成] 解密 API Key 失败')
-    // OpenCode Go 无法解密也仍要完成重命名，避免对话长期停在默认标题。
-    return channel.provider === 'opencode-go-openai' ? createFallbackTitle(userMessage) : null
+    // OpenCode Go / 自定义渠道无法解密也仍要完成重命名，避免对话长期停在默认标题。
+    return (channel.provider === 'opencode-go-openai' || channel.provider === 'custom') ? createFallbackTitle(userMessage) : null
   }
 
   try {
@@ -631,15 +633,15 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     const result = title ? sanitizeGeneratedTitle(title) : null
     if (!result) {
       console.warn('[标题生成] API 未返回可用标题')
-      // OpenCode Go 的服务端偶发返回空标题时，仍要完成重命名，避免对话长期停在默认标题。
-      return channel.provider === 'opencode-go-openai' ? createFallbackTitle(userMessage) : null
+      // OpenCode Go / 自定义渠道的服务端偶发返回空标题时，仍要完成重命名，避免对话长期停在默认标题。
+      return (channel.provider === 'opencode-go-openai' || channel.provider === 'custom') ? createFallbackTitle(userMessage) : null
     }
 
     console.log('[标题生成] 成功生成标题:', result)
     return result
   } catch (error) {
     console.warn('[标题生成] 请求失败:', error)
-    // OpenCode Go 的服务端偶发返回空标题/异常响应/超时，异常路径同样要完成重命名。
-    return channel.provider === 'opencode-go-openai' ? createFallbackTitle(userMessage) : null
+    // OpenCode Go / 自定义渠道的服务端偶发返回空标题/异常响应/超时，异常路径同样要完成重命名。
+    return (channel.provider === 'opencode-go-openai' || channel.provider === 'custom') ? createFallbackTitle(userMessage) : null
   }
 }

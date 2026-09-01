@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme, protocol, screen, shell } from 'electron'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import { existsSync } from 'fs'
 
 // Dev 与正式版使用独立的 userData 目录，避免共享 Chromium SingletonLock 导致 dev 启动被静默退出
@@ -43,11 +44,7 @@ function registerProtocolsAndHandlers(): void {
   }
 
   // Windows 等平台通过 second-instance 唤起已有主窗口。
-  app.on('second-instance', (_event, argv) => {
-    if (hasOpenPlanningArgument(argv)) {
-      showPlanningWindow()
-      return
-    }
+  app.on('second-instance', () => {
     showAndFocusMainWindow()
   })
 }
@@ -84,6 +81,7 @@ import { initializeRuntime } from './lib/runtime-init'
 import { seedDefaultSkills } from './lib/config-paths'
 import { upgradeDefaultSkillsInWorkspaces } from './lib/agent-workspace-manager'
 import { hasActiveAgentSessions, stopAllAgents } from './lib/agent-service'
+import { stopAllTerminals } from './lib/terminal-service'
 import { disposePiMcpConnections } from './lib/adapters/pi-mcp-tools'
 import { browserController } from './lib/browser-controller'
 import { markRunningDelegationsAsInterrupted } from './lib/agent-session-manager'
@@ -106,16 +104,19 @@ import { startPlanningNativeSyncCoordinator, stopPlanningNativeSyncCoordinator }
 import { feishuBridgeManager } from './lib/feishu-bridge-manager'
 import { getFeishuMultiBotConfig } from './lib/feishu-config'
 import { stopFeishuSyncSleepBlocker, syncFeishuSyncSleepBlocker } from './lib/feishu-sleep-blocker'
-import { getPersistableMainWindowState, hideMacMainWindowAfterClose } from './lib/main-window-lifecycle'
+import {
+  ensureWindowBoundsVisible,
+  getPersistableMainWindowState,
+  hideMacMainWindowAfterClose,
+  normalizeWindowBoundsToVisibleArea,
+  type WindowBounds,
+} from './lib/main-window-lifecycle'
 import { dingtalkBridgeManager } from './lib/dingtalk-bridge-manager'
 import { getDingTalkMultiBotConfig } from './lib/dingtalk-config'
 import { wechatBridge } from './lib/wechat-bridge'
 import { getWeChatConfig } from './lib/wechat-config'
 import { createQuickTaskWindow, toggleQuickTaskWindow, destroyQuickTaskWindow } from './lib/quick-task-window'
 import { getAgentStatusHoverWindow, destroyAgentStatusHoverWindow } from './agent-status-hover-window'
-import { destroyPlanningWindow, showPlanningWindow } from './lib/planning-window'
-import { configurePlanningQuickEntries } from './lib/planning-quick-entry'
-import { hasOpenPlanningArgument } from './lib/planning-quick-entry-model'
 import { handleNativeAgentIslandEvent, initAgentIslandService, disposeAgentIslandService, publishAgentIslandNow } from './lib/agent-island-service'
 import { disposeMacAgentIslandNativeHost, startMacAgentIslandNativeHost, isMacAgentIslandNativeHostReady } from './lib/mac-agent-island-native-host'
 import { isAgentIslandServiceSupported, isMacAgentIslandSurfaceSupported } from './lib/macos-version'
@@ -128,6 +129,7 @@ import {
 } from './lib/voice-dictation-window'
 import { registerGlobalShortcut, unregisterAllGlobalShortcuts } from './lib/global-shortcut-service'
 import { setPromaVersion } from '@proma/core'
+import { canRecoverRenderer, RENDERER_RECOVERY_WINDOW_MS } from './lib/renderer-process-recovery'
 import { TRAY_IPC_CHANNELS, WINDOWS_AGENT_ISLAND_IPC_CHANNELS } from '../types'
 
 /** macOS 26+ 使用 Swift/AppKit NSPanel；其他平台不创建 Agent Island surface。 */
@@ -244,6 +246,35 @@ async function recoverEnabledDingTalkBots(): Promise<void> {
 let mainWindow: BrowserWindow | null = null
 let startupSplashWindow: BrowserWindow | null = null
 
+const DEFAULT_MAIN_WINDOW_WIDTH = 1400
+const DEFAULT_MAIN_WINDOW_HEIGHT = 900
+const MIN_MAIN_WINDOW_WIDTH = 800
+const MIN_MAIN_WINDOW_HEIGHT = 600
+
+function getVisibleMainWindowBounds(bounds: WindowBounds): WindowBounds {
+  return normalizeWindowBoundsToVisibleArea(
+    bounds,
+    screen.getAllDisplays(),
+    screen.getPrimaryDisplay(),
+    {
+      minWidth: MIN_MAIN_WINDOW_WIDTH,
+      minHeight: MIN_MAIN_WINDOW_HEIGHT,
+      fallbackWidth: DEFAULT_MAIN_WINDOW_WIDTH,
+      fallbackHeight: DEFAULT_MAIN_WINDOW_HEIGHT,
+    },
+  )
+}
+
+function getInitialMainWindowBounds(
+  savedState: ReturnType<typeof getSettings>['mainWindowState'],
+): Partial<WindowBounds> {
+  if (!savedState) {
+    return { width: DEFAULT_MAIN_WINDOW_WIDTH, height: DEFAULT_MAIN_WINDOW_HEIGHT }
+  }
+
+  return getVisibleMainWindowBounds(savedState)
+}
+
 /**
  * 原生启动页不依赖 Renderer bundle 或运行时检测，避免冷启动期间出现空白窗口。
  * dev 由 build:resources 复制到 dist/resources；打包版由 electron-builder extraResources 提供。
@@ -264,9 +295,7 @@ function createStartupSplashWindow(): void {
   if (startupSplashWindow && !startupSplashWindow.isDestroyed()) return
 
   const savedState = getSettings().mainWindowState
-  const initialBounds = savedState
-    ? { width: savedState.width, height: savedState.height, x: savedState.x, y: savedState.y }
-    : { width: 1400, height: 900 }
+  const initialBounds = getInitialMainWindowBounds(savedState)
 
   startupSplashWindow = new BrowserWindow({
     ...initialBounds,
@@ -325,27 +354,18 @@ function installWindowsZoomInFallback(win: BrowserWindow): void {
  * 处理外接显示器断开后窗口位于不可见区域的情况
  */
 function ensureWindowOnScreen(win: BrowserWindow): void {
-  const bounds = win.getBounds()
-  const displays = screen.getAllDisplays()
-  // 检查窗口中心点是否在任一显示器范围内
-  const centerX = bounds.x + bounds.width / 2
-  const centerY = bounds.y + bounds.height / 2
-  const isOnScreen = displays.some((display) => {
-    const { x, y, width, height } = display.workArea
-    return centerX >= x && centerX <= x + width && centerY >= y && centerY <= y + height
-  })
-  if (!isOnScreen) {
-    // 窗口不在任何屏幕内，移动到主显示器居中位置
-    const primary = screen.getPrimaryDisplay()
-    const { x, y, width, height } = primary.workArea
-    win.setBounds({
-      x: x + Math.round((width - bounds.width) / 2),
-      y: y + Math.round((height - bounds.height) / 2),
-      width: bounds.width,
-      height: bounds.height,
-    })
-    console.log('[窗口] 窗口已重新定位到主显示器')
-  }
+  const repositioned = ensureWindowBoundsVisible(
+    win,
+    screen.getAllDisplays(),
+    screen.getPrimaryDisplay(),
+    {
+      minWidth: MIN_MAIN_WINDOW_WIDTH,
+      minHeight: MIN_MAIN_WINDOW_HEIGHT,
+      fallbackWidth: DEFAULT_MAIN_WINDOW_WIDTH,
+      fallbackHeight: DEFAULT_MAIN_WINDOW_HEIGHT,
+    },
+  )
+  if (repositioned) console.log('[窗口] 窗口已重新定位到主显示器可见区域')
 }
 
 /** 显示并聚焦主窗口，确保窗口在可见区域；若窗口已销毁则重新创建 */
@@ -423,23 +443,22 @@ function createWindow(): void {
       : {}
 
   const savedState = getSettings().mainWindowState
-  const initialBounds = savedState
-    ? { width: savedState.width, height: savedState.height, x: savedState.x, y: savedState.y }
-    : { width: 1400, height: 900 }
+  const initialBounds = getInitialMainWindowBounds(savedState)
 
   mainWindow = new BrowserWindow({
     ...initialBounds,
-    minWidth: 800,
-    minHeight: 600,
+    minWidth: MIN_MAIN_WINDOW_WIDTH,
+    minHeight: MIN_MAIN_WINDOW_HEIGHT,
     icon: iconExists ? iconPath : undefined,
     show: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      // 排队消息的自动投递依赖 renderer 消费 STREAM_COMPLETE；窗口被遮挡、最小化或失焦时
-      // 不能让 Chromium 降速该事件循环，否则下一条消息会等到用户重新激活窗口才发送。
-      backgroundThrottling: false,
+      // 实验：恢复 Chromium 的后台调度节流，避免隐藏窗口的 renderer 持续占用主线程。
+      // 当前排队消息自动投递仍由 renderer 消费 STREAM_COMPLETE；隐藏窗口下可能延后，
+      // 这是本分支需要与卡顿改善一起验证的行为代价。
+      backgroundThrottling: true,
     },
     ...titleBarOptions,
   })
@@ -449,15 +468,20 @@ function createWindow(): void {
 
   // Load the renderer
   const isDev = !app.isPackaged
-  if (isDev) {
-    mainWindow.loadURL('http://127.0.0.1:5173')
-    mainWindow.webContents.openDevTools()
-  } else {
-    mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'))
+  const rendererPath = join(__dirname, 'renderer', 'index.html')
+  const rendererEntryUrl = isDev ? 'http://127.0.0.1:5173' : pathToFileURL(rendererPath).toString()
+  const loadMainRenderer = (): Promise<void> => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return Promise.reject(new Error('主窗口已销毁'))
+    }
+    return isDev
+      ? mainWindow.loadURL(rendererEntryUrl)
+      : mainWindow.loadFile(rendererPath)
   }
 
-  // 主 Renderer 无法加载或崩溃时，不能让启动页无限停留；切换为轻量错误页告知用户。
+  // 主 Renderer 无法加载或崩溃时，不能让启动页无限停留；优先有限次数自动恢复。
   let hasShownRendererFailure = false
+  let rendererRecoveryAttempts: number[] = []
   const showRendererFailure = (reason: string): void => {
     if (!mainWindow || mainWindow.isDestroyed()) return
 
@@ -468,8 +492,14 @@ function createWindow(): void {
     }
 
     hasShownRendererFailure = true
-    const message = encodeURIComponent(`Proma 无法加载主界面\n\n${reason}\n\n请重试；若问题持续，请检查应用安装文件。`)
-    mainWindow.loadURL(`data:text/plain;charset=utf-8,${message}`).catch((error) => {
+    const escapeHtml = (value: string): string => value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+    const page = `<!doctype html><html><head><meta charset="utf-8"><title>Proma 无法加载</title><style>body{font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:48px;color:#222;background:#fff}main{max-width:680px;margin:auto}h1{font-size:20px;font-weight:600}pre{white-space:pre-wrap;background:#f3f3f3;padding:16px;border-radius:8px}a{display:inline-block;margin-top:12px;padding:9px 14px;border-radius:6px;background:#222;color:#fff;text-decoration:none}</style></head><body><main><h1>Proma 无法加载主界面</h1><pre>${escapeHtml(reason)}</pre><a href="${escapeHtml(rendererEntryUrl)}">重新加载主界面</a></main></body></html>`
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(page)}`).catch((error) => {
       console.error('[启动] 降级错误页加载失败:', error)
       mainWindow?.show()
     })
@@ -479,9 +509,51 @@ function createWindow(): void {
     console.error(`[启动] 主 Renderer 加载失败 (${errorCode}): ${errorDescription} (${validatedURL})`)
     showRendererFailure(errorDescription)
   })
+  mainWindow.webContents.on('did-finish-load', () => {
+    // 主 Renderer 成功恢复后重新开始计数；只有连续失败才应进入错误页。
+    if (!hasShownRendererFailure) rendererRecoveryAttempts = []
+  })
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    console.error(`[启动] 主 Renderer 进程异常退出: ${details.reason}`)
-    showRendererFailure(`Renderer 进程异常退出：${details.reason}`)
+    // clean-exit 和应用退出不属于 Renderer 故障；避免退出过程中重新加载主窗口。
+    if (getIsQuitting() || details.reason === 'clean-exit') return
+
+    const now = Date.now()
+    rendererRecoveryAttempts = rendererRecoveryAttempts.filter(
+      (attemptAt) => now - attemptAt < RENDERER_RECOVERY_WINDOW_MS,
+    )
+    const processId = (() => {
+      try {
+        return mainWindow?.webContents.getProcessId()
+      } catch {
+        return undefined
+      }
+    })()
+    const rendererUrl = (() => {
+      try {
+        return mainWindow?.webContents.getURL()
+      } catch {
+        return undefined
+      }
+    })()
+    const crashContext = {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      url: rendererUrl,
+      processId,
+    }
+    console.error('[启动] 主 Renderer 进程异常退出:', crashContext)
+
+    if (!hasShownRendererFailure && canRecoverRenderer(rendererRecoveryAttempts, now)) {
+      rendererRecoveryAttempts.push(now)
+      console.warn(`[启动] 尝试恢复主 Renderer（${rendererRecoveryAttempts.length}/2）`)
+      void loadMainRenderer().catch((error) => {
+        console.error('[启动] 主 Renderer 自动恢复失败:', error)
+        showRendererFailure(`Renderer 进程异常退出：${details.reason}`)
+      })
+      return
+    }
+
+    showRendererFailure(`Renderer 进程异常退出：${details.reason}\n退出码：${details.exitCode}`)
   })
 
   // 窗口就绪后，按保存的状态决定是否最大化
@@ -511,6 +583,12 @@ function createWindow(): void {
 
   // 拦截页面内导航，外部链接用系统浏览器打开，防止 Electron 窗口被覆盖
   mainWindow.webContents.on('will-navigate', (event, url) => {
+    // 错误页上的“重新加载主界面”需要放行回到原始入口。
+    if (url === rendererEntryUrl) {
+      hasShownRendererFailure = false
+      rendererRecoveryAttempts = []
+      return
+    }
     // 允许开发模式下的 Vite HMR 热重载
     if (isDev && isDevServerNavigation(url)) return
     event.preventDefault()
@@ -525,6 +603,12 @@ function createWindow(): void {
       shell.openExternal(url)
     }
     return { action: 'deny' }
+  })
+
+  if (isDev) mainWindow.webContents.openDevTools()
+  void loadMainRenderer().catch((error) => {
+    console.error('[启动] 主 Renderer 初始加载失败:', error)
+    showRendererFailure(error instanceof Error ? error.message : String(error))
   })
 
   // macOS: 点击关闭按钮时隐藏窗口+应用，而不是退出
@@ -642,22 +726,12 @@ async function bootstrap(): Promise<void> {
   // Create main window (will be shown when ready)
   createWindow()
 
-  // 为 Dock、任务栏右键菜单与首次启动参数提供任务/日程的直接入口。
-  safeRun('configurePlanningQuickEntries', () => {
-    configurePlanningQuickEntries({
-      showMainWindow: showAndFocusMainWindow,
-      showPlanningWindow,
-    })
-  })
-  if (hasOpenPlanningArgument(process.argv)) showPlanningWindow()
-
   // Create system tray icon
   const hoverWin = process.platform === 'win32' ? getAgentStatusHoverWindow() : null
   if (hoverWin) safeRun('ensureHoverWindow', () => hoverWin.ensureCreated())
 
   createTray({
     showMainWindow: showAndFocusMainWindow,
-    showPlanningWindow,
     openAgentSession: (sessionId, title) => {
       sendToMainWindow(TRAY_IPC_CHANNELS.OPEN_AGENT_SESSION, { sessionId, title })
     },
@@ -719,7 +793,6 @@ async function bootstrap(): Promise<void> {
         openAgentSession: (sessionId, title) => {
           sendToMainWindow(TRAY_IPC_CHANNELS.OPEN_AGENT_SESSION, { sessionId, title })
         },
-        openPlanning: showPlanningWindow,
         enabled: () => getSettings().agentIsland?.enabled !== false,
       })
     })
@@ -738,9 +811,6 @@ async function bootstrap(): Promise<void> {
   )
   safeRun('registerGlobalShortcut:show-main-window', () =>
     registerGlobalShortcut('show-main-window', showAndFocusMainWindow),
-  )
-  safeRun('registerGlobalShortcut:open-planning', () =>
-    registerGlobalShortcut('open-planning', showPlanningWindow),
   )
   safeRun('registerGlobalShortcut:voice-dictation', () =>
     registerGlobalShortcut('voice-dictation', () => {
@@ -836,6 +906,7 @@ app.on('before-quit', () => {
 
   // 中止所有活跃的 Agent 和 Chat 子进程
   stopAllAgents()
+  void stopAllTerminals()
   browserController.dispose()
   stopAllGenerations()
   // 清理更新器定时器
@@ -857,7 +928,6 @@ app.on('before-quit', () => {
   unregisterAllGlobalShortcuts()
   // 销毁辅助窗口
   destroyQuickTaskWindow()
-  destroyPlanningWindow()
   destroyVoiceDictationWindow()
   destroyAgentStatusHoverWindow()
   // 销毁原生 macOS 灵动岛服务（其他平台从未创建 surface）

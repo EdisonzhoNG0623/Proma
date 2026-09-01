@@ -1,9 +1,11 @@
+import type { AgentStreamState } from '@/atoms/agent-atoms'
 import type { QuotedSelection } from '@/atoms/preview-atoms'
 import {
-  buildAgentHistoryQuoteLabel,
+  buildQuotedSelectionLabel,
   expandAgentHistoryQuoteMentions,
-  parseAgentHistoryQuoteMention,
+  parseQuotedSelectionMention,
 } from './quoted-selection'
+import { ENCODED_MENTION_VALUE_PATTERN, PLAIN_MENTION_VALUE_PATTERN } from './mention-patterns'
 
 export type QueueDropPlacement = 'before' | 'after'
 
@@ -67,6 +69,20 @@ export function createAgentQueuedMessage(
   if (options?.attachments && options.attachments.length > 0) message.attachments = options.attachments
   if (options?.additionalDirectories && options.additionalDirectories.length > 0) message.additionalDirectories = options.additionalDirectories
   return message
+}
+
+export function createQueuedAgentStreamState(
+  previous: Pick<AgentStreamState, 'model' | 'inputTokens' | 'contextWindow'> | undefined,
+  startedAt: number,
+): AgentStreamState {
+  return {
+    running: true,
+    backgroundWaiting: false,
+    model: previous?.model,
+    startedAt,
+    inputTokens: previous?.inputTokens,
+    contextWindow: previous?.contextWindow,
+  }
 }
 
 export function removeQueuedMessage(
@@ -158,13 +174,15 @@ function renderQueuedParagraphHtml(text: string): string {
     }
 
     const marker = match[0]
-    const quote = parseAgentHistoryQuoteMention(marker)
+    const quote = parseQuotedSelectionMention(marker)
     if (!quote) {
       html += escapeHtml(marker)
     } else {
       const payload = marker.slice('&quote:'.length)
-      const id = `${quote.messageId ?? ''}:${quote.selectionStart ?? ''}:${quote.selectionEnd ?? ''}`
-      const label = buildAgentHistoryQuoteLabel(quote)
+      const id = quote.sourceType === 'agent-history'
+        ? `${quote.messageId ?? ''}:${quote.selectionStart ?? ''}:${quote.selectionEnd ?? ''}`
+        : `${quote.filePath}:${quote.capturedAt}`
+      const label = buildQuotedSelectionLabel(quote)
       html += `<span data-type="mention" data-id="${escapeHtmlAttribute(id)}" data-label="${escapeHtmlAttribute(label)}" data-mention-suggestion-char="&" data-mention-quote="${escapeHtmlAttribute(payload)}">${escapeHtml(label)}</span>`
     }
     lastIndex = match.index + marker.length
@@ -188,8 +206,14 @@ export function queuedTextToParagraphHtml(text: string): string {
     .join('')
 }
 
-const REF_PATTERN = /\/skill:(?<skill>\S+)|#mcp:(?<mcp>\S+)|&session:(?<session>[A-Za-z0-9-]+)(?:(?:~|::)\S+)?|&todo:(?<todo>[A-Za-z0-9-]+)(?:(?:~|::)\S+)?|&calendar_event:(?<calendarEvent>[A-Za-z0-9-]+)(?:(?:~|::)\S+)?/g
-const DISPLAY_REFERENCE_PATTERN = /&quote:(?<quote>[A-Za-z0-9%_.!~*'()-]+)|@file:(?<file>\S+)|\/skill:(?<skill>\S+)|#mcp:(?<mcp>\S+)|&session:(?<session>[A-Za-z0-9-]+)(?:(?:~|::)(?<sessionLabel>\S+))?|&todo:(?<todo>[A-Za-z0-9-]+)(?:(?:~|::)(?<todoLabel>\S+))?|&calendar_event:(?<calendarEvent>[A-Za-z0-9-]+)(?:(?:~|::)(?<calendarEventLabel>\S+))?/g
+const REF_PATTERN = new RegExp(
+  String.raw`/skill:(?<skill>${PLAIN_MENTION_VALUE_PATTERN})|#mcp:(?<mcp>${PLAIN_MENTION_VALUE_PATTERN})|&session:(?<session>[A-Za-z0-9-]+)(?:(?:~|::)${ENCODED_MENTION_VALUE_PATTERN})?|&todo:(?<todo>[A-Za-z0-9-]+)(?:(?:~|::)${ENCODED_MENTION_VALUE_PATTERN})?|&calendar_event:(?<calendarEvent>[A-Za-z0-9-]+)(?:(?:~|::)${ENCODED_MENTION_VALUE_PATTERN})?`,
+  'gu',
+)
+const DISPLAY_REFERENCE_PATTERN = new RegExp(
+  String.raw`&quote:(?<quote>[A-Za-z0-9%_.!~*'()-]+)|@file:(?<file>${ENCODED_MENTION_VALUE_PATTERN})|/skill:(?<skill>${PLAIN_MENTION_VALUE_PATTERN})|#mcp:(?<mcp>${PLAIN_MENTION_VALUE_PATTERN})|&session:(?<session>[A-Za-z0-9-]+)(?:(?:~|::)(?<sessionLabel>${ENCODED_MENTION_VALUE_PATTERN}))?|&todo:(?<todo>[A-Za-z0-9-]+)(?:(?:~|::)(?<todoLabel>${ENCODED_MENTION_VALUE_PATTERN}))?|&calendar_event:(?<calendarEvent>[A-Za-z0-9-]+)(?:(?:~|::)(?<calendarEventLabel>${ENCODED_MENTION_VALUE_PATTERN}))?`,
+  'gu',
+)
 
 function decodeReferenceLabel(value: string): string {
   try {
@@ -214,13 +238,15 @@ export function getQueuedMessageDisplayParts(text: string): QueuedMessageDisplay
 
     const groups = match.groups ?? {}
     if (groups.quote) {
-      const quote = parseAgentHistoryQuoteMention(`&quote:${groups.quote}`)
+      const quote = parseQuotedSelectionMention(`&quote:${groups.quote}`)
       if (quote) {
         parts.push({
           type: 'reference',
           referenceType: 'quote',
-          id: `${quote.messageId ?? ''}:${quote.selectionStart ?? ''}:${quote.selectionEnd ?? ''}`,
-          label: buildAgentHistoryQuoteLabel(quote),
+          id: quote.sourceType === 'agent-history'
+            ? `${quote.messageId ?? ''}:${quote.selectionStart ?? ''}:${quote.selectionEnd ?? ''}`
+            : `${quote.filePath}:${quote.capturedAt}`,
+          label: buildQuotedSelectionLabel(quote),
         })
       } else {
         parts.push({ type: 'text', value: match[0] })
@@ -304,7 +330,7 @@ export function parseQueuedMessageMentions(text: string): ParsedQueuedMessageMen
       // @file: 路径在 htmlToMarkdown 序列化时已 encodeURIComponent（路径可能含空格），
       // 这里还原为真实路径，保证 Agent 侧读取的是可访问的完整路径；
       // 仅当含百分号编码时解码，避免破坏旧的未编码路径。
-      .replace(/@file:([^\s]+)/g, (full, encodedPath: string) =>
+      .replace(new RegExp(String.raw`@file:(${ENCODED_MENTION_VALUE_PATTERN})`, 'gu'), (full, encodedPath: string) =>
         /%[0-9A-Fa-f]{2}/.test(encodedPath)
           ? `@file:${decodeReferenceLabel(encodedPath)}`
           : full

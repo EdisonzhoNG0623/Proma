@@ -39,6 +39,105 @@ function escapeAttr(value: string): string {
     .replace(/\n/g, '&#10;')
 }
 
+export interface MarkdownHeading {
+  level: number
+  text: string
+  /** CodeMirror document offset for source-backed navigation. */
+  position: number
+}
+
+interface MarkdownSourceLine {
+  text: string
+  offset: number
+}
+
+/** 按 CodeMirror 的换行规范拆行：CRLF 和孤立 CR 都在 Text 文档中占一个 `\n`。 */
+function splitMarkdownSourceLines(markdown: string): MarkdownSourceLine[] {
+  const lines: MarkdownSourceLine[] = []
+  let sourceOffset = 0
+  let codeMirrorOffset = 0
+  while (sourceOffset < markdown.length) {
+    const lineStart = sourceOffset
+    while (sourceOffset < markdown.length && markdown[sourceOffset] !== '\n' && markdown[sourceOffset] !== '\r') sourceOffset += 1
+    const text = markdown.slice(lineStart, sourceOffset)
+    lines.push({ text, offset: codeMirrorOffset })
+    codeMirrorOffset += text.length
+    if (markdown[sourceOffset] === '\r' && markdown[sourceOffset + 1] === '\n') sourceOffset += 2
+    else if (sourceOffset < markdown.length) sourceOffset += 1
+    if (sourceOffset > lineStart + text.length) codeMirrorOffset += 1
+  }
+  if (markdown.length === 0 || /(?:\r\n|\r|\n)$/.test(markdown)) {
+    lines.push({ text: '', offset: codeMirrorOffset })
+  }
+  return lines
+}
+
+function isStandaloneHtmlMedia(line: string): boolean {
+  return STANDALONE_HTML_MEDIA_RE.test(line)
+}
+
+/**
+ * 将与 markdownToHtml 相同的“非 Markdown 区域”遮掉，再交给 markdown-it 解析。
+ * 每行保留原始数量和顺序，token.map 的行号即可映射回 CodeMirror 偏移。
+ */
+function prepareHeadingSource(markdown: string): MarkdownSourceLine[] {
+  const lines = splitMarkdownSourceLines(markdown)
+  const normalized = lines.map((line) => line.text)
+  const first = normalized[0] ?? ''
+  const opening = /^(?:\ufeff)?---[ \t]*$/.test(first)
+  let frontmatterEnd = -1
+  if (opening) {
+    let body = ''
+    for (let index = 1; index < normalized.length; index += 1) {
+      const line = normalized[index] ?? ''
+      if (/^(?:---|\.\.\.)[ \t]*$/.test(line)) {
+        if (/^[A-Za-z0-9_-]+\s*:/m.test(body)) frontmatterEnd = index
+        break
+      }
+      body += `${line}\n`
+    }
+  }
+
+  return lines.map((line, index) => {
+    let text = normalized[index] ?? ''
+    if (index <= frontmatterEnd || isStandaloneHtmlMedia(text)) {
+      text = ' '.repeat(text.length)
+    } else {
+      // preprocessMarkdown removes these prefixes before parsing, without changing
+      // the source line's start offset used for navigation.
+      text = text
+        .replace(/^[\u200b\ufeff]+(?=#{1,6}\s)/, '')
+        .replace(/^\u00a0{1,3}(?=#{1,6}\s)/, (spaces) => ' '.repeat(spaces.length))
+    }
+    return { ...line, text }
+  })
+}
+
+export function extractMarkdownHeadings(markdown: string): MarkdownHeading[] {
+  const headings: MarkdownHeading[] = []
+  const sourceLines = prepareHeadingSource(markdown)
+  const parserSource = sourceLines.map((line) => line.text).join('\n')
+  const tokens = markdownIt.parse(parserSource, {})
+
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]
+    if (!token || token.type !== 'heading_open' || token.map?.[0] === undefined) continue
+    const level = Number(token.tag.slice(1))
+    if (!Number.isInteger(level) || level < 1 || level > 6) continue
+    const inline = tokens[index + 1]
+    const text = inline?.type === 'inline'
+      ? inline.children?.map((child) => {
+          if (child.type === 'image') return child.content
+          if (child.type === 'softbreak' || child.type === 'hardbreak') return ' '
+          return child.content
+        }).join('').trim() ?? ''
+      : ''
+    if (!text) continue
+    headings.push({ level, text, position: sourceLines[token.map[0]]?.offset ?? 0 })
+  }
+  return headings
+}
+
 export function parseImageWidth(value: unknown): number | null {
   if (typeof value === 'string' && !/^\d+$/.test(value)) return null
   const width = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN
@@ -329,6 +428,16 @@ function normalizeMarkdownLinePrefixes(markdown: string): string {
     .replace(/^\u00a0{1,3}(?=#{1,6}\s)/gm, (spaces) => ' '.repeat(spaces.length))
 }
 
+/** 判断剪贴板纯文本是否包含足够明确的 Markdown 语法。 */
+export function looksLikeMarkdownText(value: string): boolean {
+  return /(?:^|\n)\s{0,3}(?:#{1,6}\s|[-+*]\s|>\s|```|~~~|\d+[.)]\s|---\s*$)|(?:\*\*|__|~~|`[^`\n]+`|\[[^\]\n]+\]\([^)]+\)|\|[^|\n]+\|)|(?:^|\s)(?:\*[^*\n]+\*|_[^_\n]+_)/m.test(value)
+}
+
+/** 判断剪贴板 HTML 是否已经携带可直接交给 TipTap 的富文本语义。 */
+export function hasRichClipboardMarkup(value: string): boolean {
+  return /<(?:strong|b|em|i|u|s|del|h[1-6]|ul|ol|li|blockquote|pre|code|hr|table|thead|tbody|tr|th|td|a|img|video)\b/i.test(value)
+}
+
 function preprocessMarkdown(markdown: string): string {
   return splitMarkdownCodeRegions(wrapLeadingFrontmatterBlock(markdown))
     .map((chunk) => chunk.code
@@ -383,6 +492,11 @@ export function markdownToHtml(markdown: string): string {
 
 function serializeNamedMention(prefix: '&session' | '&todo' | '&calendar_event', id: string, label: string | null): string {
   return label ? `${prefix}:${id}::${encodeURIComponent(label)}` : `${prefix}:${id}`
+}
+
+function addMentionBoundary(serialized: string, element: HTMLElement): string {
+  const nextText = element.nextSibling?.textContent ?? ''
+  return nextText.length > 0 && !/^\s/u.test(nextText) ? `${serialized} ` : serialized
 }
 
 /** 将 TipTap 输出的 HTML 转换为 Markdown 格式 */
@@ -534,15 +648,20 @@ export function htmlToMarkdown(
         const referenceType = el.getAttribute('data-mention-reference-type')
         const agentHistoryQuote = el.getAttribute('data-mention-quote')
         if (dataType === 'mention') {
-          if (agentHistoryQuote) return `&quote:${agentHistoryQuote}`
-          if (referenceType === 'todo') return serializeNamedMention('&todo', dataId, dataLabel)
-          if (referenceType === 'calendar_event') return serializeNamedMention('&calendar_event', dataId, dataLabel)
-          if (suggestionChar === '/') return `/skill:${dataId}`
-          if (suggestionChar === '#') return `#mcp:${dataId}`
-          if (suggestionChar === '&') return serializeNamedMention('&session', dataId, dataLabel)
-          // 路径可能包含空格等字符，必须编码后再嵌入 @file: 协议，
-          // 否则展示层 @file:(\S+) 正则会在空格处截断（remarkMentions / MentionChip / 排队消息均内置解码）。
-          return `@file:${encodeURIComponent(dataId)}`
+          let serializedMention: string
+          if (agentHistoryQuote) serializedMention = `&quote:${agentHistoryQuote}`
+          else if (referenceType === 'todo') serializedMention = serializeNamedMention('&todo', dataId, dataLabel)
+          else if (referenceType === 'calendar_event') serializedMention = serializeNamedMention('&calendar_event', dataId, dataLabel)
+          else if (suggestionChar === '/') serializedMention = `/skill:${dataId}`
+          else if (suggestionChar === '#') serializedMention = `#mcp:${dataId}`
+          else if (suggestionChar === '&') serializedMention = serializeNamedMention('&session', dataId, dataLabel)
+          else {
+            // 路径可能包含空格等字符，必须编码后再嵌入 @file: 协议；
+            // 展示层和排队消息解析器会在显式空格或紧邻的 CJK 文本处结束 token；
+            // 序列化层会为未分隔的后续文本补充空格，避免 ASCII 后缀被吞进 chip。
+            serializedMention = `@file:${encodeURIComponent(dataId)}`
+          }
+          return addMentionBoundary(serializedMention, el)
         }
         return children
       }

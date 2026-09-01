@@ -1,7 +1,7 @@
 {
   "name": "proma",
   "version": "0.1.1",
-  "description": "The next gen ai software with general agents",
+  "description": "Proma，为专业用户设计的 Agent",
   "type": "module",
   "private": true,
   "workspaces": [
@@ -14,6 +14,8 @@
     "electron:build": "bun run --filter='@proma/electron' build",
     "electron:start": "bun run --filter='@proma/electron' start",
     "dist:mac": "bun run --filter='@proma/electron' dist:mac",
+  "dist:win": "bun run --filter='@proma/electron' dist:win",
+  "dist:linux": "bun run --filter='@proma/electron' dist:linux",
     "build": "bun run --filter='*' build",
     "typecheck": "bun run --filter='*' typecheck",
     "test": "bun test"
@@ -34,13 +36,13 @@
     "jotai": "^2.17.1"
   },
   "overrides": {
-    "@earendil-works/pi-agent-core": "0.82.1",
-    "@earendil-works/pi-ai": "0.82.1",
-    "@earendil-works/pi-coding-agent": "0.82.1",
-    "@earendil-works/pi-tui": "0.82.1"
+    "@earendil-works/pi-agent-core": "0.84.4",
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4"
   },
   "patchedDependencies": {
-    "@earendil-works/pi-ai@0.82.1": "patches/@earendil-works%2Fpi-ai@0.82.1.patch",
-    "@earendil-works/pi-coding-agent@0.82.1": "patches/@earendil-works%2Fpi-coding-agent@0.82.1.patch"
+    "@earendil-works/pi-ai@0.84.4": "patches/@earendil-works%2Fpi-ai@0.84.4.patch",
+    "node-pty@1.1.0": "patches/node-pty@1.1.0.patch"
   }
 }

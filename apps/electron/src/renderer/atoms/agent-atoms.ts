@@ -6,12 +6,14 @@
  */
 
 import { atom } from 'jotai'
+import type { Getter } from 'jotai'
 import { atomFamily, atomWithStorage, selectAtom } from 'jotai/utils'
 import type { AgentSessionMeta, AgentEvent, AgentWorkspace, AgentPendingFile, RetryAttempt, PromaPermissionMode, PermissionRequest, AskUserRequest, ExitPlanModeRequest, ThinkingConfig, AgentEffort, SDKMessage, UnstagedChangesResult } from '@proma/shared'
 import { PROMA_DEFAULT_PERMISSION_MODE } from '@proma/shared'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
 import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
 import type { SessionFileChange } from '@/lib/session-file-changes'
+import type { RightWorkspaceSplitState } from '@/lib/right-workspace-split'
 
 /** 活动状态 */
 export type ActivityStatus = 'pending' | 'running' | 'completed' | 'error' | 'backgrounded'
@@ -41,25 +43,10 @@ export interface ActivityGroup {
   children: ToolActivity[]
 }
 
-/**
- * 将流式状态中未完成的 toolActivities 标记为终态。
- * 用于 complete、handleStop、STREAM_COMPLETE 等多个终态入口的兜底清理。
- * 当所有项已处于终态时返回原引用，避免不必要的 React 重渲染。
- */
-export function finalizeStreamingActivities(
-  toolActivities: ToolActivity[],
-): { toolActivities: ToolActivity[] } {
-  const hasUnfinishedTools = toolActivities.some((ta) => !ta.done)
-
-  return {
-    toolActivities: hasUnfinishedTools
-      ? toolActivities.map((ta) => (ta.done ? ta : { ...ta, done: true }))
-      : toolActivities,
-  }
-}
-
 export interface ContextCompactionState {
   status: 'running' | 'success' | 'noop' | 'failed'
+  /** 主任务已收到成功的 agent_end，当前仅在收尾整理上下文。 */
+  afterCompletedTurn?: boolean
   summary?: string
   message?: string
 }
@@ -99,11 +86,7 @@ export interface AgentStreamState {
    * 此状态下 running 为 false，但服务端 activeSessions 仍保留，新消息必须走注入通道而非新建 run。
    */
   backgroundWaiting?: boolean
-  content: string
-  toolActivities: ToolActivity[]
   model?: string
-  /** 本次运行启动时的渠道 ID；运行中切换模型只影响下一轮，不能覆盖它。 */
-  channelId?: string
   /** 当前输入 token 数（上下文使用量） */
   inputTokens?: number
   /** 输出 token 数 */
@@ -132,6 +115,8 @@ export interface AgentStreamState {
   compactInFlight?: boolean
   /** 流式开始时间戳（用于思考计时持久化） */
   startedAt?: number
+  /** 主进程按 session 单调递增的 run 代际；避免 startedAt 同毫秒碰撞。 */
+  runGeneration?: number
   /** 重试状态 */
   retrying?: AgentRetryState
 }
@@ -148,6 +133,11 @@ function clearFinishedCompactionForResumedWork(prev: AgentStreamState): AgentStr
     compactInFlight: false,
     contextCompaction: undefined,
   }
+}
+
+export function resumeAgentStreamState(prev: AgentStreamState): AgentStreamState {
+  const resumed = clearFinishedCompactionForResumedWork(prev)
+  return resumed.retrying === undefined ? resumed : { ...resumed, retrying: undefined }
 }
 
 /** 从 ToolActivity 派生状态 */
@@ -263,12 +253,12 @@ export function isActivityGroup(item: ActivityGroup | ToolActivity): item is Act
 }
 
 
-/** 待自动发送的 Agent 提示（从设置页"对话完成配置"触发） */
+/** 待预填到新 Agent 会话输入框的提示词；仅由用户手动发送。 */
 export interface AgentPendingPrompt {
   sessionId: string
   message: string
   additionalDirectories?: string[]
-  /** 自动发送时注入的 Todo 引用，确保 Agent 读取最新记录而非仅依赖提示文本。 */
+  /** 保留调用方关联的 Todo 引用元数据，发送时由用户确认。 */
   mentionedTodoIds?: string[]
 }
 
@@ -288,21 +278,76 @@ export const agentSessionChannelMapAtom = atom<Map<string, string>>(new Map())
 /** Per-session 模型 ID Map — sessionId → modelId */
 export const agentSessionModelMapAtom = atom<Map<string, string>>(new Map())
 export const currentAgentSessionIdAtom = atom<string | null>(null)
-export const agentStreamingStatesAtom = atom<Map<string, AgentStreamState>>(new Map())
 
 /**
- * 单个 session 的 streaming state 派生 atomFamily — 按 sessionId 切片订阅。
+ * Agent 流式状态的 session 索引与实际存储。
  *
- * 直接订阅 agentStreamingStatesAtom 会让任意 session 的流式更新都触发 AgentView
- * 整树重渲染（10–30fps）。本 family 让订阅者只在本 session 的 state 引用变化时
- * 重渲染——其他 session 的更新虽然让 base atom 变化，但派生 atom 输出引用未变，
- * jotai 自动跳过通知。
+ * 高频事件直接写入 family，避免每次 token/tool 状态更新都复制完整的 session Map。
+ * 聚合 atom 仅作为低频汇总和旧调用方兼容入口保留。
  */
-export const agentSessionStreamingStateAtomFamily = atomFamily((sessionId: string) =>
-  atom((get) => get(agentStreamingStatesAtom).get(sessionId)),
+const agentStreamingStateIdsAtom = atom<Set<string>>(new Set<string>())
+const agentStreamingStateStorageAtomFamily = atomFamily((sessionId: string) =>
+  atom<AgentStreamState | undefined>(undefined),
 )
 
-/** AgentView 输入区/工具栏需要的低频流状态；排除逐 token 变化的 content/toolActivities。 */
+export const agentSessionStreamingStateAtomFamily = atomFamily((sessionId: string) =>
+  atom(
+    (get) => get(agentStreamingStateStorageAtomFamily(sessionId)),
+    (
+      get,
+      set,
+      update: AgentStreamState | undefined | ((prev: AgentStreamState | undefined) => AgentStreamState | undefined),
+    ) => {
+      const previous = get(agentStreamingStateStorageAtomFamily(sessionId))
+      const next = typeof update === 'function' ? update(previous) : update
+      if (Object.is(previous, next)) return
+
+      set(agentStreamingStateStorageAtomFamily(sessionId), next)
+      set(agentStreamingStateIdsAtom, (prev: Set<string>) => {
+        if (next !== undefined) {
+          if (prev.has(sessionId)) return prev
+          const ids = new Set(prev)
+          ids.add(sessionId)
+          return ids
+        }
+        if (!prev.has(sessionId)) return prev
+        const ids = new Set(prev)
+        ids.delete(sessionId)
+        return ids
+      })
+    },
+  ),
+)
+
+function readAgentStreamingStates(get: Getter): Map<string, AgentStreamState> {
+  const states = new Map<string, AgentStreamState>()
+  for (const sessionId of get(agentStreamingStateIdsAtom)) {
+    const state = get(agentSessionStreamingStateAtomFamily(sessionId))
+    if (state) states.set(sessionId, state)
+  }
+  return states
+}
+
+/**
+ * 兼容旧调用方的聚合视图。高频路径不要写入此 atom，请使用
+ * agentSessionStreamingStateAtomFamily(sessionId)。
+ */
+export const agentStreamingStatesAtom = atom<Map<string, AgentStreamState>, [Map<string, AgentStreamState> | ((prev: Map<string, AgentStreamState>) => Map<string, AgentStreamState>)], void>(
+  (get) => readAgentStreamingStates(get),
+  (get, set, update) => {
+    const previous = readAgentStreamingStates(get)
+    const next = typeof update === 'function' ? update(previous) : update
+    const sessionIds = new Set([...previous.keys(), ...next.keys()])
+    for (const sessionId of sessionIds) {
+      const previousState = previous.get(sessionId)
+      const nextState = next.get(sessionId)
+      if (Object.is(previousState, nextState)) continue
+      set(agentSessionStreamingStateAtomFamily(sessionId), nextState)
+    }
+  },
+)
+
+/** AgentView 输入区/工具栏需要的低频流状态。 */
 export type AgentViewStreamState = Pick<
   AgentStreamState,
   | 'running'
@@ -333,15 +378,35 @@ export function areAgentViewStreamStatesEqual(
     && previous.isCompacting === next.isCompacting
 }
 
-/**
- * AgentView 不订阅逐 token content；完整状态只由 AgentMessages 消费。
- * selectAtom 的 equalityFn 保证纯文本流式更新不会重渲染输入框和工具栏。
- */
 export const agentSessionViewStreamStateAtomFamily = atomFamily((sessionId: string) =>
   selectAtom(
     agentSessionStreamingStateAtomFamily(sessionId),
     (state): AgentViewStreamState => state ?? EMPTY_AGENT_VIEW_STREAM_STATE,
     areAgentViewStreamStatesEqual,
+  ),
+)
+
+/**
+ * AgentView 输入区/工具栏只订阅运行生命周期，usage 数据由 ContextUsageBadge 独立消费。
+ */
+export type AgentInputStreamState = Pick<AgentStreamState, 'running' | 'backgroundWaiting'>
+
+const EMPTY_AGENT_INPUT_STREAM_STATE: AgentInputStreamState = { running: false }
+
+export function areAgentInputStreamStatesEqual(
+  previous: AgentInputStreamState,
+  next: AgentInputStreamState,
+): boolean {
+  return previous.running === next.running
+    && previous.backgroundWaiting === next.backgroundWaiting
+}
+
+/** 输入区只订阅发送/排队需要的生命周期状态，避免 usage_update 触发整页重渲染。 */
+export const agentSessionInputStreamStateAtomFamily = atomFamily((sessionId: string) =>
+  selectAtom(
+    agentSessionStreamingStateAtomFamily(sessionId),
+    (state): AgentInputStreamState => state ?? EMPTY_AGENT_INPUT_STREAM_STATE,
+    areAgentInputStreamStatesEqual,
   ),
 )
 
@@ -432,13 +497,108 @@ export const workspaceGitDiffRefreshVersionAtom = atom(0)
 
 // ===== 侧面板 Atoms =====
 
-/** 侧面板是否打开（全局共享，所有会话共用一个状态） */
-export const agentSidePanelOpenAtom = atomWithStorage<boolean>('proma-agent-sidepanel-open', true)
+/** 侧面板是否打开：按 Agent 会话持久化，未存储的会话默认打开。 */
+export const agentSidePanelOpenMapAtom = atomWithStorage<Record<string, boolean>>(
+  'proma-agent-sidepanel-open-by-session',
+  {},
+  undefined,
+  { getOnInit: true },
+)
 
-/** 侧面板宽度（全局共享，用户拖拽后持久化） */
-export const agentSidePanelWidthAtom = atomWithStorage<number>('proma-agent-sidepanel-width', 280)
+/** 指定 Agent 会话的侧面板开关。 */
+export const agentSidePanelOpenAtomFamily = atomFamily((sessionId: string) => atom(
+  (get) => get(agentSidePanelOpenMapAtom)[sessionId] ?? true,
+  (_get, set, isOpen: boolean) => {
+    set(agentSidePanelOpenMapAtom, (previous) => ({ ...previous, [sessionId]: isOpen }))
+  },
+))
 
-/** 文件来源选择：按会话持久化，未存储的会话默认显示会话文件。 */
+const DEFAULT_AGENT_SIDE_PANEL_WIDTH = 460
+
+/**
+ * 旧版全局宽度只作为尚未保存新布局的 Session 的初始基线，避免升级后尺寸回退。
+ * 新布局写入后不再与其他 Session 共享。
+ */
+const legacyAgentSidePanelWidthAtom = atomWithStorage<number>(
+  'proma-agent-workspace-width',
+  DEFAULT_AGENT_SIDE_PANEL_WIDTH,
+)
+
+export interface AgentSidePanelLayout {
+  width: number
+  hasOpenedWideWorkspace: boolean
+  widePanelWidthOverride: number | null
+}
+
+export const MAX_PERSISTED_AGENT_SIDE_PANEL_LAYOUTS = 50
+
+/**
+ * 仅保留最近活动的 Session 布局，防止 localStorage 随历史会话无限增长。
+ * 会话元数据可用时按 updatedAt 排序；冷启动尚未加载元数据时按存储顺序兜底。
+ * 正在写入的 Session 始终保留，即使其元数据尚未更新。
+ */
+export function pruneAgentSidePanelLayouts(
+  layouts: Record<string, AgentSidePanelLayout>,
+  sessions: readonly AgentSessionMeta[],
+  activeSessionId?: string,
+): Record<string, AgentSidePanelLayout> {
+  const layoutIds = Object.keys(layouts)
+  const recentSessionIds = sessions.length === 0
+    ? layoutIds.slice(-MAX_PERSISTED_AGENT_SIDE_PANEL_LAYOUTS)
+    : sessions
+      .slice()
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, MAX_PERSISTED_AGENT_SIDE_PANEL_LAYOUTS)
+      .map((session) => session.id)
+  const retainedIds = new Set(recentSessionIds)
+
+  if (activeSessionId && !retainedIds.has(activeSessionId)) {
+    if (retainedIds.size === MAX_PERSISTED_AGENT_SIDE_PANEL_LAYOUTS) {
+      const oldestRetainedId = sessions.length === 0
+        ? recentSessionIds[0]
+        : recentSessionIds.at(-1)
+      retainedIds.delete(oldestRetainedId!)
+    }
+    retainedIds.add(activeSessionId)
+  }
+
+  const entries = Object.entries(layouts).filter(([sessionId]) => retainedIds.has(sessionId))
+  if (entries.length === layoutIds.length) return layouts
+  return Object.fromEntries(entries)
+}
+
+/** 右侧工作区布局：按 Agent Session 持久化，包含普通与宽视图的尺寸。 */
+export const agentSidePanelLayoutMapAtom = atomWithStorage<Record<string, AgentSidePanelLayout>>(
+  'proma-agent-workspace-layout-by-session',
+  {},
+  undefined,
+  { getOnInit: true },
+)
+
+/** 指定 Agent Session 的右侧工作区布局。 */
+export const agentSidePanelLayoutAtomFamily = atomFamily((sessionId: string) => atom(
+  (get) => get(agentSidePanelLayoutMapAtom)[sessionId] ?? {
+    width: get(legacyAgentSidePanelWidthAtom),
+    hasOpenedWideWorkspace: false,
+    widePanelWidthOverride: null,
+  },
+  (get, set, update: AgentSidePanelLayout | ((previous: AgentSidePanelLayout) => AgentSidePanelLayout)) => {
+    set(agentSidePanelLayoutMapAtom, (previous) => {
+      const current = previous[sessionId] ?? {
+        width: get(legacyAgentSidePanelWidthAtom),
+        hasOpenedWideWorkspace: false,
+        widePanelWidthOverride: null,
+      }
+      const next = typeof update === 'function' ? update(current) : update
+      const nextLayouts = { ...previous, [sessionId]: next }
+      return Object.keys(nextLayouts).length > MAX_PERSISTED_AGENT_SIDE_PANEL_LAYOUTS
+        ? pruneAgentSidePanelLayouts(nextLayouts, get(agentSessionsAtom), sessionId)
+        : nextLayouts
+    })
+  },
+))
+
+/** 文件来源选择：按会话持久化，未存储的会话默认显示项目文件。 */
 export type AgentFileSourceFilter = 'session' | 'project'
 export const agentFileSourceFilterMapAtom = atomWithStorage<Record<string, AgentFileSourceFilter>>(
   'proma-agent-file-source-filter-map',
@@ -447,13 +607,281 @@ export const agentFileSourceFilterMapAtom = atomWithStorage<Record<string, Agent
   { getOnInit: true },
 )
 
-/** @deprecated 保留以兼容旧代码，但实际所有 session 都读全局 atom */
-export const agentSidePanelOpenMapAtom = atom<Map<string, boolean>>(new Map())
+/**
+ * 文件树展开状态。Files Tab 切换时 FileBrowser 会卸载，因此按会话与文件根保存
+ * 每个目录的显式展开/折叠状态；仅用于当前应用运行期的 UI 恢复，不写入用户的长期偏好。
+ */
+export const fileBrowserExpandedPathsAtom = atom<Map<string, Map<string, boolean>>>(new Map())
 
-export type AgentSidePanelTab = 'files' | 'changes' | 'chat'
+/** 更新单个目录的展开状态，同时保留其他文件树与目录的状态。 */
+export function updateFileBrowserExpandedPath(
+  state: Map<string, Map<string, boolean>>,
+  stateKey: string,
+  path: string,
+  expanded: boolean,
+): Map<string, Map<string, boolean>> {
+  const current = state.get(stateKey)
+  if (current?.get(path) === expanded) return state
 
-/** 侧面板当前 Tab：Files / 文件改动 / Chat（per-session Map） */
-export const agentDiffPanelTabAtom = atom<Map<string, AgentSidePanelTab>>(new Map())
+  const nextPaths = new Map(current)
+  nextPaths.set(path, expanded)
+  const next = new Map(state)
+  next.set(stateKey, nextPaths)
+  return next
+}
+
+/** Files Tab 各滚动视图的 scrollTop，按会话和文件视图隔离。 */
+export const fileBrowserScrollTopMapAtom = atom<Map<string, number>>(new Map())
+
+/** 清理已删除会话遗留的文件树 UI 状态；保留 standalone FileBrowser 状态。 */
+export function pruneFileBrowserStateMap<T>(state: Map<string, T>, retainedSessionIds: ReadonlySet<string>): Map<string, T> {
+  let changed = false
+  const next = new Map(state)
+  for (const key of state.keys()) {
+    const separatorIndex = key.indexOf('\u0002')
+    const sessionId = separatorIndex >= 0 ? key.slice(0, separatorIndex) : key
+    if (sessionId !== 'standalone' && !retainedSessionIds.has(sessionId)) {
+      next.delete(key)
+      changed = true
+    }
+  }
+  return changed ? next : state
+}
+
+/**
+ * 工作区级组件：内容归属项目而非单个会话，但在当前会话的右侧工作区中呈现。
+ * 同一项目下的打开状态跨会话保留；关闭一个组件不会影响其他项目。
+ */
+export type WorkspaceComponentTab = 'todos' | 'calendar' | 'automations' | 'skills' | 'mcp' | 'memory' | 'vault'
+export const WORKSPACE_COMPONENT_TABS: readonly WorkspaceComponentTab[] = ['todos', 'calendar', 'automations', 'skills', 'mcp', 'memory', 'vault']
+
+export function isWorkspaceComponentTab(tab: AgentSidePanelTab | string): tab is WorkspaceComponentTab {
+  return (WORKSPACE_COMPONENT_TABS as readonly string[]).includes(tab)
+}
+
+/** 过滤旧版本或异常持久化数据，避免未知组件渲染成空的右侧 Tab。 */
+export function sanitizeWorkspaceComponentTabs(tabs: readonly string[]): WorkspaceComponentTab[] {
+  return tabs.every(isWorkspaceComponentTab)
+    ? tabs as WorkspaceComponentTab[]
+    : tabs.filter(isWorkspaceComponentTab)
+}
+
+/** 协作子 Agent 尚未提供标题时仍需有可见的 Tab 标签。 */
+export function getDelegationTabLabel(title: string | null | undefined): string {
+  return title?.trim() || '委派任务'
+}
+
+export type AgentSidePanelBaseTab = 'files' | 'changes' | 'chat' | 'temporary-agent' | WorkspaceComponentTab
+/** 工作区组件、每个 Pi 探索分支、协作子 Agent、浏览器网页和文件预览都处于右侧工作区顶栏。 */
+export type AgentSidePanelTab = AgentSidePanelBaseTab | `exploration:${string}` | `delegation:${string}` | `browser:${string}` | `preview:${string}` | `terminal:${string}`
+
+/** 用户主动进入这些项目级能力时，Agent 后续的改动提示不得抢走当前视图。 */
+export function isUserPriorityWorkspaceComponentTab(
+  tab: AgentSidePanelTab | 'browser' | 'preview' | undefined,
+): tab is Extract<WorkspaceComponentTab, 'skills' | 'memory'> {
+  return tab === 'skills' || tab === 'memory'
+}
+
+/** Pi `/tree` 探索分支在右侧工作区的展示信息。 */
+export interface AgentExplorationBranchTab {
+  /** Pi 原生 fork 生成的独立 Proma session。 */
+  sessionId: string
+  /** 作为分叉锚点的 Proma assistant message UUID。 */
+  sourceMessageId: string
+  /** 给用户看的分叉来源。 */
+  sourceLabel: string
+}
+
+/**
+ * 右侧探索分支：key 为主线 Agent sessionId，value 为从其 Pi session tree 分叉出的已打开分支。
+ * 仅管理右侧展示；branch artifact 本身持久化在普通 Agent session 中，关闭 Tab 不会删除它。
+ */
+export const agentSideTemporaryAgentMapAtom = atom<Map<string, AgentExplorationBranchTab[]>>(new Map())
+
+export function getExplorationSidePanelTab(branchSessionId: string): AgentSidePanelTab {
+  return `exploration:${branchSessionId}`
+}
+
+/** 已在右侧打开的协作子 Agent：key 为父会话 ID，value 为子会话 ID 列表。 */
+export const agentSideDelegationMapAtom = atom<Map<string, string[]>>(new Map())
+
+export function getDelegationSidePanelTab(childSessionId: string): AgentSidePanelTab {
+  return `delegation:${childSessionId}`
+}
+
+export function getDelegationSessionIdFromSidePanelTab(tab: AgentSidePanelTab | 'delegation'): string | null {
+  return tab.startsWith('delegation:') ? tab.slice('delegation:'.length) : null
+}
+
+export function isDelegationSidePanelTab(tab: AgentSidePanelTab | 'delegation'): tab is `delegation:${string}` {
+  return tab.startsWith('delegation:')
+}
+
+export function getExplorationSessionIdFromSidePanelTab(tab: AgentSidePanelTab | 'exploration'): string | null {
+  return tab.startsWith('exploration:') ? tab.slice('exploration:'.length) : null
+}
+
+export function isExplorationSidePanelTab(tab: AgentSidePanelTab | 'exploration'): tab is `exploration:${string}` {
+  return tab.startsWith('exploration:')
+}
+
+export function getBrowserSidePanelTab(tabId: string): AgentSidePanelTab {
+  return `browser:${tabId}`
+}
+
+export function getBrowserTabIdFromSidePanelTab(tab: AgentSidePanelTab | 'browser'): string | null {
+  return tab.startsWith('browser:') ? tab.slice('browser:'.length) : null
+}
+
+export function isBrowserSidePanelTab(tab: AgentSidePanelTab | 'browser' | 'preview'): tab is `browser:${string}` {
+  return tab.startsWith('browser:')
+}
+
+export function getPreviewSidePanelTab(previewId: string): AgentSidePanelTab {
+  return `preview:${previewId}`
+}
+
+export function getPreviewIdFromSidePanelTab(tab: AgentSidePanelTab | 'preview'): string | null {
+  return tab.startsWith('preview:') ? tab.slice('preview:'.length) : null
+}
+
+/** 终端仅在本次应用运行期存在，按 Agent 会话归属右侧工作区。 */
+export interface AgentTerminalTab {
+  terminalId: string
+  title: string
+  /** 用户从 Worktree 入口打开时，终端固定在对应根目录。 */
+  cwd?: string
+}
+
+export const agentTerminalTabsAtom = atom<Map<string, AgentTerminalTab[]>>(new Map())
+
+export function getTerminalSidePanelTab(terminalId: string): AgentSidePanelTab {
+  return `terminal:${terminalId}`
+}
+
+export function getTerminalIdFromSidePanelTab(tab: AgentSidePanelTab | 'terminal'): string | null {
+  return tab.startsWith('terminal:') ? tab.slice('terminal:'.length) : null
+}
+
+/** 当前会话的侧面板是否打开，并将写入定向到当前会话。 */
+export const currentSessionSidePanelOpenAtom = atom(
+  (get) => {
+    const currentId = get(currentAgentSessionIdAtom)
+    return currentId ? get(agentSidePanelOpenAtomFamily(currentId)) : false
+  },
+  (get, set, isOpen: boolean) => {
+    const currentId = get(currentAgentSessionIdAtom)
+    if (currentId) set(agentSidePanelOpenAtomFamily(currentId), isOpen)
+  },
+)
+
+/**
+ * 项目级能力的右侧 Tab 打开状态按 Agent session 持久化。能力的数据仍归属于 workspace，
+ * 但同一 workspace 的后台会话不得改变彼此的右侧 Tab，避免抢走用户焦点。
+ */
+export const agentSessionComponentOpenMapAtom = atomWithStorage<Record<string, WorkspaceComponentTab[]>>(
+  'proma-agent-session-component-tabs',
+  {},
+  undefined,
+  { getOnInit: true },
+)
+
+export const agentSessionComponentTabsAtomFamily = atomFamily((sessionId: string) => atom(
+  (get) => get(agentSessionComponentOpenMapAtom)[sessionId] ?? [],
+  (_get, set, update: WorkspaceComponentTab[] | ((previous: WorkspaceComponentTab[]) => WorkspaceComponentTab[])) => {
+    set(agentSessionComponentOpenMapAtom, (previous) => {
+      const current = previous[sessionId] ?? []
+      const next = typeof update === 'function' ? update(current) : update
+      if (next === current) return previous
+      return { ...previous, [sessionId]: next }
+    })
+  },
+))
+
+/** 侧面板当前工作区：基础视图或某个浏览器网页（per-session Map）。 */
+export const agentDiffPanelTabAtom = atom<Map<string, AgentSidePanelTab | 'browser' | 'preview'>>(new Map())
+
+/** 当前 renderer 运行期内的右侧双 Pane 状态；动态 Tab 失效时由 SidePanel 主动清理。 */
+export const agentSidePanelSplitMapAtom = atom<Map<string, RightWorkspaceSplitState>>(new Map())
+
+/** 双 Pane 分隔比例按 Session 持久化，但不持久化可能在重启后失效的动态 Tab ID。 */
+export const agentSidePanelSplitRatioMapAtom = atomWithStorage<Record<string, number>>(
+  'proma-agent-workspace-split-ratio-by-session',
+  {},
+  undefined,
+  { getOnInit: true },
+)
+
+/** Agent 历史中的 Skill 引用请求在 Skills Tab 内打开对应详情。 */
+export interface SkillDetailNavigationRequest {
+  skillSlug: string
+  /** 用于防止跨项目会话误打开同名 Skill。 */
+  workspaceSlug?: string
+}
+
+/** 历史引用导航属于会话级短暂 UI 状态，避免其他会话的 Skills 视图消费请求。 */
+export const skillDetailNavigationAtomFamily = atomFamily((sessionId: string) => atom<SkillDetailNavigationRequest | null>(null))
+
+/** 在当前 Agent 会话中打开并聚焦一个项目级组件。 */
+export const openWorkspaceComponentAtom = atom(
+  null,
+  (get, set, component: WorkspaceComponentTab) => {
+    const sessionId = get(currentAgentSessionIdAtom)
+    if (!sessionId) return
+    set(agentSessionComponentTabsAtomFamily(sessionId), (previous) => (
+      previous.includes(component) ? previous : [...previous, component]
+    ))
+    set(agentSidePanelOpenAtomFamily(sessionId), true)
+    set(agentDiffPanelTabAtom, (previous) => {
+      if (previous.get(sessionId) === component) return previous
+      const next = new Map(previous)
+      next.set(sessionId, component)
+      return next
+    })
+  },
+)
+
+/**
+ * Agent 改动项目级数据时，仅在产生改动的 session 展示对应 Tab。
+ * 若该 session 正在查看 Skills 或项目记忆，保留用户显式选择的焦点。
+ */
+export const revealChangedWorkspaceComponentAtom = atom(
+  null,
+  (get, set, { sessionId, component }: { sessionId: string; component: WorkspaceComponentTab }) => {
+    set(agentSessionComponentTabsAtomFamily(sessionId), (previous) => (
+      previous.includes(component) ? previous : [...previous, component]
+    ))
+
+    const activeTab = get(agentDiffPanelTabAtom).get(sessionId)
+    const preservesUserFocus = get(agentSidePanelOpenAtomFamily(sessionId))
+      && isUserPriorityWorkspaceComponentTab(activeTab)
+    if (preservesUserFocus) return
+
+    set(agentSidePanelOpenAtomFamily(sessionId), true)
+    set(agentDiffPanelTabAtom, (previous) => {
+      if (previous.get(sessionId) === component) return previous
+      const next = new Map(previous)
+      next.set(sessionId, component)
+      return next
+    })
+  },
+)
+
+/** 关闭当前 session 的一个组件；若它正被当前会话查看，回退到文件。 */
+export const closeWorkspaceComponentAtom = atom(
+  null,
+  (get, set, component: WorkspaceComponentTab) => {
+    const sessionId = get(currentAgentSessionIdAtom)
+    if (!sessionId) return
+    set(agentSessionComponentTabsAtomFamily(sessionId), (previous) => previous.filter((item) => item !== component))
+    set(agentDiffPanelTabAtom, (previous) => {
+      if (previous.get(sessionId) !== component) return previous
+      const next = new Map(previous)
+      next.set(sessionId, 'files')
+      return next
+    })
+  },
+)
 
 /** Diff 视图模式：'split' | 'unified'，默认使用统一预览 */
 export const agentDiffViewModeAtom = atom<'split' | 'unified'>('unified')
@@ -488,13 +916,6 @@ export const agentFileChangesCurrentRunAtom = atom<Map<string, string>>(new Map(
  */
 export const agentDiffDataAtom = atom(new Map<string, UnstagedChangesResult>())
 
-/** 当前会话的侧面板是否打开（派生只读：全局共享，但仅在有当前会话且为 Agent 模式时显示） */
-export const currentSessionSidePanelOpenAtom = atom<boolean>((get) => {
-  const currentId = get(currentAgentSessionIdAtom)
-  if (!currentId) return false
-  return get(agentSidePanelOpenAtom)
-})
-
 /** 当前会话的工作路径 Map — sessionId → path */
 export const agentSessionPathMapAtom = atom<Map<string, string>>(new Map())
 
@@ -511,6 +932,16 @@ export interface FileBrowserAutoReveal {
   select?: boolean
 }
 export const fileBrowserAutoRevealAtom = atom<FileBrowserAutoReveal | null>(null)
+
+/** 文件搜索定位只应影响发起后的短暂视图，避免切回 Files 时重放旧定位。 */
+export const FILE_BROWSER_AUTO_REVEAL_TTL_MS = 1_500
+
+export function isFileBrowserAutoRevealActive(
+  reveal: FileBrowserAutoReveal | null,
+  now = Date.now(),
+): reveal is FileBrowserAutoReveal {
+  return reveal !== null && now - reveal.ts >= 0 && now - reveal.ts < FILE_BROWSER_AUTO_REVEAL_TTL_MS
+}
 
 /**
  * 最近被 Agent 修改的文件路径（per-session，path → 修改时间戳 ms）。
@@ -647,45 +1078,39 @@ export const currentAgentSessionAtom = atom<AgentSessionMeta | null>((get) => {
 export const agentStreamingAtom = atom<boolean>((get) => {
   const currentId = get(currentAgentSessionIdAtom)
   if (!currentId) return false
-  return get(agentStreamingStatesAtom).get(currentId)?.running ?? false
-})
-
-export const agentStreamingContentAtom = atom<string>((get) => {
-  const currentId = get(currentAgentSessionIdAtom)
-  if (!currentId) return ''
-  return get(agentStreamingStatesAtom).get(currentId)?.content ?? ''
-})
-
-export const agentToolActivitiesAtom = atom<ToolActivity[]>((get) => {
-  const currentId = get(currentAgentSessionIdAtom)
-  if (!currentId) return []
-  return get(agentStreamingStatesAtom).get(currentId)?.toolActivities ?? []
+  return get(agentSessionStreamingStateAtomFamily(currentId))?.running ?? false
 })
 
 export const agentStreamingModelAtom = atom<string | undefined>((get) => {
   const currentId = get(currentAgentSessionIdAtom)
   if (!currentId) return undefined
-  return get(agentStreamingStatesAtom).get(currentId)?.model
+  return get(agentSessionStreamingStateAtomFamily(currentId))?.model
 })
 
 export const agentRetryingAtom = atom<AgentStreamState['retrying'] | undefined>((get) => {
   const currentId = get(currentAgentSessionIdAtom)
   if (!currentId) return undefined
-  return get(agentStreamingStatesAtom).get(currentId)?.retrying
+  return get(agentSessionStreamingStateAtomFamily(currentId))?.retrying
 })
 
 export const agentStartedAtAtom = atom<number | undefined>((get) => {
   const currentId = get(currentAgentSessionIdAtom)
   if (!currentId) return undefined
-  return get(agentStreamingStatesAtom).get(currentId)?.startedAt
+  return get(agentSessionStreamingStateAtomFamily(currentId))?.startedAt
 })
 
+let lastRunningSessionSignature = ''
+let lastRunningSessionIds = new Set<string>()
+
 export const agentRunningSessionIdsAtom = atom<Set<string>>((get) => {
-  const states = get(agentStreamingStatesAtom)
   const ids = new Set<string>()
-  for (const [id, state] of states) {
-    if (state.running) ids.add(id)
+  for (const sessionId of get(agentStreamingStateIdsAtom)) {
+    if (get(agentSessionStreamingStateAtomFamily(sessionId))?.running) ids.add(sessionId)
   }
+  const signature = [...ids].sort().join('|')
+  if (signature === lastRunningSessionSignature) return lastRunningSessionIds
+  lastRunningSessionSignature = signature
+  lastRunningSessionIds = ids
   return ids
 })
 
@@ -735,7 +1160,17 @@ export const agentSessionIndicatorMapAtom = atom<Map<string, SessionIndicatorSta
     const hasBlock = (pendingPerms.get(id)?.length ?? 0) > 0
       || (pendingAskUser.get(id)?.length ?? 0) > 0
       || (pendingExitPlan.get(id)?.length ?? 0) > 0
-    map.set(id, hasBlock ? 'blocked' : 'running')
+    if (hasBlock) {
+      map.set(id, 'blocked')
+    } else if (
+      state.contextCompaction?.status === 'running'
+      && state.contextCompaction.afterCompletedTurn === true
+    ) {
+      // 主任务已经交付，后续仅在整理上下文时应呈现为可验收的完成态。
+      map.set(id, 'completed')
+    } else {
+      map.set(id, 'running')
+    }
   }
 
   for (const id of unviewedCompleted) {
@@ -755,120 +1190,16 @@ export function applyAgentEvent(
   event: AgentEvent,
 ): AgentStreamState {
   switch (event.type) {
-    case 'text_delta': {
-      // 开始接收文本 - 清除重试状态（重试成功）
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      return { ...resumed, content: resumed.content + event.text, retrying: undefined }
-    }
+    case 'tool_start':
+      // 工具开始只负责收束 retry/compaction 控制状态；工具展示由 live SDK message 驱动。
+      return { ...clearFinishedCompactionForResumedWork(prev), retrying: undefined }
 
-    case 'text_complete': {
-      // 用完整文本替换增量累积的文本（用于回放场景：只需 text_complete 即可重建文本状态）
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      return { ...resumed, content: event.text }
-    }
-
-    case 'tool_start': {
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      const existing = resumed.toolActivities.find((t) => t.toolUseId === event.toolUseId)
-      if (existing) {
-        return {
-          ...resumed,
-          toolActivities: resumed.toolActivities.map((t) =>
-            t.toolUseId === event.toolUseId
-              ? { ...t, input: event.input, intent: event.intent || t.intent, displayName: event.displayName || t.displayName }
-              : t
-          ),
-          // 开始工具调用 - 清除重试状态（重试成功）
-          retrying: undefined,
-        }
-      }
-      return {
-        ...resumed,
-        toolActivities: [...resumed.toolActivities, {
-          toolUseId: event.toolUseId,
-          toolName: event.toolName,
-          input: event.input,
-          intent: event.intent,
-          displayName: event.displayName,
-          done: false,
-          parentToolUseId: event.parentToolUseId,
-        }],
-        // 开始工具调用 - 清除重试状态（重试成功）
-        retrying: undefined,
-      }
-    }
-
-    case 'tool_result': {
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      return {
-        ...resumed,
-        toolActivities: resumed.toolActivities.map((t) =>
-          t.toolUseId === event.toolUseId
-            ? { ...t, result: event.result, isError: event.isError, done: true, imageAttachments: event.imageAttachments }
-            : t
-        ),
-      }
-    }
-
-    case 'task_backgrounded': {
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      return {
-        ...resumed,
-        toolActivities: resumed.toolActivities.map((t) =>
-          t.toolUseId === event.toolUseId
-            ? { ...t, isBackground: true, taskId: event.taskId, done: true }
-            : t
-        ),
-      }
-    }
-
-    case 'task_progress': {
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      // 普通 tool 计时语义（仅当有真实 elapsedSeconds 时更新）
-      if (event.elapsedSeconds != null) {
-        return {
-          ...resumed,
-          toolActivities: resumed.toolActivities.map((t) =>
-            t.toolUseId === event.toolUseId
-              ? { ...t, elapsedSeconds: event.elapsedSeconds! }
-              : t
-          ),
-        }
-      }
-      return resumed
-    }
-
-    case 'task_started': {
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      // 查找匹配 toolUseId 的 ToolActivity，更新 intent 和 taskId
-      let nextActivities = resumed.toolActivities
-      if (event.toolUseId) {
-        if (resumed.toolActivities.some((t) => t.toolUseId === event.toolUseId)) {
-          nextActivities = resumed.toolActivities.map((t) =>
-            t.toolUseId === event.toolUseId
-              ? { ...t, intent: event.description, taskId: event.taskId }
-              : t
-          )
-        }
-      }
-      return { ...resumed, toolActivities: nextActivities }
-    }
-
-    case 'shell_backgrounded': {
-      const resumed = clearFinishedCompactionForResumedWork(prev)
-      return {
-        ...resumed,
-        toolActivities: resumed.toolActivities.map((t) =>
-          t.toolUseId === event.toolUseId
-            ? { ...t, isBackground: true, shellId: event.shellId, done: true }
-            : t
-        ),
-      }
-    }
-
+    case 'tool_result':
+    case 'task_backgrounded':
+    case 'task_progress':
+    case 'task_started':
+    case 'shell_backgrounded':
     case 'shell_killed':
-      return clearFinishedCompactionForResumedWork(prev)
-
     case 'task_notification':
       return clearFinishedCompactionForResumedWork(prev)
 
@@ -926,7 +1257,6 @@ export function applyAgentEvent(
           }),
         } : {}),
         retrying: undefined,
-        ...finalizeStreamingActivities(prev.toolActivities),
       }
     }
 
@@ -972,7 +1302,10 @@ export function applyAgentEvent(
         ...prev,
         isCompacting: true,
         compactInFlight: true,
-        contextCompaction: { status: 'running' },
+        contextCompaction: {
+          status: 'running',
+          afterCompletedTurn: event.afterCompletedTurn === true,
+        },
       }
 
     case 'compact_complete': {
@@ -1151,7 +1484,7 @@ export interface AgentContextStatus {
 export const agentContextStatusAtom = atom<AgentContextStatus>((get) => {
   const currentId = get(currentAgentSessionIdAtom)
   if (!currentId) return { isCompacting: false }
-  const state = get(agentStreamingStatesAtom).get(currentId)
+  const state = get(agentSessionStreamingStateAtomFamily(currentId))
   return {
     isCompacting: state?.isCompacting ?? false,
     inputTokens: state?.inputTokens,
@@ -1318,38 +1651,6 @@ export const currentAgentSuggestionAtom = atom<string | null>((get) => {
   if (!currentId) return null
   return get(agentPromptSuggestionsAtom).get(currentId) ?? null
 })
-
-// ===== 后台任务管理 =====
-
-/**
- * 后台任务数据结构
- *
- * 用于 ActiveTasksBar 显示运行中的 Agent 任务和 Shell 任务。
- */
-export interface BackgroundTask {
-  /** 任务或 Shell ID */
-  id: string
-  /** 任务类型 */
-  type: 'agent' | 'shell'
-  /** 关联的工具调用 ID（用于滚动定位到实时工具调用） */
-  toolUseId: string
-  /** 任务开始时间戳 */
-  startTime: number
-  /** 已耗时（秒） */
-  elapsedSeconds: number
-  /** 任务意图/描述 */
-  intent?: string
-}
-
-/**
- * 后台任务列表原子家族
- *
- * 按 sessionId 隔离，每个会话独立管理后台任务。
- * 任务完成后从列表中移除（只显示运行中任务）。
- */
-export const backgroundTasksAtomFamily = atomFamily((sessionId: string) =>
-  atom<BackgroundTask[]>([])
-)
 
 // ===== 用户打断状态 =====
 

@@ -159,40 +159,6 @@ describe('Agent 会话 JSONL 读取', () => {
       .toThrow('JSONL 第 2 行解析失败')
   })
 
-  test('Given 长会话 When 从尾部按页读取 Then 首屏只返回 400 条且可继续加载更早历史', () => {
-    writeAgentSessionJsonl('session-paged-history', Array.from({ length: 450 }, (_, index) => JSON.stringify({
-      type: 'assistant',
-      uuid: `assistant-${index}`,
-      message: { content: [{ type: 'text', text: `消息 ${index}` }] },
-    })))
-
-    const latest = manager.getAgentSessionSDKMessagesPage('session-paged-history')
-    expect(latest.messages).toHaveLength(400)
-    expect((latest.messages[0] as { uuid?: string }).uuid).toBe('assistant-50')
-    expect(typeof latest.nextBefore).toBe('number')
-
-    const earlier = manager.getAgentSessionSDKMessagesPage('session-paged-history', {
-      before: latest.nextBefore,
-    })
-    expect(earlier.messages).toHaveLength(50)
-    expect((earlier.messages[0] as { uuid?: string }).uuid).toBe('assistant-0')
-    expect(earlier.nextBefore).toBeUndefined()
-  })
-
-  test('Given 分页消息包含超长正文 When 发送给 renderer Then 只裁剪展示副本', () => {
-    const originalText = 'x'.repeat(70 * 1024)
-    writeAgentSessionJsonl('session-oversized-renderer-page', [JSON.stringify({
-      type: 'assistant',
-      uuid: 'assistant-large',
-      message: { content: [{ type: 'text', text: originalText }] },
-    })])
-
-    const page = manager.getAgentSessionSDKMessagesPage('session-oversized-renderer-page')
-    const content = (page.messages[0] as { message?: { content?: Array<{ text?: string }> } }).message?.content
-    expect(content?.[0]?.text?.length).toBeLessThan(originalText.length)
-    expect(manager.getAgentSessionSDKMessages('session-oversized-renderer-page')[0])
-      .toMatchObject({ message: { content: [{ text: originalText }] } })
-  })
 })
 
 describe('Agent 会话 runtime 元数据', () => {

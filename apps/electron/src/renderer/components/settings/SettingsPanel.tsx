@@ -8,7 +8,8 @@
 import * as React from "react";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { cn } from "@/lib/utils";
-import { detectIsWindows, WINDOW_CONTROLS_INSET_RIGHT } from "@/lib/platform";
+import { detectIsWindows } from "@/lib/platform";
+import { getWindowTitlebarDragInsetStyle } from "@/lib/window-titlebar-layout";
 import {
   Settings,
   Radio,
@@ -177,6 +178,7 @@ interface SettingsPanelProps {
 export function SettingsPanel({
   onClose,
 }: SettingsPanelProps): React.ReactElement {
+  const isWindows = React.useMemo(() => detectIsWindows(), [])
   const [activeTab, setActiveTab] = useAtom(settingsTabAtom);
   const channelFormDirty = useAtomValue(channelFormDirtyAtom);
   const [closeRequested, setCloseRequested] = useAtom(settingsCloseRequestedAtom);
@@ -190,8 +192,6 @@ export function SettingsPanel({
   const [mainTabs, setMainTabs] = useAtom(tabsAtom);
   const setMainActiveTabId = useSetAtom(activeTabIdAtom);
   const openSession = useOpenSession()
-  const isWindows = React.useMemo(() => detectIsWindows(), [])
-
   /** 统一的退出拦截对话框状态 */
   type PendingAction =
     | { type: 'tab'; tabId: SettingsTab }
@@ -309,16 +309,11 @@ export function SettingsPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-content-area text-foreground">
-      {/* 顶部可拖动标题栏区域。背景层保持全宽；drag 层在 Windows 上必须避开右上角的
-          WindowControls 按钮区域（WINDOW_CONTROLS_INSET_RIGHT），否则 OS hitmask 会把
-          按钮点击误判为标题栏点击，导致最小化/最大化/关闭按钮无响应（与 AppShell/TabBar 一致）。 */}
       <div className="relative h-[35px] flex-shrink-0 bg-[hsl(var(--sidebar-surface))]">
         <div
           aria-hidden="true"
-          className={cn(
-            'titlebar-drag-region pointer-events-none absolute left-0 top-0 h-full',
-            isWindows ? WINDOW_CONTROLS_INSET_RIGHT : 'right-0',
-          )}
+          className="titlebar-drag-region pointer-events-none absolute inset-y-0 left-0"
+          style={getWindowTitlebarDragInsetStyle(isWindows)}
         />
       </div>
 
@@ -353,7 +348,7 @@ export function SettingsPanel({
             >
               <ArrowLeft size={16} />
               <span>返回</span>
-              <span className="ml-auto hidden group-hover:inline-flex">
+              <span aria-hidden="true" className="ml-auto inline-flex opacity-0 transition-opacity group-hover:opacity-100">
                 <ShortcutKeycaps accelerator="Esc" />
               </span>
             </button>

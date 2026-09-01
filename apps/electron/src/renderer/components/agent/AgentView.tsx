@@ -41,6 +41,7 @@ import {
   inputToolbarDisabledButtonClass,
   inputToolbarSendButtonClass,
 } from '@/components/ai-elements/input-toolbar-styles'
+import { preventHoverPopoverFocusRestore } from '@/components/ai-elements/input-toolbar-popover-focus'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -62,11 +63,17 @@ import { cn } from '@/lib/utils'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { registerShortcut } from '@/lib/shortcut-registry'
 import { supportsChannelPlanQuota } from '@/lib/channel-plan-quota'
-import { previewPanelOpenMapAtom, quotedSelectionMapAtom, currentQuotedSelectionAtom } from '@/atoms/preview-atoms'
+import {
+  clearStopGenerationTarget,
+  getStopGenerationTarget,
+  rememberStopGenerationTarget,
+} from '@/lib/stop-generation-target'
+import { previewFileMapAtom, previewPanelOpenMapAtom, quotedSelectionMapAtom, currentQuotedSelectionAtom } from '@/atoms/preview-atoms'
 import type { QuotedSelection } from '@/atoms/preview-atoms'
 import {
   agentStreamingStatesAtom,
-  agentSessionViewStreamStateAtomFamily,
+  agentSessionStreamingStateAtomFamily,
+  agentSessionInputStreamStateAtomFamily,
   agentChannelIdAtom,
   agentModelIdAtom,
   agentSessionChannelMapAtom,
@@ -105,24 +112,26 @@ import {
   allPendingAskUserRequestsAtom,
   allPendingPermissionRequestsAtom,
   allPendingExitPlanRequestsAtom,
-  finalizeStreamingActivities,
+  agentDiffPanelTabAtom,
+  agentSidePanelOpenAtomFamily,
+  agentSideTemporaryAgentMapAtom,
+  getExplorationSidePanelTab,
 } from '@/atoms/agent-atoms'
-import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { activeHermesTargetIdAtom, hermesTargetsAtom } from '@/atoms/hermes-atoms'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
-import { channelsAtom } from '@/atoms/chat-atoms'
+import { channelsAtom, modelSelectorOpenAtom } from '@/atoms/chat-atoms'
 import { todoPlanningGroupsAtom } from '@/atoms/planning-atoms'
 import { useOpenSession } from '@/hooks/useOpenSession'
-import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
-import type { AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, HermesPublicTarget, ModelOption, ReasoningCapability, SDKMessage, SDKUserMessage } from '@proma/shared'
+import type { AgentDeferredQueueMessageInput, AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, HermesPublicTarget, ModelOption, ReasoningCapability, SDKMessage, SDKUserMessage } from '@proma/shared'
 import { inferContextWindow, inferReasoningTransport, isCodexFastModeSupportedModel, MAX_ATTACHMENT_SIZE, normalizeReasoningCapabilityLevel, normalizeReasoningLevel, resolveReasoningCapability, resolveReasoningProfile } from '@proma/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
 import { getFilePanelDragData, INSERT_FILE_MENTION_EVENT, type FilePanelDragItem } from '@/lib/file-panel-drag'
 import { buildQuotedSelectionBlock, expandAgentHistoryQuoteMentions } from '@/lib/quoted-selection'
+import { INSERT_AGENT_INPUT_QUOTE_EVENT, type InsertAgentInputQuoteDetail } from '@/lib/agent-input-quote'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import {
@@ -284,12 +293,6 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function isStaleAgentQueueError(error: unknown): boolean {
-  const message = getErrorMessage(error)
-  return message.includes('会话未运行，无法追加消息') ||
-    message.includes('无活跃消息通道可注入队列消息')
-}
-
 // ===== 思考模式 Hover Popover =====
 
 const OPENAI_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly AgentThinkingLevel[]
@@ -330,13 +333,15 @@ interface AgentThinkingPopoverProps {
 function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThinkingPopoverProps): React.ReactElement {
   const [open, setOpen] = React.useState(false)
   const hoverTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const popoverReceivedFocusRef = React.useRef(false)
   const isCodex = Boolean(codexConfig)
   const thinkingLevels = codexConfig?.levels ?? OPENAI_STANDARD_THINKING_LEVELS
   const normalizedLevel = normalizeOpenAIThinkingLevel(
     codexConfig?.thinkingLevel,
     thinkingLevels,
   )
-  const isEnabled = isCodex ? normalizedLevel !== 'off' : agentThinking?.type === 'adaptive'
+  const supportsThinkingToggle = thinkingLevels.includes('off')
+  const isEnabled = isCodex ? !supportsThinkingToggle || normalizedLevel !== 'off' : agentThinking?.type === 'adaptive'
   const sliderPosition = thinkingLevels.indexOf(normalizedLevel)
 
   const handleMouseEnter = React.useCallback(() => {
@@ -356,6 +361,7 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
 
   const handleButtonClick = (): void => {
     if (codexConfig) {
+      if (!supportsThinkingToggle) return
       codexConfig.onThinkingLevelChange(isEnabled ? 'off' : 'high')
       return
     }
@@ -384,7 +390,14 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
         className="w-64 p-3"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
+        onFocusCapture={() => {
+          popoverReceivedFocusRef.current = true
+        }}
         onOpenAutoFocus={(e) => e.preventDefault()}
+        onCloseAutoFocus={(event) => {
+          preventHoverPopoverFocusRestore(event, popoverReceivedFocusRef.current)
+          popoverReceivedFocusRef.current = false
+        }}
       >
         <div className="flex flex-col gap-3">
           {codexConfig ? (
@@ -425,19 +438,34 @@ function AgentThinkingPopover({ agentThinking, onToggle, codexConfig }: AgentThi
   )
 }
 
-export function AgentView({ sessionId }: { sessionId: string }): React.ReactElement {
-  const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>([])
+interface AgentViewProps {
+  sessionId: string
+  /** 右侧临时 Agent Tab：保留完整对话与输入能力，但不重复渲染全局会话标题栏。 */
+  embedded?: boolean
+}
+
+export function AgentView({ sessionId, embedded = false }: AgentViewProps): React.ReactElement {
+  const store = useStore()
+  const stopShortcutTarget = React.useMemo(() => ({ kind: 'agent' as const, sessionId }), [sessionId])
+  const markStopShortcutTarget = React.useCallback(() => {
+    rememberStopGenerationTarget(stopShortcutTarget)
+  }, [stopShortcutTarget])
+
+  React.useEffect(() => {
+    return () => clearStopGenerationTarget(stopShortcutTarget)
+  }, [stopShortcutTarget])
+
+  const initialCachedMessages = store.get(agentSDKMessagesCacheAtom).get(sessionId)
+  const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>(
+    () => initialCachedMessages ?? [],
+  )
   const persistedSDKMessagesRef = React.useRef<SDKMessage[]>([])
   persistedSDKMessagesRef.current = persistedSDKMessages
-  // 长会话默认仅加载末页；用户需要时再向前展开，避免把完整 transcript 放进 renderer。
-  const [earlierMessagesCursor, setEarlierMessagesCursor] = React.useState<number | undefined>()
-  const earlierMessagesCursorRef = React.useRef<number | undefined>()
-  earlierMessagesCursorRef.current = earlierMessagesCursor
-  const [loadingEarlierMessages, setLoadingEarlierMessages] = React.useState(false)
+  const messagesRequestIdRef = React.useRef(0)
+  const messagesMutationVersionRef = React.useRef(0)
   const setStreamingStates = useSetAtom(agentStreamingStatesAtom)
-  // 只订阅输入区/工具栏需要的低频流状态。逐 token content/toolActivities 由
-  // AgentMessages 独立消费，不能让 3000 行 AgentView 和输入框跟随每个 token 重渲染。
-  const streamViewState = useAtomValue(agentSessionViewStreamStateAtomFamily(sessionId))
+  // 只订阅输入区/工具栏需要的低频流状态。
+  const streamViewState = useAtomValue(agentSessionInputStreamStateAtomFamily(sessionId))
   const streaming = streamViewState.running
   // 软空闲态：本轮主体已结束、UI 可输入，但 SDK 通道仍开着等后台任务唤醒。
   // 此时服务端 activeSessions 仍保留，新消息须走注入通道而非新建 run。
@@ -487,13 +515,15 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const [activeHermesTargetId, setActiveHermesTargetId] = useAtom(activeHermesTargetIdAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const setSettingsTab = useSetAtom(settingsTabAtom)
+  const setModelSelectorOpen = useSetAtom(modelSelectorOpenAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const globalWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
-  // 从会话元数据派生 workspaceId：会话数据已加载时以自身为准，未加载时回退全局 atom
+  // 会话已归属工作区时始终以其自身为准；缺少 workspaceId 的旧会话则回退当前项目。
+  // 否则 AgentView 会把 workspaceSlug 传成 null，导致 # MCP（以及 / Skill、@ 文件）在
+  // 已选中的工作区中仍拿不到能力摘要。
   const currentWorkspaceId = React.useMemo(() => {
-    if (!sessionMeta) return globalWorkspaceId // 数据未加载，回退全局
-    return sessionMeta.workspaceId ?? null     // 数据已加载，以会话自身为准
-  }, [sessionMeta, globalWorkspaceId])
+    return sessionMeta?.workspaceId ?? globalWorkspaceId
+  }, [sessionMeta?.workspaceId, globalWorkspaceId])
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
   const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
   const pendingHermesTurnsRef = React.useRef(new Map<string, { files: AgentPendingFile[]; userUuid: string }>())
@@ -552,15 +582,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
   }, [sessionId, sessionMetaChannelId, sessionMetaModelId, hasSessionMeta, defaultChannelId, defaultModelId, setSessionChannelMap, setSessionModelMap])
 
-  const contextStatus: AgentContextStatus = {
-    isCompacting: streamViewState.isCompacting ?? false,
-    inputTokens: streamViewState.inputTokens,
-    outputTokens: streamViewState.outputTokens,
-    cacheReadTokens: streamViewState.cacheReadTokens,
-    cacheCreationTokens: streamViewState.cacheCreationTokens,
-    contextWindow: streamViewState.contextWindow,
-    contextUsageIsEstimated: streamViewState.contextUsageIsEstimated,
-  }
   const setAgentStreamErrors = useSetAtom(agentStreamErrorsAtom)
   const streamErrors = useAtomValue(agentStreamErrorsAtom)
   const agentError = streamErrors.get(sessionId) ?? null
@@ -571,7 +592,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const persistedPermissionMode = useAtomValue(sessionPersistedPermissionModeAtom(sessionId))
   const permissionMode = permissionModeMap.get(sessionId) ?? persistedPermissionMode ?? defaultPermissionMode
   const isPermissionPlanMode = permissionMode === 'plan'
-  const store = useStore()
   const currentQuotedSelection = useAtomValue(currentQuotedSelectionAtom)
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
   const openPreview = useOpenPreview()
@@ -604,6 +624,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const suggestion = suggestionsMap.get(sessionId) ?? null
   const setPromptSuggestions = useSetAtom(agentPromptSuggestionsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setSidePanelTabMap = useSetAtom(agentDiffPanelTabAtom)
+  const setSidePanelOpen = useSetAtom(agentSidePanelOpenAtomFamily(sessionId))
+  const setSideTemporaryAgentMap = useSetAtom(agentSideTemporaryAgentMapAtom)
   const openSession = useOpenSession()
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
@@ -722,6 +745,15 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const handleAddHistoryQuote = React.useCallback((quote: QuotedSelection): boolean => {
     return richTextInputRef.current?.insertAgentHistoryQuoteMention(quote) ?? false
   }, [])
+  React.useEffect(() => {
+    const handleInsertQuote = (event: Event): void => {
+      const detail = (event as CustomEvent<InsertAgentInputQuoteDetail>).detail
+      if (!detail || detail.sessionId !== sessionId) return
+      detail.inserted = richTextInputRef.current?.insertQuotedSelectionMention(detail.quote) ?? false
+    }
+    window.addEventListener(INSERT_AGENT_INPUT_QUOTE_EVENT, handleInsertQuote)
+    return () => window.removeEventListener(INSERT_AGENT_INPUT_QUOTE_EVENT, handleInsertQuote)
+  }, [sessionId])
   const handleAgentHistoryQuoteClick = React.useCallback((quote: QuotedSelection): void => {
     if (
       quote.sourceType !== 'agent-history'
@@ -986,8 +1018,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const appendOptimisticPersistedMessage = React.useCallback((message: SDKMessage) => {
     // 切会话时优先命中内存缓存，因此乐观插入的用户消息也要同步写入缓存，
     // 否则“发送后立刻切走再切回”会短暂回退到旧消息数组。
-    const optimisticMessage = { ...message, _promaOptimistic: true } as SDKMessage
-    const next = [...persistedSDKMessagesRef.current, optimisticMessage]
+    // 本地乐观消息优先于正在进行中的旧 IPC 快照。
+    messagesMutationVersionRef.current += 1
+    const next = [...persistedSDKMessagesRef.current, message]
     persistedSDKMessagesRef.current = next
     setPersistedSDKMessages(next)
     setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, next))
@@ -1002,17 +1035,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     })
   }, [sessionId, store])
 
-  const removeLiveUserMessage = React.useCallback((messageId: string) => {
-    store.set(liveMessagesMapAtom, (prev) => {
-      const map = new Map(prev)
-      const current = (map.get(sessionId) ?? []).filter(
-        (item) => (item as Record<string, unknown>).uuid !== messageId,
-      )
-      map.set(sessionId, current)
-      return map
-    })
-  }, [sessionId, store])
-
   const clearStoppedByUser = React.useCallback(() => {
     store.set(stoppedByUserSessionsAtom, (prev: Set<string>) => {
       if (!prev.has(sessionId)) return prev
@@ -1021,108 +1043,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return next
     })
   }, [sessionId, store])
-
-  const queueMessageIntoActiveAgent = React.useCallback(async (
-    message: AgentQueuedMessage,
-    rawText: string,
-    sdkText: string,
-    mentions: ReturnType<typeof parseQueuedMessageMentions>,
-    interruptCurrentTurn: boolean,
-  ): Promise<void> => {
-    // 气泡显示用原文 text（保留 /skill:、#mcp:、&session:、&todo: 和 &calendar_event: 语法），
-    // 让 message.tsx 的 remarkMentions 立即渲染出引用芯片；
-    // 剥离后的 sdkText 仅用于传给 SDK，不作为展示文本。
-    appendLiveUserMessage(createUserSDKMessage(rawText, message.id, Date.now()))
-
-    try {
-      await window.electronAPI.queueAgentMessage({
-        sessionId,
-        userMessage: sdkText,
-        rawUserMessage: rawText,
-        uuid: message.id,
-        interrupt: interruptCurrentTurn,
-        ...(mentions.mentionedSkills.length > 0 && { mentionedSkills: mentions.mentionedSkills }),
-        ...(mentions.mentionedMcpServers.length > 0 && { mentionedMcpServers: mentions.mentionedMcpServers }),
-        ...(mentions.mentionedSessionIds.length > 0 && { mentionedSessionIds: mentions.mentionedSessionIds }),
-        ...(mentions.mentionedTodoIds.length > 0 && { mentionedTodoIds: mentions.mentionedTodoIds }),
-        ...(mentions.mentionedCalendarEventIds.length > 0 && { mentionedCalendarEventIds: mentions.mentionedCalendarEventIds }),
-      })
-    } catch (error) {
-      removeLiveUserMessage(message.id)
-      throw error
-    }
-  }, [appendLiveUserMessage, removeLiveUserMessage, sessionId])
-
-  const startQueuedMessageRun = React.useCallback(async (
-    displayText: string,
-    sdkText: string,
-    mentions: ReturnType<typeof parseQueuedMessageMentions>,
-    channelId: string,
-    queuedAdditionalDirectories: string[] = [],
-  ): Promise<void> => {
-    const streamStartedAt = Date.now()
-    const additionalDirectoriesForRun = createBaseAdditionalDirectories()
-    for (const dir of queuedAdditionalDirectories) {
-      additionalDirectoriesForRun.add(dir)
-    }
-    setStreamingStates((prev) => {
-      const map = new Map(prev)
-      const existing = prev.get(sessionId)
-      map.set(sessionId, {
-        running: true,
-        content: '',
-        toolActivities: [],
-        model: agentModelId || undefined,
-        channelId,
-        startedAt: streamStartedAt,
-        inputTokens: existing?.inputTokens,
-        contextWindow: existing?.contextWindow,
-      })
-      return map
-    })
-
-    appendOptimisticPersistedMessage(createUserSDKMessage(displayText, undefined, streamStartedAt))
-
-    try {
-      await window.electronAPI.sendAgentMessage({
-        sessionId,
-        // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径），
-        // 展示/持久化使用 displayText（编码原文，remarkMentions 解码显示）。
-        userMessage: sdkText,
-        rawUserMessage: displayText,
-        channelId,
-        modelId: agentModelId || undefined,
-        workspaceId: currentWorkspaceId || undefined,
-        startedAt: streamStartedAt,
-        permissionModeOverride: permissionMode,
-        ...(additionalDirectoriesForRun.size > 0 && {
-          additionalDirectories: Array.from(additionalDirectoriesForRun),
-        }),
-        ...(mentions.mentionedSkills.length > 0 && { mentionedSkills: mentions.mentionedSkills }),
-        ...(mentions.mentionedMcpServers.length > 0 && { mentionedMcpServers: mentions.mentionedMcpServers }),
-        ...(mentions.mentionedSessionIds.length > 0 && { mentionedSessionIds: mentions.mentionedSessionIds }),
-        ...(mentions.mentionedTodoIds.length > 0 && { mentionedTodoIds: mentions.mentionedTodoIds }),
-        ...(mentions.mentionedCalendarEventIds.length > 0 && { mentionedCalendarEventIds: mentions.mentionedCalendarEventIds }),
-      })
-    } catch (error) {
-      setStreamingStates((prev) => {
-        const current = prev.get(sessionId)
-        if (!current) return prev
-        const map = new Map(prev)
-        map.set(sessionId, { ...current, running: false })
-        return map
-      })
-      throw error
-    }
-  }, [
-    agentModelId,
-    appendOptimisticPersistedMessage,
-    createBaseAdditionalDirectories,
-    currentWorkspaceId,
-    permissionMode,
-    sessionId,
-    setStreamingStates,
-  ])
 
   const sendPlainTextAgentMessage = React.useCallback(async (
     message: AgentQueuedMessage,
@@ -1134,9 +1054,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     if (!payload.rawText || !agentChannelId || !hasAvailableModel) return
 
     clearStoppedByUser()
-
-    // 发起新一轮（含队列消息自动发送、后台续轮注入等非用户显式路径）时，
-    // 清除上一轮遗留的流式错误，避免正常输出后底部仍残留旧报错。
     setAgentStreamErrors((prev) => {
       if (!prev.has(sessionId)) return prev
       const map = new Map(prev)
@@ -1144,39 +1061,57 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return map
     })
 
-    // interrupt 由本函数读到的实时 streaming 决定，而非调用方传入的快照：
-    // - streaming（本轮真正进行中）：注入前需软中断当前 turn
-    // - backgroundWaiting（软空闲，无活跃 turn）：直接注入，无需中断
-    // 避免"外层判定 streaming、内层已结束"两个快照不一致导致的竞态。
-    if (streaming || backgroundWaiting) {
-      try {
-        await queueMessageIntoActiveAgent(message, payload.rawText, payload.sdkText, payload.mentions, streaming)
-      } catch (error) {
-        if (isStaleAgentQueueError(error)) {
-          console.warn('[AgentView] 检测到陈旧的 Agent 追加通道，改为启动新一轮运行:', error)
-          await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, agentChannelId, message.additionalDirectories)
-          return
-        }
-        throw error
-      }
+    // “立即发送”与后台续轮都由主进程用实时状态路由：活跃通道可用则注入，
+    // 否则保留到 deferred queue。这里的 streaming 只表达用户是否要求打断，不决定路由。
+    const result = await window.electronAPI.submitOrEnqueueAgentMessage({
+      queueMessageId: message.id,
+      sessionId,
+      userMessage: payload.sdkText,
+      rawUserMessage: payload.rawText,
+      channelId: agentChannelId,
+      modelId: agentModelId || undefined,
+      workspaceId: currentWorkspaceId || undefined,
+      additionalDirectories: message.additionalDirectories,
+      permissionModeOverride: permissionMode,
+      dispatch: 'now',
+      interrupt: streaming,
+      mentionedSkills: payload.mentions.mentionedSkills,
+      mentionedMcpServers: payload.mentions.mentionedMcpServers,
+      mentionedSessionIds: payload.mentions.mentionedSessionIds,
+      mentionedTodoIds: payload.mentions.mentionedTodoIds,
+      mentionedCalendarEventIds: payload.mentions.mentionedCalendarEventIds,
+    })
+    if (result.disposition === 'injected') {
+      appendLiveUserMessage(createUserSDKMessage(payload.rawText, message.id, Date.now()))
+      setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
       return
     }
 
-    await startQueuedMessageRun(payload.rawText, payload.sdkText, payload.mentions, agentChannelId, message.additionalDirectories)
+    if (result.disposition === 'started') {
+      // 主进程在 IPC 返回前已发出 started 事件时，监听器可能已移除投影；
+      // 这里再幂等移除，避免反向时序下把已发送消息重新留在队列。
+      setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
+      return
+    }
+
+    // 主进程已接管消息但仍在等待；恢复/保留队列投影，等待 started 事件消费。
+    setQueuedMessages((prev) => prev.some((item) => item.id === message.id) ? prev : [...prev, message])
   }, [
     agentChannelId,
-    backgroundWaiting,
+    agentModelId,
+    appendLiveUserMessage,
     clearStoppedByUser,
+    currentWorkspaceId,
     hasAvailableModel,
-    queueMessageIntoActiveAgent,
+    permissionMode,
     sessionId,
     setAgentStreamErrors,
-    startQueuedMessageRun,
+    setQueuedMessages,
     streaming,
   ])
 
-  // 消息是否已完成首次加载（用于 auto-send 等待）
-  const [messagesLoaded, setMessagesLoaded] = React.useState(false)
+  // 消息首次加载状态直接由同步缓存决定；缓存命中时首个 render 就显示历史，IPC 只做后台校准。
+  const [messagesLoaded, setMessagesLoaded] = React.useState(initialCachedMessages !== undefined)
   const [messagesRefreshing, setMessagesRefreshing] = React.useState(false)
   const messagesRefreshingRef = React.useRef(false)
   const loadingSessionIdRef = React.useRef<string | null>(null)
@@ -1200,46 +1135,27 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         setPersistedSDKMessages([])
         setMessagesLoaded(false)
       }
-      setEarlierMessagesCursor(undefined)
     }
     messagesRefreshingRef.current = true
     setMessagesRefreshing(true)
+    const requestId = ++messagesRequestIdRef.current
+    const requestMutationVersion = messagesMutationVersionRef.current
     let cancelled = false
-    const previousMessages = persistedSDKMessagesRef.current
-    const boundaryUuid = isSessionSwitch ? null : findLastStableSDKMessageUuid(previousMessages)
-    const loadMessages = async (): Promise<{ messages: SDKMessage[]; nextBefore?: number }> => {
-      // Dashboard 会话以 Hermes 远端 snapshot 为真源；API Server 会话由主进程返回本地派生历史。
-      if (isHermesRemoteSession) {
-        return { messages: await window.electronAPI.getAgentSessionSDKMessages(sessionId) }
-      }
-
-      const page = await window.electronAPI.getAgentSessionSDKMessagesPage(sessionId)
-      if (!boundaryUuid) return page
-
-      const reconciled = reconcileSDKMessagesWithCanonicalPage(
-        previousMessages,
-        boundaryUuid,
-        page.messages,
-      )
-      if (!reconciled) return page
-
-      return {
-        messages: reconciled,
-        // 同一会话刷新只替换 canonical 尾段；保留用户已经加载到的分页位置。
-        nextBefore: earlierMessagesCursorRef.current,
-      }
-    }
-    void loadMessages()
-      .then((page) => {
-        if (cancelled) return
-        const sdkMsgs = page.messages
+    window.electronAPI.getAgentSessionSDKMessages(sessionId)
+      .then((sdkMsgs) => {
+        if (cancelled || requestId !== messagesRequestIdRef.current) return
+        if (requestMutationVersion !== messagesMutationVersionRef.current) {
+          // 请求期间已有本地消息变更，旧 IPC 快照不能覆盖当前内存消息。
+          setMessagesLoaded(true)
+          messagesRefreshingRef.current = false
+          setMessagesRefreshing(false)
+          return
+        }
         // 写入缓存（含 LRU 淘汰，防止会话数增长导致内存无限膨胀）
         setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, sdkMsgs))
         unstable_batchedUpdates(() => {
           persistedSDKMessagesRef.current = sdkMsgs
           setPersistedSDKMessages(sdkMsgs)
-          setEarlierMessagesCursor(page.nextBefore)
-          setLoadingEarlierMessages(false)
           setMessagesLoaded(true)
           messagesRefreshingRef.current = false
           setMessagesRefreshing(false)
@@ -1253,15 +1169,13 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             // 仍在运行中：不清除
             if (!state || state.running) return prev
             const map = new Map(prev)
-            // 软空闲态（后台任务等待）：必须保留 backgroundWaiting 标志（否则 handleSend 误走新建 run），
-            // 但展示字段 content/toolActivities 仍要清空——否则上一轮流式文本残留会被兜底气泡渲染成重复消息。
+            // 软空闲态（后台任务等待）：必须保留 backgroundWaiting 标志（否则 handleSend 误走新建 run）。
+            // 实时文本只在 liveMessages 中，完成消息刷新时随其统一清理。
             if (state.inputTokens !== undefined) {
-              // 保留 usage 数据，仅清除流式展示字段
+              // 保留 usage 数据，仅清除本轮工具活动展示状态。
               map.set(sessionId, {
                 running: false,
                 backgroundWaiting: state.backgroundWaiting,
-                content: '',
-                toolActivities: [],
                 inputTokens: state.inputTokens,
                 outputTokens: state.outputTokens,
                 cacheReadTokens: state.cacheReadTokens,
@@ -1269,7 +1183,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                 contextWindow: state.contextWindow,
                 contextUsageIsEstimated: state.contextUsageIsEstimated,
                 model: state.model,
-                channelId: state.channelId,
                 contextCompaction: state.contextCompaction,
               })
             } else if (state.backgroundWaiting || state.contextCompaction) {
@@ -1277,8 +1190,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               map.set(sessionId, {
                 running: false,
                 backgroundWaiting: state.backgroundWaiting,
-                content: '',
-                toolActivities: [],
                 contextCompaction: state.contextCompaction,
               })
             } else {
@@ -1289,7 +1200,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           setLiveMessagesMap((prev) => {
             if (!prev.has(sessionId)) return prev
             // 仍在运行中，不清除实时消息（与 streamingStates 保护逻辑一致）
-            const streamingState = store.get(agentStreamingStatesAtom).get(sessionId)
+            const streamingState = store.get(agentSessionStreamingStateAtomFamily(sessionId))
             if (streamingState?.running) return prev
             const map = new Map(prev)
             map.delete(sessionId)
@@ -1306,25 +1217,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       })
     return () => { cancelled = true }
   }, [isHermesRemoteSession, refreshVersion, sessionId, setStreamingStates, setLiveMessagesMap, setMessagesCache, store])
-
-  const handleLoadEarlierMessages = React.useCallback(async (): Promise<void> => {
-    const before = earlierMessagesCursor
-    if (before === undefined || loadingEarlierMessages) return
-
-    setLoadingEarlierMessages(true)
-    try {
-      const page = await window.electronAPI.getAgentSessionSDKMessagesPage(sessionId, { before })
-      const next = [...page.messages, ...persistedSDKMessagesRef.current]
-      persistedSDKMessagesRef.current = next
-      setPersistedSDKMessages(next)
-      setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, next))
-      setEarlierMessagesCursor(page.nextBefore)
-    } catch (error) {
-      console.error('[Agent 会话] 加载更早消息失败:', error)
-    } finally {
-      setLoadingEarlierMessages(false)
-    }
-  }, [earlierMessagesCursor, loadingEarlierMessages, sessionId, setMessagesCache])
 
   // 从会话元数据初始化附加目录（仅冷启动水合，后续由 handleAttachContent/handleDetachDirectory 实时写入）
   React.useEffect(() => {
@@ -1356,88 +1248,16 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     })
   }, [sessionId, sessions, setAttachedFilesMap])
 
-  // 自动发送 pending prompt（从快速任务窗口或设置页触发）
-  // 等待 messagesLoaded 确保消息加载完成后再插入乐观消息，避免被加载结果覆盖。
-  // 使用 queueMicrotask 延迟发送：避免 setState → 重渲染 → cleanup 取消 timer 的竞态。
+  // 外部入口创建的新会话只预填提示词；用户确认后再自行发送。
+  // 等待 messagesLoaded，避免会话水合时覆盖刚写入的输入草稿。
   React.useEffect(() => {
-    if (!messagesLoaded) return
-    if (!pendingPrompt) return
-    if (pendingPrompt.sessionId !== sessionId) return
-    if (!agentChannelId || streaming) return
+    if (!messagesLoaded || !pendingPrompt || pendingPrompt.sessionId !== sessionId) return
 
-    // 快照当前上下文
-    const snapshot = {
-      message: pendingPrompt.message,
-      // Agent 侧使用解码后的 SDK 文本（@file 路径还原为真实路径），
-      // 展示/持久化保留编码原文（remarkMentions 解码显示）。
-      sdkMessage: parseQueuedMessageMentions(pendingPrompt.message).cleanedText,
-      channelId: agentChannelId,
-      modelId: agentModelId || undefined,
-      workspaceId: currentWorkspaceId || undefined,
-      additionalDirectories: Array.from(new Set([...attachedDirs, ...attachedFileDirectories, ...(pendingPrompt.additionalDirectories ?? [])])),
-      mentionedTodoIds: pendingPrompt.mentionedTodoIds,
-    }
+    setInputContent(pendingPrompt.message)
+    setInputHtmlContent('')
     setPendingPrompt(null)
+  }, [messagesLoaded, pendingPrompt, sessionId, setInputContent, setInputHtmlContent, setPendingPrompt])
 
-    queueMicrotask(() => {
-      // 初始化流式状态（startedAt 由渲染进程生成，传递给主进程原样回传，确保竞态保护使用同一个值）
-      const streamStartedAt = Date.now()
-      setStreamingStates((prev) => {
-        const map = new Map(prev)
-        const existing = prev.get(sessionId)
-        map.set(sessionId, {
-          running: true,
-          content: '',
-          toolActivities: [],
-          model: snapshot.modelId,
-          channelId: snapshot.channelId,
-          startedAt: streamStartedAt,
-          inputTokens: existing?.inputTokens,
-          contextWindow: resolveRunContextWindow(snapshot.modelId, existing?.contextWindow),
-        })
-        return map
-      })
-
-      // 乐观更新：SDKMessage 格式（Phase 4）
-      const tempUserSDKMsg: SDKMessage = {
-        type: 'user',
-        message: {
-          content: [{ type: 'text', text: snapshot.message }],
-        },
-        parent_tool_use_id: null,
-        _createdAt: Date.now(),
-      } as unknown as SDKMessage
-      appendOptimisticPersistedMessage(tempUserSDKMsg)
-
-      // 发送消息
-      const input: AgentSendInput = {
-        sessionId,
-        userMessage: snapshot.sdkMessage,
-        rawUserMessage: snapshot.message,
-        channelId: snapshot.channelId,
-        modelId: snapshot.modelId,
-        workspaceId: snapshot.workspaceId,
-        startedAt: streamStartedAt,
-        permissionModeOverride: permissionMode,
-        ...(snapshot.additionalDirectories && snapshot.additionalDirectories.length > 0 && {
-          additionalDirectories: snapshot.additionalDirectories,
-        }),
-        ...(snapshot.mentionedTodoIds && snapshot.mentionedTodoIds.length > 0 && {
-          mentionedTodoIds: snapshot.mentionedTodoIds,
-        }),
-      }
-      window.electronAPI.sendAgentMessage(input).catch((error) => {
-        console.error('[AgentView] 自动发送配置消息失败:', error)
-        setStreamingStates((prev) => {
-          const current = prev.get(sessionId)
-          if (!current) return prev
-          const map = new Map(prev)
-          map.set(sessionId, { ...current, running: false })
-          return map
-        })
-      })
-    })
-  }, [messagesLoaded, pendingPrompt, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, setPendingPrompt, setStreamingStates, permissionMode, attachedDirs, attachedFileDirectories])
   // ===== 附件处理 =====
 
   /** 为文件生成唯一文件名（避免粘贴多张图片时文件名重复导致覆盖） */
@@ -2288,6 +2108,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     const additionalDirectoriesForRun = isHermesRemoteSession ? new Set<string>() : createBaseAdditionalDirectories()
 
     if (streaming) {
+      if (!agentChannelId) return
       // Agent 正在输出时，用户消息默认进入 Proma 托管队列，不打断当前 turn。
       const attachmentContext = pendingFilesSnapshot.length > 0
         ? await preparePendingFilesForSend(pendingFilesSnapshot, additionalDirectoriesForRun)
@@ -2295,16 +2116,55 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       if (pendingFilesSnapshot.length > 0 && !attachmentContext) return
 
       const quotedSelection = consumeQuotedSelection()
-      setQueuedMessages((prev) => [
-        ...prev,
-        createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now(), quotedSelection, attachmentContext
-          ? {
-              fileReferenceBlock: attachmentContext.referenceBlock,
-              attachments: attachmentContext.attachments,
-              additionalDirectories: attachmentContext.additionalDirectories,
-            }
-          : undefined),
-      ])
+      const message = createAgentQueuedMessage(effectiveText, crypto.randomUUID(), Date.now(), quotedSelection, attachmentContext
+        ? {
+            fileReferenceBlock: attachmentContext.referenceBlock,
+            attachments: attachmentContext.attachments,
+            additionalDirectories: attachmentContext.additionalDirectories,
+          }
+        : undefined)
+      const quotedSelectionBlock = quotedSelection
+        ? buildQuotedSelectionBlock(quotedSelection)
+        : ''
+      const payload = buildQueuedMessageSendPayload(message, quotedSelectionBlock)
+      const queuedInput: AgentDeferredQueueMessageInput & { dispatch: 'after_current' } = {
+        queueMessageId: message.id,
+        sessionId,
+        userMessage: payload.sdkText,
+        rawUserMessage: payload.rawText,
+        channelId: agentChannelId,
+        modelId: agentModelId || undefined,
+        workspaceId: currentWorkspaceId || undefined,
+        additionalDirectories: message.additionalDirectories,
+        permissionModeOverride: permissionMode,
+        dispatch: 'after_current',
+        mentionedSkills: payload.mentions.mentionedSkills,
+        mentionedMcpServers: payload.mentions.mentionedMcpServers,
+        mentionedSessionIds: payload.mentions.mentionedSessionIds,
+        mentionedTodoIds: payload.mentions.mentionedTodoIds,
+        mentionedCalendarEventIds: payload.mentions.mentionedCalendarEventIds,
+      }
+      setQueuedMessages((prev) => [...prev, message])
+      void window.electronAPI.submitOrEnqueueAgentMessage(queuedInput)
+        .then((result) => {
+          if (result.disposition === 'started') {
+            // 主进程可在 IPC 返回前已发送 started；无论两者先后都幂等清除本地投影。
+            setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
+          }
+        })
+        .catch((error) => {
+          console.error('[AgentView] 主进程消息提交失败:', error)
+          setQueuedMessages((prev) => removeQueuedMessage(prev, message.id))
+          restoreQueuedAttachmentsToPending(message.attachments)
+          if (quotedSelection) {
+            setQuotedSelectionMap((prev) => {
+              const map = new Map(prev)
+              map.set(sessionId, quotedSelection)
+              return map
+            })
+          }
+          toast.error('消息加入队列失败', { description: String(error) })
+        })
       // 入队后消息会出现在队列 UI 中，用户可见；不再弹 toast 打扰。
       if (overrideText === undefined || fromEditor) {
         setInputContent('')
@@ -2433,13 +2293,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return next
     })
 
-    // 取消 draft 标记，让会话出现在侧边栏
+    // 取消 draft 标记，让会话出现在侧边栏。主进程会在实际启动时持久化清除
+    // isDraft；这里先乐观更新，避免 IPC 往返期间仍被侧栏过滤。
     setDraftSessionIds((prev: Set<string>) => {
       if (!prev.has(sessionId)) return prev
       const next = new Set(prev)
       next.delete(sessionId)
       return next
     })
+    setAgentSessions((prev) => prev.map((session) => (
+      session.id === sessionId && session.isDraft ? { ...session, isDraft: false } : session
+    )))
 
     // 初始化流式状态（startedAt 由渲染进程生成，传递给主进程原样回传，确保竞态保护使用同一个值）
     const streamStartedAt = Date.now()
@@ -2448,10 +2312,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       const existing = prev.get(sessionId)
       map.set(sessionId, {
         running: true,
-        content: '',
-        toolActivities: [],
         model: agentModelId || undefined,
-        channelId: agentChannelId ?? undefined,
         startedAt: streamStartedAt,
         inputTokens: existing?.inputTokens,
         contextWindow: resolveRunContextWindow(agentModelId || undefined, existing?.contextWindow),
@@ -2529,17 +2390,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     })
-  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping])
+  }, [createBaseAdditionalDirectories, preparePendingFilesForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, setDraftSessionIds, setAgentSessions, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping])
 
-  /** 停止生成 */
+  /** 停止生成。异常流未发出终态时，允许再次下发幂等的 abort 请求。 */
   const handleStop = React.useCallback((): void => {
-    if (isStopping) return
-    setIsStopping(true)
-    store.set(stoppedByUserSessionsAtom, (prev: Set<string>) => {
-      const next = new Set(prev)
-      next.add(sessionId)
-      return next
-    })
+    if (!isStopping) {
+      setIsStopping(true)
+      store.set(stoppedByUserSessionsAtom, (prev: Set<string>) => {
+        const next = new Set(prev)
+        next.add(sessionId)
+        return next
+      })
+    }
 
     // 保持 running 到 STREAM_COMPLETE 到达。提前把它切成 false 会让输入框误以为
     // 已经可以开启新 run，而底层 query 尚未退出，形成重复保存的竞态。
@@ -2583,10 +2445,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       const map = new Map(prev)
       const current = prev.get(sessionId) ?? {
         running: true,
-        content: '',
-        toolActivities: [],
         model: agentModelId || undefined,
-        channelId: agentChannelId,
         startedAt: streamStartedAt,
       }
       map.set(sessionId, {
@@ -2689,6 +2548,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     // 在下一轮回复开始前仍被页面渲染。旧会话没有 UUID 时保留历史，由主进程幂等处理。
     const messagesAfterCleanup = removeRetriedErrorSDKMessage(persistedSDKMessages, retryOfErrorUuid)
     if (messagesAfterCleanup !== persistedSDKMessages) {
+      messagesMutationVersionRef.current += 1
       persistedSDKMessagesRef.current = messagesAfterCleanup
       setPersistedSDKMessages(messagesAfterCleanup)
       setMessagesCache((prev) => setSessionMessagesCache(prev, sessionId, messagesAfterCleanup))
@@ -2709,10 +2569,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       const existing = prev.get(sessionId)
       map.set(sessionId, {
         running: true,
-        content: '',
-        toolActivities: [],
         model: agentModelId || undefined,
-        channelId: agentChannelId,
         startedAt: streamStartedAt,
         inputTokens: existing?.inputTokens,
         contextWindow: resolveRunContextWindow(agentModelId || undefined, existing?.contextWindow),
@@ -2756,10 +2613,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         const map = new Map(prev)
         map.set(meta.id, {
           running: true,
-          content: '',
-          toolActivities: [],
           model: agentModelId || undefined,
-          channelId: agentChannelId,
           startedAt: streamStartedAt,
         })
         return map
@@ -2780,43 +2634,42 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
   }, [sessionId, agentChannelId, agentModelId, currentWorkspaceId, openSession, setAgentSessions, setStreamingStates, permissionMode])
 
-  /** 分叉会话：从指定消息处创建新会话并自动切换 */
+  /** 从回复节点创建 Pi `/tree` 探索分支，并在当前主线的右侧工作区继续。 */
   const handleFork = React.useCallback(async (upToMessageUuid: string): Promise<void> => {
-    if (agentModelId && agentChannelId && sessionMetaChannelId && agentChannelId !== sessionMetaChannelId) {
-      toast.error('分叉会话失败', {
-        description: '分叉只能使用源会话同一渠道下的模型，请切回当前会话渠道后再试。',
-      })
-      return
-    }
-    const forkModelId = agentChannelId === sessionMetaChannelId ? agentModelId || undefined : undefined
-
     try {
+      // 不传 modelId：探索必须继承分叉点的渠道与模型，不受当前全局选择器影响。
       const meta = await window.electronAPI.forkAgentSession({
         sessionId,
         upToMessageUuid,
-        modelId: forkModelId,
+        explorationSourceLabel: '这条 Agent 回复',
       })
-      setAgentSessions((prev) => [meta, ...prev])
-
-      // 切换到新会话 tab
-      openSession('agent', meta.id, meta.title)
-
-      toast.success('已创建分叉会话', {
-        description: meta.title,
+      setAgentSessions((prev) => prev.some((item) => item.id === meta.id) ? prev : [meta, ...prev])
+      setSideTemporaryAgentMap((prev) => {
+        const openBranches = prev.get(sessionId) ?? []
+        const next = new Map(prev)
+        next.set(sessionId, openBranches.some((item) => item.sessionId === meta.id)
+          ? openBranches
+          : [...openBranches, {
+              sessionId: meta.id,
+              sourceMessageId: upToMessageUuid,
+              sourceLabel: '这条 Agent 回复',
+            }])
+        return next
+      })
+      setSidePanelOpen(true)
+      setSidePanelTabMap((prev) => new Map(prev).set(sessionId, getExplorationSidePanelTab(meta.id)))
+      toast.success('已创建探索分支', {
+        description: '分支继承此处之前的完整上下文；结论可带回主线。',
       })
     } catch (error) {
-      console.error('[AgentView] 分叉会话失败:', error)
+      console.error('[AgentView] 创建探索分支失败:', error)
       const rawMsg = error instanceof Error ? error.message : '未知错误'
-      // SDK 偶尔会因为 sidechain/消息归属问题抛 "not found in session"，
-      // 这里给出更可操作的中文提示，而不是把 SDK 内部英文报错直接透传给用户
       const friendlyDesc = /not found in session/i.test(rawMsg)
-        ? '该消息无法作为分叉起点（可能属于子代理执行过程或已被清理）。请选择主对话中的其他消息再试。'
+        ? '该消息无法作为探索起点（可能属于子代理执行过程或已被清理）。请选择主对话中的其他回复再试。'
         : rawMsg
-      toast.error('分叉会话失败', {
-        description: friendlyDesc,
-      })
+      toast.error('创建探索分支失败', { description: friendlyDesc })
     }
-  }, [sessionId, agentChannelId, agentModelId, sessionMetaChannelId, openSession, setAgentSessions])
+  }, [sessionId, setAgentSessions, setSidePanelOpen, setSidePanelTabMap, setSideTemporaryAgentMap])
 
   /** 快照回退：同一会话内回退到指定消息点，恢复文件 + 截断对话 */
   const [rewindTargetUuid, setRewindTargetUuid] = React.useState<string | null>(null)
@@ -2868,14 +2721,15 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
   }, [rewindTargetUuid, sessionId, store])
 
-  // 监听快捷键系统分发的 stop-generation 事件
+  // 仅处理全局快捷键明确指向本会话的停止事件；父/子会话可同时挂载。
   React.useEffect(() => {
-    const handler = (): void => {
-      if (streaming) handleStop()
+    const handler = (event: Event): void => {
+      const target = getStopGenerationTarget(event)
+      if (target?.kind === 'agent' && target.sessionId === sessionId && streaming) handleStop()
     }
     window.addEventListener('proma:stop-generation', handler)
     return () => window.removeEventListener('proma:stop-generation', handler)
-  }, [streaming, handleStop])
+  }, [sessionId, streaming, handleStop])
 
   // 监听快捷键系统分发的 focus-input 事件（Cmd+L）
   React.useEffect(() => {
@@ -2918,12 +2772,22 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
     queuedSendInFlightRef.current = true
     sendingQueuedMessageIdsRef.current.add(messageId)
-    setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
-    sendPlainTextAgentMessage(message)
+    void window.electronAPI.cancelAgentQueuedMessage({ sessionId, messageId })
+      .then((cancelled) => {
+        if (!cancelled) {
+          toast.info('消息已开始发送，无法再立即发送')
+          return
+        }
+        setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
+        return sendPlainTextAgentMessage(message).catch((error) => {
+          console.error('[AgentView] 队列消息发送失败:', error)
+          toast.error('队列消息发送失败', { description: String(error) })
+          setQueuedMessages((prev) => restoreQueuedMessageToFront(prev, message))
+        })
+      })
       .catch((error) => {
-        console.error('[AgentView] 队列消息发送失败:', error)
-        toast.error('队列消息发送失败', { description: String(error) })
-        setQueuedMessages((prev) => restoreQueuedMessageToFront(prev, message))
+        console.error('[AgentView] 取消主进程队列失败:', error)
+        toast.error('队列消息操作失败', { description: String(error) })
       })
       .finally(() => {
         sendingQueuedMessageIdsRef.current.delete(messageId)
@@ -2935,60 +2799,95 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     const message = queuedMessages.find((item) => item.id === messageId)
     if (!message) return
 
-    setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
-    const recalledQuotedSelection = message.quotedSelection
-    if (recalledQuotedSelection) {
-      setQuotedSelectionMap((prev) => {
-        const map = new Map(prev)
-        map.set(sessionId, recalledQuotedSelection)
-        return map
+    void window.electronAPI.cancelAgentQueuedMessage({ sessionId, messageId })
+      .then((cancelled) => {
+        if (!cancelled) {
+          toast.info('消息已开始发送，无法撤回')
+          return
+        }
+        setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
+        const recalledQuotedSelection = message.quotedSelection
+        if (recalledQuotedSelection) {
+          setQuotedSelectionMap((prev) => {
+            const map = new Map(prev)
+            map.set(sessionId, recalledQuotedSelection)
+            return map
+          })
+        }
+        restoreQueuedAttachmentsToPending(message.attachments)
+
+        const currentDraft = store.get(agentSessionDraftsAtom).get(sessionId) ?? ''
+        const currentDraftHtml = store.get(agentSessionDraftHtmlAtom).get(sessionId) ?? ''
+        const hasDraft = currentDraft.trim().length > 0
+        const nextDraft = hasDraft
+          ? `${currentDraft.trimEnd()}\n\n${message.text}`
+          : message.text
+        setInputContent(nextDraft)
+
+        // 已有草稿时，用「原草稿 HTML + 队列文本段落 HTML」合并，保留原草稿的 mention 等富文本节点；
+        // 空草稿时留空 HTML，交给编辑器按纯文本重建（与正常输入渲染一致）。
+        if (hasDraft) {
+          const draftHtml = currentDraftHtml.trim().length > 0
+            ? currentDraftHtml
+            : queuedTextToParagraphHtml(currentDraft)
+          setInputHtmlContent(`${draftHtml}${queuedTextToParagraphHtml(message.text)}`)
+        } else {
+          setInputHtmlContent('')
+        }
       })
-    }
-    restoreQueuedAttachmentsToPending(message.attachments)
-
-    const currentDraft = store.get(agentSessionDraftsAtom).get(sessionId) ?? ''
-    const currentDraftHtml = store.get(agentSessionDraftHtmlAtom).get(sessionId) ?? ''
-    const hasDraft = currentDraft.trim().length > 0
-    const nextDraft = hasDraft
-      ? `${currentDraft.trimEnd()}\n\n${message.text}`
-      : message.text
-    setInputContent(nextDraft)
-
-    // 已有草稿时，用「原草稿 HTML + 队列文本段落 HTML」合并，保留原草稿的 mention 等富文本节点；
-    // 空草稿时留空 HTML，交给编辑器按纯文本重建（与正常输入渲染一致）。
-    if (hasDraft) {
-      const draftHtml = currentDraftHtml.trim().length > 0
-        ? currentDraftHtml
-        : queuedTextToParagraphHtml(currentDraft)
-      setInputHtmlContent(`${draftHtml}${queuedTextToParagraphHtml(message.text)}`)
-    } else {
-      setInputHtmlContent('')
-    }
+      .catch((error) => {
+        console.warn('[AgentView] 撤回主进程队列消息失败:', error)
+      })
   }, [queuedMessages, restoreQueuedAttachmentsToPending, sessionId, setInputContent, setInputHtmlContent, setQueuedMessages, setQuotedSelectionMap, store])
 
   const handleRemoveQueuedMessage = React.useCallback((messageId: string): void => {
-    setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
-  }, [setQueuedMessages])
+    void window.electronAPI.cancelAgentQueuedMessage({ sessionId, messageId })
+      .then((cancelled) => {
+        if (cancelled) {
+          setQueuedMessages((prev) => removeQueuedMessage(prev, messageId))
+          return
+        }
+        toast.info('消息已开始发送，无法删除')
+      })
+      .catch((error) => {
+        console.warn('[AgentView] 取消主进程队列失败:', error)
+        toast.error('删除队列消息失败', { description: String(error) })
+      })
+  }, [sessionId, setQueuedMessages])
 
   const handleMoveQueuedMessage = React.useCallback((
     sourceId: string,
     targetId: string,
     placement: QueueDropPlacement,
   ): void => {
+    void window.electronAPI.moveAgentQueuedMessage({ sessionId, sourceId, targetId, placement }).catch((error) => {
+      console.warn('[AgentView] 调整主进程队列顺序失败:', error)
+    })
     setQueuedMessages((prev) => moveQueuedMessage(prev, sourceId, targetId, placement))
-  }, [setQueuedMessages])
+  }, [sessionId, setQueuedMessages])
 
-  // ===== 预览面板状态（toggle 快捷键，分屏布局在 MainArea） =====
+  // ===== 预览 Tab 快捷键 =====
   const setPreviewOpenMap = useSetAtom(previewPanelOpenMapAtom)
 
   const togglePreviewPanel = React.useCallback(() => {
-    setPreviewOpenMap((prev) => {
-      const m = new Map(prev)
-      const current = m.get(sessionId) ?? false
-      m.set(sessionId, !current)
-      return m
+    const nextOpen = !(store.get(previewPanelOpenMapAtom).get(sessionId) ?? false)
+    const currentPreviewFile = store.get(previewFileMapAtom).get(sessionId) ?? null
+    if (nextOpen && currentPreviewFile) {
+      // 统一交给 opener：会复用/激活对应的动态预览 Tab，而非写入旧的 `preview` 状态。
+      openPreview(sessionId, currentPreviewFile)
+      return
+    }
+    setPreviewOpenMap((previous) => {
+      const next = new Map(previous)
+      next.set(sessionId, false)
+      return next
     })
-  }, [sessionId, setPreviewOpenMap])
+    setSidePanelTabMap((tabs) => {
+      const nextTabs = new Map(tabs)
+      nextTabs.set(sessionId, 'files')
+      return nextTabs
+    })
+  }, [openPreview, sessionId, setPreviewOpenMap, setSidePanelTabMap, store])
 
   React.useEffect(() => {
     return registerShortcut('toggle-preview-panel', togglePreviewPanel)
@@ -3078,13 +2977,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       key: 'context-usage',
       node: (
         <ContextUsageBadge
-          inputTokens={contextStatus.inputTokens}
-          outputTokens={contextStatus.outputTokens}
-          cacheReadTokens={contextStatus.cacheReadTokens}
-          cacheCreationTokens={contextStatus.cacheCreationTokens}
-          contextWindow={contextStatus.contextWindow}
-          isEstimated={contextStatus.contextUsageIsEstimated === true}
-          isCompacting={contextStatus.isCompacting}
           isProcessing={streaming}
           sessionId={sessionId}
           channelId={planQuotaChannelId}
@@ -3108,12 +3000,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     sessionId,
     agentThinking,
     setAgentThinking,
-    contextStatus.inputTokens,
-    contextStatus.outputTokens,
-    contextStatus.cacheReadTokens,
-    contextStatus.cacheCreationTokens,
-    contextStatus.contextWindow,
-    contextStatus.isCompacting,
     streaming,
     handleAttachContent,
     handleHermesAttachContent,
@@ -3130,13 +3016,13 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           size="icon"
           className={inputToolbarDangerButtonClass}
           onClick={handleStop}
-          disabled={isStopping}
+          aria-label={isStopping ? '再次停止 Agent' : '停止 Agent'}
         >
           <Square className="size-[16px]" fill="currentColor" strokeWidth={0} />
         </Button>
       </TooltipTrigger>
       <TooltipContent side="top">
-        <p>停止 Agent ({getAcceleratorDisplay(getActiveAccelerator('stop-generation'))})</p>
+        <p>{isStopping ? '停止未确认，再次发送中断请求' : `停止 Agent (${getAcceleratorDisplay(getActiveAccelerator('stop-generation'))})`}</p>
       </TooltipContent>
     </Tooltip>
   )
@@ -3184,7 +3070,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             externalSelectedModel={externalSelectedModel}
             onModelSelect={handleModelSelect}
             showChannelInTrigger
-            useSharedOpenState
+            // 全局打开状态只供主会话的“选择模型”引导使用；右侧嵌入会话必须保持独立，
+            // 否则任一触发器打开时会同时挂载两侧的 Popover，遮挡并阻断模型切换。
+            useSharedOpenState={!embedded}
           />
         )}
       </div>
@@ -3208,20 +3096,24 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
   return (
     <>
-    <AgentSessionProvider sessionId={sessionId}>
-      <div className="flex h-full min-h-0 flex-1 min-w-0 max-w-[min(72rem,100%)] flex-col overflow-hidden mx-auto">
-        {/* Agent Header */}
-        <AgentHeader sessionId={sessionId} />
+      <div
+        className="flex h-full min-h-0 flex-1 min-w-0 flex-col overflow-hidden"
+        onFocusCapture={markStopShortcutTarget}
+        onPointerDownCapture={markStopShortcutTarget}
+      >
+        {/* 临时 Agent 已由右侧 Tab 表明归属，避免在窄面板重复渲染全局标题栏。 */}
+        {!embedded && <AgentHeader sessionId={sessionId} />}
 
+        <div className={cn(
+          'flex min-h-0 flex-1 w-full flex-col overflow-hidden',
+          embedded ? 'max-w-none' : 'max-w-[min(72rem,100%)] mx-auto',
+        )}>
         {/* 消息区域 */}
         <AgentMessages
           sessionId={sessionId}
           sessionModelId={isHermesRemoteSession ? undefined : agentModelId || undefined}
           messagesLoaded={messagesLoaded}
           persistedSDKMessages={persistedSDKMessages}
-          hasEarlierMessages={earlierMessagesCursor !== undefined}
-          loadingEarlierMessages={loadingEarlierMessages}
-          onLoadEarlierMessages={handleLoadEarlierMessages}
           sessionPath={sessionPath}
           attachedDirs={allAttachedDirs}
           stoppedByUser={stoppedByUser}
@@ -3229,19 +3121,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           onRetryInNewSession={handleRetryInNewSession}
           onRelinkProjectRoot={handleRelinkProjectRoot}
           onRestoreProjectRoot={handleOpenRestoreProjectRootDialog}
-          onFork={isLegacyTranscript || isHermesRemoteSession ? undefined : handleFork}
+          onFork={embedded || isLegacyTranscript || isHermesRemoteSession ? undefined : handleFork}
           onRewind={isLegacyTranscript || isHermesRemoteSession ? undefined : handleRewindRequest}
           onCreateTodo={isHermesRemoteSession ? undefined : handleOpenReplyTodoDialog}
           onCompact={isHermesRemoteSession ? undefined : handleCompact}
           onAddHistoryQuote={handleAddHistoryQuote}
+          explorationEnabled={!embedded}
           onAgentHistoryQuoteClick={handleAgentHistoryQuoteClick}
           historyQuoteNavigation={historyQuoteNavigation}
         />
 
-        {/* 权限请求横幅 */}
-        {!isHermesRemoteSession && <PermissionBanner sessionId={sessionId} />}
-
         {/* Pi-only local interaction banners; Hermes interactions are timeline cards. */}
+        {!isHermesRemoteSession && <PermissionBanner sessionId={sessionId} />}
         {!isHermesRemoteSession && <AskUserBanner sessionId={sessionId} />}
         {!isHermesRemoteSession && <ExitPlanModeBanner sessionId={sessionId} />}
 
@@ -3250,7 +3141,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         <div className="px-2.5 pb-2.5 md:px-[18px] md:pb-[18px]" data-input-mode="agent">
           <div
             className={cn(
-              'rounded-[17px] border-[0.5px] border-border bg-background/95 transition-[border-color,background-color] duration-200',
+              'rounded-[17px] border-[0.5px] border-border bg-background/70 backdrop-blur-sm transition-all duration-200',
               (isPlanMode || isPermissionPlanMode) && !isDragOver && 'plan-mode-border',
               isDragOver && 'border-[2px] border-dashed border-[#2ecc71] bg-[#2ecc71]/[0.03]'
             )}
@@ -3268,17 +3159,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
               </div>
             )}
 
-            {/* 无 Agent 渠道或无可用模型提示 */}
+            {/* 尚未选择模型或暂无可用模型时的引导 */}
             {!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel) && (
               <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 dark:text-amber-400">
                 <Settings size={14} />
-                <span>{!agentChannelId ? '请在设置中选择 Agent 供应商' : '暂无可用模型，请在设置中启用 Agent 渠道并配置模型'}</span>
+                <span>{!hasAvailableModel ? '暂无可用模型，请在设置中添加或启用渠道和模型' : '请选择模型以开始 Agent 对话'}</span>
                 <button
                   type="button"
                   className="text-xs underline underline-offset-2 hover:text-foreground transition-colors"
-                  onClick={() => setSettingsOpen(true)}
+                  onClick={() => !hasAvailableModel ? setSettingsOpen(true) : setModelSelectorOpen(true)}
                 >
-                  前往设置
+                  {!hasAvailableModel ? '前往设置' : '选择模型'}
                 </button>
               </div>
             )}
@@ -3364,7 +3255,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                       ? '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；⌘/Ctrl+Enter 发送）'
                       : '输入消息...（@ 引用文件，/ 调用 Skill，# 使用 MCP，& 引用会话，～ 引用待办/日程；Enter 发送）'
                     : !agentChannelId
-                      ? '请先在设置中选择 Agent 供应商'
+                      ? '请先选择模型'
                       : '暂无可用模型，请先在设置中启用渠道'
               }
               disabled={isLegacyTranscript || (!isHermesRemoteSession && (!agentChannelId || !hasAvailableModel))}
@@ -3384,8 +3275,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           </div>
         </div>
         )}
+        </div>
       </div>
-    </AgentSessionProvider>
 
     <Dialog open={todoDialogOpen} onOpenChange={setTodoDialogOpen}>
       <DialogContent className="max-w-lg">

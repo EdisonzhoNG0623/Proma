@@ -28,6 +28,8 @@ export * from './reasoning-profile'
 
 // Agent Provider 适配器接口
 export * from './agent-provider'
+export * from './agent-runtime'
+export * from './terminal'
 
 // Hermes Remote external runtime
 export * from './hermes'
@@ -63,3 +65,6 @@ export * from './planning'
 
 // Agent 灵动岛相关类型
 export * from './agent-island'
+
+// 用户授权的 Markdown Vault 相关类型
+export * from './vault'

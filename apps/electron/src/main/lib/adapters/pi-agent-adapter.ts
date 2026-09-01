@@ -21,6 +21,8 @@ import type {
   ProviderType,
   SendQueuedMessageOptions,
   SDKMessage,
+  AgentAssistantDelta,
+  AgentToolCallDelta,
   SDKUserMessageInput,
   SkillActivation,
 } from '@proma/shared'
@@ -42,6 +44,7 @@ import type {
   ToolDefinition,
 } from '@earendil-works/pi-coding-agent'
 import type { Transport as PiAgentTransport } from '@earendil-works/pi-ai'
+import type { AssistantMessageEvent } from '@earendil-works/pi-ai'
 import type { AgentToolResult, AgentToolUpdateCallback } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
 import { Type, type TSchema } from 'typebox'
@@ -74,7 +77,6 @@ import {
   restorePiInput,
 } from './pi-message-adapter'
 import { DEFAULT_CONTEXT_WINDOW, buildModel } from './pi-model-registry'
-import { createPartialMessageCoalescer, type PartialMessageCoalescer } from './pi-streaming-control'
 import { PendingPromptSkillActivationTracker } from './pi-skill-activation-tracker'
 import { createPiRetryTerminalGate, mapPiNativeRetryEvent } from './pi-retry-control'
 import {
@@ -87,14 +89,21 @@ import {
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
 type BashOperations = import('@earendil-works/pi-coding-agent').BashOperations
 type BashToolOptions = import('@earendil-works/pi-coding-agent').BashToolOptions
+type PowerShellToolOptions = import('@earendil-works/pi-coding-agent').PowerShellToolOptions
 type SkillLoadResult = ReturnType<ResourceLoader['getSkills']>
 
 const PI_NATIVE_MAX_RETRIES = 8
-const PI_NATIVE_MAX_TOTAL_RETRIES = 8
 const PI_NATIVE_RETRY_BASE_DELAY_MS = 1_000
-const PI_NATIVE_MAX_TOTAL_DELAY_MS = 5 * 60_000
-const PI_NATIVE_RETRY_JITTER_RATIO = 0.2
 const MAX_AUTOMATIC_COMPACTION_CONTINUATIONS = 20
+
+export function shouldMarkCompactionAfterCompletedTurn(
+  terminalResult: SDKMessage | undefined,
+  requiresOriginalTaskContinuation: boolean,
+): boolean {
+  return terminalResult?.type === 'result'
+    && terminalResult.subtype === 'success'
+    && !requiresOriginalTaskContinuation
+}
 
 /** Pi SDK 查询选项（扩展通用 AgentQueryInput） */
 export interface PiAgentQueryOptions extends AgentQueryInput {
@@ -227,6 +236,49 @@ export function createPiAssistantUuidTracker(createUuid: () => string = randomUU
   }
 }
 
+function toolCallDeltaFromPartial(event: Extract<AssistantMessageEvent, { type: 'toolcall_start' | 'toolcall_delta' }>): AgentToolCallDelta | undefined {
+  const block = event.partial.content[event.contentIndex]
+  if (!block || block.type !== 'toolCall') return undefined
+  return {
+    id: block.id,
+    name: displayToolName(block.name, block.arguments as Record<string, unknown>),
+    ...(event.type === 'toolcall_delta' ? {} : { arguments: {} }),
+  }
+}
+
+/** Extract only the small structured delta from Pi's cumulative message_update event. */
+export function serializePiAssistantDelta(event: AssistantMessageEvent): AgentAssistantDelta | undefined {
+  switch (event.type) {
+    case 'start': return { type: 'start' }
+    case 'text_start': return { type: 'text_start', contentIndex: event.contentIndex }
+    case 'text_delta': return { type: 'text_delta', contentIndex: event.contentIndex, delta: event.delta }
+    case 'text_end': return { type: 'text_end', contentIndex: event.contentIndex, content: event.content }
+    case 'thinking_start': return { type: 'thinking_start', contentIndex: event.contentIndex }
+    case 'thinking_delta': return { type: 'thinking_delta', contentIndex: event.contentIndex, delta: event.delta }
+    case 'thinking_end': return { type: 'thinking_end', contentIndex: event.contentIndex, content: event.content }
+    case 'toolcall_start': {
+      const toolCall = toolCallDeltaFromPartial(event)
+      return { type: 'toolcall_start', contentIndex: event.contentIndex, ...(toolCall ? { toolCall } : {}) }
+    }
+    case 'toolcall_delta': {
+      const toolCall = toolCallDeltaFromPartial(event)
+      return { type: 'toolcall_delta', contentIndex: event.contentIndex, delta: event.delta, ...(toolCall ? { toolCall } : {}) }
+    }
+    case 'toolcall_end':
+      return {
+        type: 'toolcall_end',
+        contentIndex: event.contentIndex,
+        toolCall: {
+          id: event.toolCall.id,
+          name: displayToolName(event.toolCall.name, event.toolCall.arguments as Record<string, unknown>),
+          arguments: event.toolCall.arguments as Record<string, unknown>,
+        },
+      }
+    default:
+      return undefined
+  }
+}
+
 export interface PiRemoteConnectionSettings {
   httpProxy?: string
   transport?: PiAgentTransport
@@ -240,9 +292,6 @@ interface AsyncQueue<T> {
   close: () => void
   next: () => Promise<IteratorResult<T>>
 }
-
-/** Pi 原生每个 delta 都携带累计消息；20fps 足够流畅，同时避免 IPC/React 事件风暴。 */
-const PI_PARTIAL_UPDATE_INTERVAL_MS = 50
 
 function getCaseInsensitiveRuntimeEnvValue(env: Record<string, string> | undefined, key: string): string | undefined {
   if (!env) return undefined
@@ -693,6 +742,13 @@ export function canRunCurrentSessionCompaction(toolNames: string[]): boolean {
   return toolNames.length === 1 && toolNames[0] === 'CompactContext'
 }
 
+/** AskUserQuestion 必须暂停整个工具批次，不能与后续动作混合执行。 */
+export function shouldBlockToolForAskUserQuestion(toolNames: string[], toolName: string): boolean {
+  return toolName !== 'AskUserQuestion'
+    && toolNames.includes('AskUserQuestion')
+    && toolNames.length > 1
+}
+
 /**
  * Pi emits `agent_end` before it decides whether an error needs overflow
  * compaction. Keep this one error class local until the matching compaction
@@ -730,11 +786,19 @@ function installCurrentSessionCompactionHooks(session: AgentSession): void {
   const previousBeforeToolCall = session.agent.beforeToolCall
   session.agent.beforeToolCall = async (context, signal) => {
     const previousResult = await previousBeforeToolCall?.(context, signal)
-    if (previousResult?.block || context.toolCall.name !== 'CompactContext') return previousResult
+    if (previousResult?.block) return previousResult
 
     const toolNames = context.assistantMessage.content
       .filter((block) => block.type === 'toolCall')
       .map((block) => block.name)
+    if (shouldBlockToolForAskUserQuestion(toolNames, context.toolCall.name)) {
+      return {
+        block: true,
+        reason: 'AskUserQuestion 会暂停 Agent，不能与其他工具在同一批次执行。请在收到用户回答后再调用后续工具。',
+      }
+    }
+
+    if (context.toolCall.name !== 'CompactContext') return previousResult
     if (canRunCurrentSessionCompaction(toolNames)) return previousResult
 
     // Pi only honors terminate when every tool in a batch is terminating. Rejecting
@@ -1163,8 +1227,35 @@ export function isPiBashToolAvailable(
   runtimeEnv: Pick<AgentRuntimeEnv, 'shellKind'> | undefined,
 ): boolean {
   // Pi 的 Windows Bash 工具只能通过 Proma 配置的 Git Bash 或 WSL 执行。
-  // 没有可用 Shell 时，基础 Agent 仍可使用文件与 Proma 工具，但不能暴露一个必然失败的 Bash 工具。
   return platform !== 'win32' || runtimeEnv?.shellKind === 'git-bash' || runtimeEnv?.shellKind === 'wsl'
+}
+
+/** Pi 0.84.3 起可在 Windows 无 Git Bash / WSL 时使用系统原生 PowerShell。 */
+export function isPiPowerShellToolAvailable(platform: NodeJS.Platform): boolean {
+  return platform === 'win32'
+}
+
+export type PiBuiltinShellTool = 'bash' | 'powershell' | 'none'
+
+/** 每个会话只暴露一种 Shell，避免模型混用 Bash 与 PowerShell 语法。 */
+export function selectPiBuiltinShellTool(
+  platform: NodeJS.Platform,
+  runtimeEnv: Pick<AgentRuntimeEnv, 'shellKind'> | undefined,
+): PiBuiltinShellTool {
+  if (isPiBashToolAvailable(platform, runtimeEnv)) return 'bash'
+  if (isPiPowerShellToolAvailable(platform)) return 'powershell'
+  return 'none'
+}
+
+function createPromaPowerShellToolOptions(runtimeEnv: AgentRuntimeEnv | undefined): PowerShellToolOptions | undefined {
+  if (!runtimeEnv) return undefined
+  return {
+    spawnHook: ({ command, cwd, env }) => ({
+      command,
+      cwd,
+      env: mergeRuntimeEnv(env, runtimeEnv.env),
+    }),
+  }
 }
 
 function buildBuiltinToolDefinitions(
@@ -1173,10 +1264,14 @@ function buildBuiltinToolDefinitions(
   canUseTool: PiAgentQueryOptions['canUseTool'],
   runtimeEnv: AgentRuntimeEnv | undefined,
 ): ToolDefinition[] {
+  const shellTool = selectPiBuiltinShellTool(process.platform, runtimeEnv)
   const definitions = [
     sdk.createReadToolDefinition(cwd),
-    ...(isPiBashToolAvailable(process.platform, runtimeEnv)
+    ...(shellTool === 'bash'
       ? [sdk.createBashToolDefinition(cwd, createPromaBashToolOptions(runtimeEnv))]
+      : []),
+    ...(shellTool === 'powershell'
+      ? [sdk.createPowerShellToolDefinition(cwd, createPromaPowerShellToolOptions(runtimeEnv))]
       : []),
     sdk.createEditToolDefinition(cwd),
     sdk.createWriteToolDefinition(cwd),
@@ -1190,8 +1285,17 @@ function buildBuiltinToolDefinitions(
 }
 
 function appendWindowsBaseModeInstruction(systemPrompt: string, runtimeEnv: AgentRuntimeEnv | undefined): string {
-  if (process.platform !== 'win32' || isPiBashToolAvailable(process.platform, runtimeEnv)) {
+  const shellTool = selectPiBuiltinShellTool(process.platform, runtimeEnv)
+  if (process.platform !== 'win32' || shellTool === 'bash') {
     return systemPrompt
+  }
+
+  if (shellTool === 'powershell') {
+    return `${systemPrompt}
+
+<runtime_capabilities>
+当前 Windows 设备未配置 Git Bash 或 WSL，因此 Bash 工具不可用；已启用原生 PowerShell 工具。需要运行命令、测试或 Git 操作时，请使用 PowerShell，并采用 PowerShell 语法；不要调用 InstallWindowsShell。
+</runtime_capabilities>`
   }
 
   return `${systemPrompt}
@@ -1266,14 +1370,11 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     active.onSkillActivated = input.onSkillActivated
     let unsubscribe: (() => void) | undefined
     let requestProxyDispatcher: Dispatcher | undefined
-    let partialAssistantCoalescer: PartialMessageCoalescer<{ message: AssistantMessage; uuid: string }> | undefined
 
     const cleanupActiveSession = (): void => {
       try {
         unsubscribe?.()
         unsubscribe = undefined
-        partialAssistantCoalescer?.dispose()
-        partialAssistantCoalescer = undefined
         if (!active.disposed) {
           active.disposed = true
           rejectPendingInterruptPrompts(active, createAbortError())
@@ -1319,6 +1420,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       let pendingCompactionContinuation: string | undefined
       let automaticCompactionContinuations = 0
       let pendingTerminalResult: SDKMessage | undefined
+      /** 当前压缩是否紧随一个成功完成的主 Agent turn。 */
+      let completedAgentTurnPendingCompaction = false
       const customTools = [
         buildCurrentSessionCompactionTool(
           sdk,
@@ -1342,15 +1445,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         compaction: { enabled: true, reserveTokens: autoCompactionReserveTokens },
         // Pi 原生 retry 通过 agent.continue() 在同一 transcript 中恢复，能保留已完成的
         // tool_result；不能用外层重投原始 prompt 替代，否则会重复执行副作用工具。
-        // 单段和整轮均最多 8 次；累计 backoff 最多 5 分钟。±20% jitter 避免多个
-        // 客户端在固定指数退避边界同时重试。provider retry 保持默认 0，避免嵌套计数。
         retry: {
           enabled: true,
           maxRetries: PI_NATIVE_MAX_RETRIES,
-          maxTotalRetries: PI_NATIVE_MAX_TOTAL_RETRIES,
           baseDelayMs: PI_NATIVE_RETRY_BASE_DELAY_MS,
-          maxTotalDelayMs: PI_NATIVE_MAX_TOTAL_DELAY_MS,
-          jitterRatio: PI_NATIVE_RETRY_JITTER_RATIO,
         },
         ...buildPiRemoteConnectionSettings(input),
       })
@@ -1498,7 +1596,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       } as unknown as SDKMessage)
 
       const assistantUuidTracker = createPiAssistantUuidTracker()
-      let lastPartialAssistant: AssistantMessage | undefined
       // Pi 会在 native retry 前先发出 error assistant，再以 agent_end.willRetry 标记。
       // 延迟向 orchestrator 透传该 error，避免它先触发外层重试而重放整个 prompt。
       const retryTerminalGate = createPiRetryTerminalGate<{
@@ -1524,7 +1621,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const assistantUuidFor = (): string => assistantUuidTracker.get()
       const resetAssistantStream = (): void => {
         assistantUuidTracker.reset()
-        lastPartialAssistant = undefined
       }
 
       const emitTerminalRetryError = (terminalRetryError: {
@@ -1538,14 +1634,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         resetAssistantStream()
       }
 
-      partialAssistantCoalescer = createPartialMessageCoalescer(({ message, uuid }) => {
-        const converted = convertPiMessage(message, session.sessionId, input.model, {
-          final: false,
-          uuid,
-        })
-        if (converted?.type === 'assistant') queue.push(converted)
-      }, PI_PARTIAL_UPDATE_INTERVAL_MS)
-
       unsubscribe = session.subscribe((event: AgentSessionEvent) => {
         try {
           switch (event.type) {
@@ -1558,29 +1646,31 @@ export class PiAgentAdapter implements AgentProviderAdapter {
             }
             case 'message_update': {
               if (!isAssistantPiMessage(event.message)) break
-              lastPartialAssistant = event.message
-              // Pi 的 partial 是累计全文。合并为最多 20fps 的最新帧，避免每 token 都在
-              // main → IPC → renderer 路径重复复制整段消息；message_end 始终立即透传。
-              partialAssistantCoalescer?.schedule({ message: event.message, uuid: assistantUuidFor() })
+              const assistantUuid = assistantUuidFor()
+              const delta = serializePiAssistantDelta(event.assistantMessageEvent)
+              if (delta) {
+                queue.push({
+                  type: 'assistant_delta',
+                  uuid: assistantUuid,
+                  delta,
+                  session_id: session.sessionId,
+                  ...(input.model && { _channelModelId: input.model }),
+                } as unknown as SDKMessage)
+              }
               break
             }
             case 'message_end': {
-              partialAssistantCoalescer?.flush()
               if (active.interrupting && isAbortedAssistantMessage(event.message)) {
-                if (lastPartialAssistant) {
-                  const converted = convertPiMessage(lastPartialAssistant, session.sessionId, input.model, {
-                    final: true,
-                    uuid: assistantUuidFor(),
-                  })
-                  if (converted?.type === 'assistant') queue.push(converted)
-                }
+                const converted = convertPiMessage(event.message, session.sessionId, input.model, {
+                  uuid: assistantUuidFor(),
+                })
+                if (converted?.type === 'assistant') queue.push(converted)
                 resetAssistantStream()
                 break
               }
               const isAssistant = isAssistantPiMessage(event.message)
               const assistantUuid = isAssistant ? assistantUuidFor() : undefined
               const converted = convertPiMessage(event.message, session.sessionId, input.model, {
-                final: true,
                 ...(assistantUuid && { uuid: assistantUuid }),
               })
               const shouldDeferNativeOverflow = isAssistant
@@ -1608,6 +1698,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               break
             }
             case 'agent_end':
+              completedAgentTurnPendingCompaction = false
               if (active.abortRequested || (active.interrupting && active.pendingInterruptPrompts.length > 0)) {
                 // 用户停止或插入新 prompt 时，当前 loop 的错误与 result 都不得泄漏到下一轮。
                 retryTerminalGate.settle(true)
@@ -1640,14 +1731,18 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               // Pi can start auto-compaction after agent_end but before session.prompt()
               // resolves. Defer the terminal result until then, otherwise the orchestrator's
               // result-drain timeout may dispose the session and abort compaction.
-              pendingTerminalResult = convertResultMessage(
+              const terminalResult = convertResultMessage(
                 event.messages,
                 session.sessionId,
                 runtimeGuard.getResultOverride(event.messages),
               )
+              pendingTerminalResult = terminalResult
+              completedAgentTurnPendingCompaction = shouldMarkCompactionAfterCompletedTurn(
+                terminalResult,
+                compactContextRequested,
+              )
               break
             case 'auto_retry_start':
-            case 'auto_retry_attempt_start':
             case 'auto_retry_end':
               for (const retry of mapPiNativeRetryEvent(event, { runStartedAt: retryRunStartedAt })) input.onRetry?.(retry)
               break
@@ -1660,15 +1755,20 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 parent_tool_use_id: null,
               } as unknown as SDKMessage)
               break
-            case 'compaction_start':
+            case 'compaction_start': {
+              const afterCompletedTurn = completedAgentTurnPendingCompaction
+              completedAgentTurnPendingCompaction = false
               // 压缩开始（手动 /compact 或自动阈值/溢出触发）：发前端已识别的 compacting system 消息，
               // 展示「正在压缩上下文...」分隔符。此前迁移遗漏了该事件，导致自动压缩与手动压缩都无 UI。
+              // 只有成功完成主 turn 后才进入可验收完成态；运行中压缩仍保持 running。
               queue.push({
                 type: 'system',
                 subtype: 'compacting',
                 session_id: session.sessionId,
+                afterCompletedTurn,
               } as unknown as SDKMessage)
               break
+            }
             case 'compaction_end':
               if (pendingNativeOverflowRecovery && event.reason === 'overflow') {
                 pendingNativeOverflowRecovery = false

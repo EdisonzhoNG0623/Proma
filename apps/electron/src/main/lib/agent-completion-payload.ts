@@ -19,19 +19,21 @@ export function loadCompletionMessagesIfRequested<T>(include: boolean | undefine
 }
 
 export function buildAgentStreamCompletePayload(
-  run: Readonly<Pick<AgentSendInput, 'sessionId' | 'triggeredBy'>>,
+  run: Readonly<Pick<AgentSendInput, 'sessionId' | 'triggeredBy'> & { runGeneration?: number }>,
   details: AgentStreamCompletionDetails = {},
 ): AgentStreamCompletePayload {
+  const { runGeneration, ...otherDetails } = details
   return {
     sessionId: run.sessionId,
     triggeredBy: run.triggeredBy,
-    ...details,
+    ...otherDetails,
+    ...(runGeneration != null ? { runGeneration } : run.runGeneration != null ? { runGeneration: run.runGeneration } : {}),
   }
 }
 
 export function sendAgentStreamComplete(
   target: AgentStreamCompleteTarget,
-  run: Readonly<Pick<AgentSendInput, 'sessionId' | 'triggeredBy'>>,
+  run: Readonly<Pick<AgentSendInput, 'sessionId' | 'triggeredBy'> & { runGeneration?: number }>,
   details: AgentStreamCompletionDetails = {},
 ): void {
   target.send(

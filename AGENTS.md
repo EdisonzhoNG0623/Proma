@@ -75,7 +75,7 @@ release-notes/                    版本发布日志
 
 ### Hermes Windows 发布
 
-- Hermes 正式标签使用 `v<上游版本>-hermes.<序号>`；当前基线为 `v0.17.27-hermes.1` / 上游 `main@c52b61a5`。
+- Hermes 正式标签使用 `v<上游版本>-hermes.<序号>`；当前基线为 `v0.19.16-hermes.1` / 上游 `main@9415c521`。
 - CI 与本地发布验证固定使用 Bun `1.3.14`。Windows x64 必须同时生成 NSIS 安装包和 electron-builder `zip` 免安装包。
 - 产物名固定为 `Proma-Setup-${version}.exe`、对应 `.blockmap`、`Proma-${version}-portable.zip`、`latest.yml` 和 `SHA256SUMS.txt`。
 - `latest.yml` 必须指向 NSIS 安装包；ZIP 只供手动下载。发布目标和应用内更新/Release Notes 均为 `EdisonzhoNG0623/Proma`。

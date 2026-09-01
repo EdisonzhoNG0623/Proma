@@ -24,6 +24,7 @@ export type ProviderType =
   | 'ark-coding-plan'
   | 'minimax'
   | 'doubao'
+  | 'doubao-api'
   | 'qwen'
   | 'qwen-anthropic'
   | 'qwen-token-plan'
@@ -58,6 +59,7 @@ export const PROVIDER_DEFAULT_URLS: Record<ProviderType, string> = {
   'ark-coding-plan': 'https://ark.cn-beijing.volces.com/api/plan',
   minimax: 'https://api.minimaxi.com/anthropic',
   doubao: 'https://ark.cn-beijing.volces.com/api/v3',
+  'doubao-api': 'https://ark.cn-beijing.volces.com/api/v3',
   qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   'qwen-anthropic': 'https://dashscope.aliyuncs.com/apps/anthropic',
   // Token Plan Anthropic endpoint is provided as a complete messages URL.
@@ -80,17 +82,18 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
   'openai-responses': 'OpenAI Responses 格式',
   deepseek: 'DeepSeek',
   google: 'Google',
-  'kimi-api': 'Kimi API (Anthropic 协议)',
+  'kimi-api': 'Kimi API',
   'kimi-coding': 'Kimi Coding Plan',
   'opencode-go-openai': 'OpenCode Go (OpenAI 协议)',
   zhipu: '智谱 AI',
   'zhipu-coding': '智谱 Coding Plan',
   'zhipu-coding-team': '智谱 Coding Plan 团队版',
-  'ark-coding-plan': '火山方舟 Coding Plan',
+  'ark-coding-plan': '火山方舟 Agent Plan',
   minimax: 'MiniMax (API&编程包)',
-  doubao: '豆包',
+  doubao: '火山方舟 Coding Plan',
+  'doubao-api': '火山引擎 API',
   qwen: '通义千问',
-  'qwen-anthropic': '通义千问 (Anthropic 协议)',
+  'qwen-anthropic': '通义千问 (Anthropic 协议·旧版)',
   'qwen-token-plan': '通义千问 Token Plan',
   xiaomi: '小米 MiMo (API)',
   'xiaomi-token-plan': '小米 MiMo Token Plan',
@@ -274,6 +277,22 @@ export interface ChannelModel {
 }
 
 /**
+ * 火山方舟 Coding Plan 当前支持的模型名。
+ *
+ * Coding Plan 的 `/models` 返回的是方舟通用模型目录，不等于订阅套餐的授权清单，
+ * 因此不能直接把该接口返回值作为渠道模型列表。
+ */
+export const VOLCENGINE_CODING_PLAN_MODELS: readonly ChannelModel[] = [
+  { id: 'doubao-seed-2.1-turbo', name: 'Doubao Seed 2.1 Turbo', enabled: true },
+  { id: 'doubao-seed-2.0-lite', name: 'Doubao Seed 2.0 Lite', enabled: true },
+  { id: 'minimax-m3', name: 'MiniMax M3', enabled: true },
+  { id: 'glm-5.3', name: 'GLM-5.3', enabled: true },
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', enabled: true },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true },
+  { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code', enabled: true },
+]
+
+/**
  * 渠道配置
  *
  * 存储在 ~/.proma/channels.json 中，apiKey 字段为加密后的 base64 字符串
@@ -331,6 +350,8 @@ export interface ChannelUpdateInput {
 export interface ChannelsConfig {
   /** 配置版本号 */
   version: number
+  /** 已应用的一次性预设模型更新 ID，避免重复补回用户已删除的候选模型 */
+  appliedPresetModelUpdates?: string[]
   /** 渠道列表 */
   channels: Channel[]
 }

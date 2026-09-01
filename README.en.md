@@ -15,7 +15,7 @@ It is not just another chat box. Proma is meant to become a long-lived Agent wor
 - **In-app browser automation**: the Agent can directly operate the built-in managed browser—opening pages, inspecting page structure, clicking / filling controls, switching tabs, and opening `localhost` dev services; in-site search, post-login pages, dynamic content, and local HTML previews can all be handled by the Agent without manual copy-paste.
 - **Collaboration and tasks**: complex work can be split into traceable collaboration sub-agents and tasks, with calls and results shown in the message stream.
 - **Skills, MCP, and project instructions**: each Proma project manages its own Skills and MCP servers. Projects can declare trusted project instructions via `AGENTS.md`, and legacy `CLAUDE.md` configurations are auto-migrated. Project files can use a user-selected local project root or a Proma-managed blank-project directory.
-- **Hermes Remote (experimental, `0.17.27-hermes.1`)**: explicitly switch between local Pi and a Hermes target, with Dashboard / API Server protocols, Direct / SSH transports, remote projects and sessions, atomic attachments, interactions, and real remote stop.
+- **Hermes Remote (experimental, `0.19.16-hermes.1`)**: explicitly switch between local Pi and a Hermes target, with Dashboard / API Server protocols, Direct / SSH transports, remote projects and sessions, atomic attachments, interactions, and real remote stop.
 - **Remote bots**: Lark / Feishu bot bridging is supported, with DingTalk and WeChat bridge entry points also present in the app.
 - **Memory and tools**: Chat and Agent can share workspace memory, with memory changes tracked and refresh prompts shown in the UI; web search, built-in Chat tools, and Agent recommendation helpers are also available.
 - **Local-first data**: conversations, workspaces, attachments, settings, and Skills are stored under `~/.proma/` as JSON / JSONL files, without a local database.
@@ -128,7 +128,7 @@ Proma's Agent mode is driven by a single **Pi Agent Runtime**, powered by `@eare
 
 ## Hermes Remote (Experimental)
 
-`0.17.27-hermes.1` layers Hermes Remote on upstream `main@c52b61a5` (app manifest `0.17.27`, six commits after `v0.17.26`). Local Agent sessions remain Pi-only. Hermes is routed as an explicit external runtime at the main-process service boundary and never enters Pi providers, local workspace context, or local Agent JSONL history.
+`0.19.16-hermes.1` layers Hermes Remote on upstream `main@9415c521` (app manifest `0.19.16`). Local Agent sessions remain Pi-only. Hermes is routed as an explicit external runtime at the main-process service boundary and never enters Pi providers, local workspace context, or local Agent JSONL history.
 
 - The input area provides a dedicated `Local Pi ↔ Hermes Remote` runtime selector and direct Hermes target selection; Claude Code is not restored.
 - Switching runtime or target creates a separate session identity, so Pi JSONL and Hermes canonical snapshots are never mixed.
@@ -137,7 +137,7 @@ Proma's Agent mode is driven by a single **Pi Agent Runtime**, powered by `@eare
 - Direct and SSH Tunnel transports, target-scoped credentials, cookie partitions, SSH host-key confirmation, and restricted SFTP browsing remain supported.
 - Dashboard sessions retain remote canonical history, live streaming, approval / clarify / sudo / secret interactions, image and file attachments, real remote stop, and media recovery after restart.
 - The remote snapshot is the source of truth; its local derived cache can be rebuilt, and Hermes never reads or appends local Agent JSONL.
-- Windows x64 installer, portable ZIP, and SHA-256 checksums are published in [`v0.17.27-hermes.1`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.17.27-hermes.1).
+- Windows x64 installer, portable ZIP, and SHA-256 checksums are published in [`v0.19.16-hermes.1`](https://github.com/EdisonzhoNG0623/Proma/releases/tag/v0.19.16-hermes.1).
 
 ## Tech Stack
 
@@ -224,9 +224,6 @@ Before opening a PR, please check:
 
 - [Shiki](https://shiki.style/): code highlighting.
 - [Beautiful Mermaid](https://github.com/lukilabs/beautiful-mermaid): Mermaid diagram rendering.
-- [Cherry Studio](https://github.com/CherryHQ/cherry-studio): inspiration for multi-provider desktop AI products.
-- [Lobe Icons](https://github.com/lobehub/lobe-icons): AI / LLM brand icons.
-- [Craft Agents OSS](https://github.com/lukilabs/craft-agents-oss): Agent SDK integration reference.
 
 ## License
 

@@ -227,8 +227,6 @@ export interface SDKAssistantMessage {
   isReplay?: boolean
   /** 渠道配置的模型 ID，持久化/流式期间注入，用于正确匹配模型显示名 */
   _channelModelId?: string
-  /** 产生此消息的渠道 ID；用于在同名模型跨渠道时恢复精确展示信息。 */
-  _channelId?: string
   /** 渠道 provider，用于按 Agent SDK 实际运行窗口计算压缩阈值 */
   _channelProvider?: ProviderType
 }
@@ -292,8 +290,6 @@ export interface SDKResultMessage {
   skill_activations?: SkillActivation[]
   /** 渠道配置的模型 ID，用于缺失 modelUsage.contextWindow 时按 Agent SDK 运行窗口兜底 */
   _channelModelId?: string
-  /** 产生此消息的渠道 ID；用于在同名模型跨渠道时恢复精确展示信息。 */
-  _channelId?: string
   /** 渠道 provider，用于按 Agent SDK 实际运行窗口计算压缩阈值 */
   _channelProvider?: ProviderType
 }
@@ -317,6 +313,8 @@ export interface SDKSystemMessage {
   compact_error?: string
   /** Pi 手动压缩后的上下文 token 预估值 */
   compactionEstimatedTokensAfter?: number
+  /** 本次压缩是否紧随一个无需续跑的成功主 Agent turn。 */
+  afterCompletedTurn?: boolean
   summary?: string
   output_file?: string
   last_tool_name?: string
@@ -586,7 +584,7 @@ export type AgentEvent =
   // Usage 更新
   | { type: 'usage_update'; usage: AgentEventUsage }
   // 上下文压缩
-  | { type: 'compacting' }
+  | { type: 'compacting'; afterCompletedTurn?: boolean }
   | {
     type: 'compact_complete'
     status: 'success' | 'noop' | 'failed'
@@ -631,12 +629,12 @@ export type PromaEvent =
   | { type: 'context_window'; contextWindow: number }
   | { type: 'permission_mode_changed'; mode: PromaPermissionMode }
   | { type: 'title_updated'; title: string }
-  | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; title?: string; workspaceId?: string; modelId?: string; channelId?: string; startedAt: number; session?: AgentSessionMeta }
-  /** 普通桌面会话已开始执行；startedAt 用于区分同一会话的连续运行。 */
-  | { type: 'run_started'; startedAt: number }
+  | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number; runGeneration?: number; session?: AgentSessionMeta }
+  /** 普通桌面会话已开始执行；startedAt 用于展示，runGeneration 是主进程单调递增的可靠代际。 */
+  | { type: 'run_started'; startedAt: number; runGeneration?: number }
   | { type: 'run_resumed'; sessionId: string }
   /** 用户主动停止当前执行；startedAt 防止旧运行的终态覆盖新一轮执行。 */
-  | { type: 'run_stopped'; startedAt?: number }
+  | { type: 'run_stopped'; startedAt?: number; runGeneration?: number }
   // 协作子会话阻塞事件上浮
   | { type: 'delegation_blocked'; delegationId: string; blockedEvent: unknown }
   // 自动任务会话被用户接管（毕业）
@@ -645,9 +643,40 @@ export type PromaEvent =
 /** 外部入口触发 Agent 运行的来源 */
 export type AgentExternalRunSource = 'feishu' | 'dingtalk' | 'wechat' | 'bridge' | 'delegation'
 
-/** IPC 传输的统一 payload（替代 AgentEvent） */
+/** Pi AssistantMessageEvent 的可序列化增量；不携带累计 partial，避免跨进程复制整段输出。 */
+export type AgentAssistantDelta =
+  | { type: 'start' }
+  | { type: 'text_start'; contentIndex: number }
+  | { type: 'text_delta'; contentIndex: number; delta: string }
+  | { type: 'text_end'; contentIndex: number; content: string }
+  | { type: 'thinking_start'; contentIndex: number }
+  | { type: 'thinking_delta'; contentIndex: number; delta: string }
+  | { type: 'thinking_end'; contentIndex: number; content: string }
+  | { type: 'toolcall_start'; contentIndex: number; toolCall?: AgentToolCallDelta }
+  | { type: 'toolcall_delta'; contentIndex: number; delta: string; toolCall?: AgentToolCallDelta }
+  | { type: 'toolcall_end'; contentIndex: number; toolCall: AgentToolCallDelta }
+
+export interface AgentToolCallDelta {
+  id: string
+  name: string
+  arguments?: Record<string, unknown>
+}
+
+export interface AgentAssistantDeltaPayload {
+  uuid: string
+  deltas: AgentAssistantDelta[]
+  session_id?: string
+  /** 产生该 Delta 的 Agent run 起始时间；仅存在于运行时 payload，不写入 JSONL。 */
+  runStartedAt?: number
+  /** 主进程为本次运行分配的单调代际，优先于时间戳用于拒绝迟到事件。 */
+  runGeneration?: number
+  _channelModelId?: string
+}
+
+/** SDK 消息与 AgentAssistantDeltaPayload 分离，Delta 只存在于运行时，不写入 JSONL。 */
 export type AgentStreamPayload =
   | { kind: 'sdk_message'; message: SDKMessage }
+  | { kind: 'sdk_delta'; delta: AgentAssistantDeltaPayload }
   | { kind: 'proma_event'; event: PromaEvent }
 
 // ===== Agent 会话管理 =====
@@ -748,12 +777,24 @@ export interface AgentSessionMeta {
   starred?: boolean
   /** 是否已归档 */
   archived?: boolean
+  /**
+   * 尚未发送首条消息的临时输入会话。该标记须持久化，避免应用重启后在侧栏中冒出空会话。
+   */
+  isDraft?: boolean
   /** 附加的外部目录路径列表（绝对路径，作为 SDK additionalDirectories 传递） */
   attachedDirectories?: string[]
   /** 附加的外部文件路径列表（绝对路径，发送时以父目录作为 SDK additionalDirectories） */
   attachedFiles?: string[]
   /** 分叉来源：源会话的 Proma 工作目录（SDK session 文件在此目录的项目空间中，首次 resume 后清除） */
   forkSourceDir?: string
+  /** Pi `/tree` 探索分支所属的主线会话；仅探索分支设置，普通 fork 保持 undefined。 */
+  explorationParentSessionId?: string
+  /** Pi `/tree` 探索分支的 assistant 分叉锚点。 */
+  explorationSourceMessageId?: string
+  /** 用户可读的分叉来源，用于重新打开探索分支时恢复上下文提示。 */
+  explorationSourceLabel?: string
+  /** 探索分支的首条新增用户消息已触发过一次标题初始化，防止后续对话覆盖该名称。 */
+  explorationTitleInitializedAt?: number
   /** 历史兼容字段：旧版手动保留状态 */
   manualWorking?: boolean
   /** Agent 执行完成但用户尚未清除完成状态 */
@@ -967,6 +1008,60 @@ export interface WorkspaceMcpConfig {
   servers: Record<string, McpServerEntry>
 }
 
+/** Result of an atomic main-process MCP enable/install and validation operation. */
+export interface McpConnectionMutationResult {
+  config: WorkspaceMcpConfig
+  verification: {
+    success: boolean
+    message: string
+  }
+}
+
+export interface McpInstallMutationResult extends McpConnectionMutationResult {
+  installed: boolean
+}
+
+/** OAuth-capable remote MCP provider currently supported by the built-in connector flow. */
+export type McpOAuthProvider = 'notion' | 'github'
+
+/** Renderer-to-main request for a remote MCP authorization-code + PKCE flow. */
+export interface StartMcpOAuthInput {
+  workspaceSlug: string
+  serverName: string
+  provider: McpOAuthProvider
+  serverUrl: string
+}
+
+/** OAuth connection result that deliberately excludes all secret material. */
+export interface McpOAuthStartResult {
+  provider: McpOAuthProvider
+  serverName: string
+  expiresAt?: number
+}
+
+export interface SaveWorkspaceMcpConfigOptions {
+  /** Names explicitly disabled by a user action; cancels any in-flight validation. */
+  explicitlyDisabledServerNames?: string[]
+}
+
+/** Store a static MCP token in Keychain-backed safeStorage; never persisted in mcp.json. */
+export interface SaveMcpApiKeyInput {
+  workspaceSlug: string
+  serverName: string
+  serverUrl: string
+  headerName: string
+  value: string
+}
+
+/** Non-sensitive status for a CLI integration. Secret values are never returned to the renderer. */
+export interface CliIntegrationStatus {
+  id: string
+  /** Whether the third-party CLI reports an authenticated account. */
+  connected: boolean
+  /** Whether Proma is permitted to use this CLI in the current workspace. */
+  enabled: boolean
+}
+
 // ===== Skill 元数据 =====
 
 /** 从其他工作区导入的 Skill 来源元数据 */
@@ -1123,7 +1218,16 @@ export interface WorkspaceMemorySummary {
 
 /** 工作区能力摘要（MCP + Skill 计数） */
 export interface WorkspaceCapabilities {
-  mcpServers: Array<{ name: string; enabled: boolean; type: McpTransportType }>
+  /** Only non-sensitive validation evidence required for UI state and # MCP filtering. */
+  mcpServers: Array<{
+    name: string
+    enabled: boolean
+    type: McpTransportType
+    lastTestResult?: {
+      success: boolean
+      timestamp: number
+    }
+  }>
   builtinMcpServers: BuiltinMcpServerSummary[]
   skills: SkillMeta[]
   memory: WorkspaceMemorySummary
@@ -1141,6 +1245,8 @@ export interface AgentSendInput {
   userMessage: string
   /** 仅用于持久化/展示的原始用户输入（保留 @file 编码原文，省略时回退到 userMessage） */
   rawUserMessage?: string
+  /** 预分配的用户消息 UUID，用于将主进程持久化消息与渲染端乐观消息去重。 */
+  userMessageUuid?: string
   /** Renderer 生成的消息 ID，用于 Hermes 原子提交与精确回滚。 */
   clientMessageId?: string
   /** Hermes Remote 附件事务；Pi runtime 不使用。 */
@@ -1171,13 +1277,34 @@ export interface AgentSendInput {
   startedAt?: number
   /** 用户点击错误消息的重试时，指向本轮开始前应删除的错误 UUID。 */
   retryOfErrorUuid?: string
-  /** 触发来源：用户手动、定时任务、父 Agent 委派（用于 UI 区分标记） */
-  triggeredBy?: 'user' | 'automation' | 'delegation'
+  /** 触发来源：用户手动、定时任务、父 Agent 委派或外部 Bridge（用于权限与 UI 区分）。 */
+  triggeredBy?: 'user' | 'automation' | 'delegation' | 'external'
   /** 定时任务执行上下文（注入到系统提示词，用户不可见） */
   automationContext?: string
 }
 
 // ===== Agent 队列消息 =====
+
+/** 等待当前 run 结束后由主进程启动的消息。 */
+export interface AgentDeferredQueueMessageInput extends AgentSendInput {
+  queueMessageId: string
+}
+
+/**
+ * 消息提交意图。由主进程基于实时运行状态原子决定注入活跃 Agent 或保留到 deferred queue，
+ * 不能依赖 renderer 的 streaming 快照。
+ */
+export interface AgentSubmitOrEnqueueInput extends AgentDeferredQueueMessageInput {
+  /** after_current：本轮结束后发送；now：尽量立即注入，通道已结束时自动降级为 deferred queue。 */
+  dispatch: 'after_current' | 'now'
+  /** dispatch=now 时，是否软中断当前 turn。 */
+  interrupt?: boolean
+}
+
+export interface AgentSubmitOrEnqueueResult {
+  /** injected：已注入当前活跃 Agent；started：主进程已启动下一轮；queued：仍在等待。 */
+  disposition: 'injected' | 'started' | 'queued'
+}
 
 /** 流式追加消息的输入参数（Agent 流式中发送新消息） */
 export interface AgentQueueMessageInput {
@@ -1207,6 +1334,34 @@ export interface AgentQueueMessageInput {
   mentionedCalendarEventIds?: string[]
 }
 
+export interface AgentQueuedMessageControlInput {
+  sessionId: string
+  messageId: string
+}
+
+export interface AgentMoveQueuedMessageInput {
+  sessionId: string
+  sourceId: string
+  targetId: string
+  placement: 'before' | 'after'
+}
+
+export interface AgentQueuedMessageStatus {
+  sessionId: string
+  messageId: string
+  status: 'started'
+  userMessage: string
+  rawUserMessage?: string
+  startedAt: number
+  runGeneration?: number
+}
+
+/** 主进程 deferred queue 的可恢复展示快照。输入保持原样，以便 renderer 重载后继续取消、移动或显示。 */
+export interface AgentQueuedMessageSnapshot {
+  input: AgentDeferredQueueMessageInput
+  queuedAt: number
+}
+
 // ===== 会话迁移输入 =====
 
 /**
@@ -1227,6 +1382,8 @@ export interface ForkSessionInput {
   upToMessageUuid?: string
   /** 目标模型 ID。省略时继承源会话模型；传入时必须属于源会话同一渠道且已启用 */
   modelId?: string
+  /** 标记为 Pi `/tree` 探索分支，并持久化其在主线中的来源，供关闭后重新打开。 */
+  explorationSourceLabel?: string
 }
 
 /** 快照回退输入（同一会话内回退到指定点） */
@@ -1251,40 +1408,6 @@ export interface RewindSessionResult {
   }
 }
 
-// ===== 后台任务管理 =====
-
-/**
- * 获取任务输出请求
- */
-export interface GetTaskOutputInput {
-  /** 任务 ID */
-  taskId: string
-  /** 是否阻塞等待完成（默认 false） */
-  block?: boolean
-}
-
-/**
- * 获取任务输出响应
- */
-export interface GetTaskOutputResult {
-  /** 任务输出内容 */
-  output: string
-  /** 任务是否已完成 */
-  isComplete: boolean
-}
-
-/**
- * 停止任务请求
- */
-export interface StopTaskInput {
-  /** 会话 ID */
-  sessionId: string
-  /** 任务 ID */
-  taskId: string
-  /** 任务类型 */
-  type: 'agent' | 'shell'
-}
-
 // ===== Agent 流式事件载荷 =====
 
 /**
@@ -1299,19 +1422,38 @@ export interface AgentStreamEvent {
   event?: AgentEvent
 }
 
+export interface AgentActiveSessionSnapshot {
+  sessionId: string
+  /** 对应当前运行实例的启动时间，用于拒绝陈旧的 renderer 恢复快照。 */
+  startedAt: number
+  /** 主进程按 session 单调递增的 run 代际；避免 startedAt 同毫秒碰撞。 */
+  runGeneration?: number
+}
+
+/** Agent 流式错误事件载荷；运行身份用于拒绝迟到错误污染新一轮 UI。 */
+export interface AgentStreamErrorPayload {
+  sessionId: string
+  error: string
+  runGeneration?: number
+}
+
 /**
  * Agent 流式完成事件载荷（主进程 → 渲染进程）。
- * 消息已在主进程或远端真源落盘；renderer 收到完成事件后通过分页或快照接口刷新，
- * 避免在完成事件中传输整段历史。
+ * Pi 路径包含已持久化的消息列表，避免异步重新加载的竞态窗口；
+ * Hermes 远端会话以 snapshot 为真源，完成事件后由 renderer 刷新。
  */
 export interface AgentStreamCompletePayload {
   sessionId: string
   /** 触发来源：用于区分顶层会话与父 Agent 委派的子会话完成 */
   triggeredBy?: AgentSendInput['triggeredBy']
+  /** 已持久化的完整消息列表 */
+  messages?: AgentMessage[]
   /** 是否由用户手动中止 */
   stoppedByUser?: boolean
-  /** 本轮流式开始时间戳（用于区分新旧流，防止旧流的 complete 事件重置新流状态） */
+  /** 本轮流式开始时间戳（用于展示与旧协议兼容）。 */
   startedAt?: number
+  /** 主进程按 session 单调递增的 run 代际；完成事件仅能结束同一代运行。 */
+  runGeneration?: number
   /** SDK result 消息的 subtype（success / error_max_turns / error_max_budget_usd / error_during_execution 等） */
   resultSubtype?: string
   /** SDK result 消息携带的错误详情（error_during_execution 等场景下的真实错误原因，用于展示具体错误） */
@@ -1617,24 +1759,28 @@ export const AGENT_IPC_CHANNELS = {
   // 会话管理
   /** 获取会话列表 */
   LIST_SESSIONS: 'agent:list-sessions',
-  /** 按 ID 获取单条会话元数据（启动恢复归档 Tab 时使用） */
-  GET_SESSION_META: 'agent:get-session-meta',
-  /** 获取活跃/归档会话的数量，不传输完整元数据 */
-  GET_SESSION_COUNTS: 'agent:get-session-counts',
+  /** 获取未归档会话列表，供左侧 active 视图使用 */
+  LIST_ACTIVE_SESSIONS: 'agent:list-active-sessions',
+  /** 获取归档会话列表，进入归档视图时按需调用 */
+  LIST_ARCHIVED_SESSIONS: 'agent:list-archived-sessions',
+  /** 获取归档会话数量，不返回归档元数据 */
+  COUNT_ARCHIVED_SESSIONS: 'agent:count-archived-sessions',
   /** 创建会话 */
   CREATE_SESSION: 'agent:create-session',
+  /** 获取当前主进程仍在执行的 Agent 会话快照 */
+  ACTIVE_SESSIONS_SNAPSHOT: 'agent:active-sessions-snapshot',
+  /** 获取指定会话中仍由主进程持有的 deferred queue 快照。 */
+  GET_QUEUED_MESSAGES: 'agent:get-queued-messages',
   /** 获取会话 SDKMessage（Phase 4 新格式） */
   GET_SDK_MESSAGES: 'agent:get-sdk-messages',
-  /** 按稳定 UUID 获取 canonical 尾段；边界失效返回 null。 */
-  GET_SDK_MESSAGES_AFTER: 'agent:get-sdk-messages-after',
-  /** 分页获取会话尾部 SDKMessage，避免长历史一次性进入 renderer */
-  GET_SDK_MESSAGES_PAGE: 'agent:get-sdk-messages-page',
   /** 更新会话标题 */
   UPDATE_TITLE: 'agent:update-title',
   /** 更新会话模型选择 */
   UPDATE_SESSION_MODEL: 'agent:update-session-model',
   /** 选择或清除当前会话的活动 worktree */
   SET_ACTIVE_WORKTREE: 'agent:set-active-worktree',
+  /** 主进程通知 Renderer：Agent 主动切换了会话的活动 worktree */
+  ACTIVE_WORKTREE_UPDATED: 'agent:active-worktree-updated',
   /** 删除会话 */
   DELETE_SESSION: 'agent:delete-session',
   /** 迁移 Chat 对话记录到 Agent 会话 */
@@ -1694,18 +1840,14 @@ export const AGENT_IPC_CHANNELS = {
   CLOSE_BROWSER_TAB: 'agent:close-browser-tab',
   GET_BROWSER_STATE: 'agent:get-browser-state',
   SET_BROWSER_LAYOUT: 'agent:set-browser-layout',
+  MINIMIZE_BROWSER: 'agent:minimize-browser',
   NAVIGATE_BROWSER: 'agent:navigate-browser',
   GO_BACK_BROWSER: 'agent:go-back-browser',
   GO_FORWARD_BROWSER: 'agent:go-forward-browser',
   RELOAD_BROWSER: 'agent:reload-browser',
   CLOSE_BROWSER: 'agent:close-browser',
   BROWSER_STATE_CHANGED: 'agent:browser-state-changed',
-
-  // 后台任务管理
-  /** 获取任务输出 */
-  GET_TASK_OUTPUT: 'agent:get-task-output',
-  /** 停止任务 */
-  STOP_TASK: 'agent:stop-task',
+  BROWSER_TAB_FOCUSED: 'agent:browser-tab-focused',
 
   // 工作区能力（MCP + Skill）
   /** 获取工作区能力摘要 */
@@ -1714,6 +1856,22 @@ export const AGENT_IPC_CHANNELS = {
   GET_MCP_CONFIG: 'agent:get-mcp-config',
   /** 保存工作区 MCP 配置 */
   SAVE_MCP_CONFIG: 'agent:save-mcp-config',
+  /** 刷新并持久化工作区 MCP 真实连接状态 */
+  REFRESH_MCP_CONNECTIONS: 'agent:refresh-mcp-connections',
+  /** 原子切换 MCP 启用状态，并在启用时条件持久化真实验证结果。 */
+  SET_MCP_ENABLED_AND_VALIDATE: 'agent:set-mcp-enabled-and-validate',
+  /** 原子新增 MCP，并在初始启用时条件持久化真实验证结果。 */
+  INSTALL_MCP_AND_VALIDATE: 'agent:install-mcp-and-validate',
+  /** 启动远程 MCP 的 OAuth PKCE 授权 */
+  START_MCP_OAUTH: 'agent:start-mcp-oauth',
+  /** 安全保存远程 MCP 的静态 API Key / Token */
+  SAVE_MCP_API_KEY: 'agent:save-mcp-api-key',
+  /** 删除工作区 MCP 对应的系统安全凭据，不返回任何凭据。 */
+  DELETE_MCP_CREDENTIAL: 'agent:delete-mcp-credential',
+  /** 查询本机 CLI 集成是否已完成官方配置，不返回任何凭据。 */
+  GET_CLI_INTEGRATION_STATUSES: 'agent:get-cli-integration-statuses',
+  /** 更新 Proma 对工作区 CLI 集成的启用状态；绝不调用第三方 CLI 登出或撤销授权。 */
+  SET_CLI_INTEGRATION_ENABLED: 'agent:set-cli-integration-enabled',
   /** 测试 MCP 服务器连接 */
   TEST_MCP_SERVER: 'agent:test-mcp-server',
   /** 启用或关闭 Proma 内置 MCP */
@@ -1722,6 +1880,8 @@ export const AGENT_IPC_CHANNELS = {
   GET_SKILLS: 'agent:get-skills',
   /** 获取工作区 Skills 目录绝对路径 */
   GET_SKILLS_DIR: 'agent:get-skills-dir',
+  /** 使用系统文件管理器打开指定工作区 Skill 的实际目录 */
+  OPEN_SKILL_FOLDER: 'agent:open-skill-folder',
   /** 删除工作区 Skill */
   DELETE_SKILL: 'agent:delete-skill',
   /** 切换工作区 Skill 启用/禁用 */
@@ -1895,10 +2055,16 @@ export const AGENT_IPC_CHANNELS = {
   EXIT_PLAN_MODE_RESPOND: 'agent:exit-plan-mode:respond',
 
   // 队列消息（Agent 运行中排队发送）
-  /** 排队发送消息 */
+  /** 流式追加发送消息 */
   QUEUE_MESSAGE: 'agent:queue-message',
+  /** 原子提交消息：注入当前运行或交由主进程 deferred queue。 */
+  SUBMIT_OR_ENQUEUE_MESSAGE: 'agent:submit-or-enqueue-message',
+  /** 排队发送消息（兼容旧调用；主进程 deferred queue） */
+  ENQUEUE_QUEUED_MESSAGE: 'agent:enqueue-queued-message',
   /** 取消队列消息 */
   CANCEL_QUEUED_MESSAGE: 'agent:cancel-queued-message',
+  /** 调整队列顺序 */
+  MOVE_QUEUED_MESSAGE: 'agent:move-queued-message',
   /** 提升队列消息为立即发送 */
   PROMOTE_QUEUED_MESSAGE: 'agent:promote-queued-message',
   /** 队列消息状态变更通知（主进程 → 渲染进程推送） */

@@ -7,13 +7,20 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { getSettingsPath } from './config-paths'
-import { DEFAULT_INTERFACE_VARIANT, DEFAULT_THEME_MODE } from '../../types'
+import { DEFAULT_THEME_MODE, normalizeProductivityToolsSettings } from '../../types'
 import type { AgentIslandSettings, AppSettings } from '../../types'
+import { getTerminalProfilesForPlatform, isTerminalProfile } from '@proma/shared'
 
 function sanitizeAgentIslandSettings(input: unknown): AgentIslandSettings | undefined {
   if (!input || typeof input !== 'object') return undefined
   const raw = input as { enabled?: unknown }
   return typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : undefined
+}
+
+export function sanitizeWindowsTerminalProfile(input: unknown): AppSettings['lastWindowsTerminalProfile'] {
+  return isTerminalProfile(input) && getTerminalProfilesForPlatform('win32').includes(input)
+    ? input
+    : undefined
 }
 
 /**
@@ -27,7 +34,6 @@ export function getSettings(): AppSettings {
   if (!existsSync(filePath)) {
     return {
       themeMode: DEFAULT_THEME_MODE,
-      interfaceVariant: DEFAULT_INTERFACE_VARIANT,
       onboardingCompleted: false,
       environmentCheckSkipped: false,
       notificationsEnabled: true,
@@ -35,10 +41,10 @@ export function getSettings(): AppSettings {
       richTextRenderingEnabled: false,
       feishuSessionMirror: { mode: 'off' },
       visionRelay: { enabled: false },
-      builtinMcpDisabledIds: [],
       windowsShellPreference: 'auto',
       agentThinking: { type: 'adaptive' },
       gitAttributionEnabled: true,
+      productivityTools: normalizeProductivityToolsSettings(undefined),
     }
   }
 
@@ -48,18 +54,24 @@ export function getSettings(): AppSettings {
       experimentalAgentRuntimeSwitchEnabled?: boolean
       agentRuntime?: unknown
       agentChannelIds?: unknown
+      builtinMcpDisabledIds?: unknown
+      interfaceVariant?: unknown
+      /** PR #1895 早期构建写入的无平台 profile 字段；仅在 Windows 上迁移。 */
+      lastTerminalProfile?: unknown
     }
-    // Pi-only：读取时丢弃旧 runtime selector/Claude 白名单，避免下次写回复活。
+    // Pi-only：读取时丢弃旧 runtime selector、界面风格与 Claude 白名单，避免下次写回复活。
     const {
       experimentalAgentRuntimeSwitchEnabled: _legacyRuntimeSwitch,
       agentRuntime: _legacyAgentRuntime,
       agentChannelIds: _legacyAgentChannelIds,
+      builtinMcpDisabledIds: _legacyBuiltinMcpDisabledIds,
+      interfaceVariant: _legacyInterfaceVariant,
+      lastTerminalProfile: legacyLastTerminalProfile,
       ...settings
     } = data
     return {
       ...settings,
       themeMode: data.themeMode || DEFAULT_THEME_MODE,
-      interfaceVariant: data.interfaceVariant || DEFAULT_INTERFACE_VARIANT,
       onboardingCompleted: data.onboardingCompleted ?? false,
       environmentCheckSkipped: data.environmentCheckSkipped ?? false,
       notificationsEnabled: data.notificationsEnabled ?? true,
@@ -67,11 +79,15 @@ export function getSettings(): AppSettings {
       richTextRenderingEnabled: data.richTextRenderingEnabled ?? false,
       feishuSessionMirror: data.feishuSessionMirror ?? { mode: 'off' },
       visionRelay: data.visionRelay ?? { enabled: false },
-      builtinMcpDisabledIds: settings.builtinMcpDisabledIds ?? [],
       windowsShellPreference: settings.windowsShellPreference ?? 'auto',
+      lastWindowsTerminalProfile: process.platform === 'win32'
+        ? sanitizeWindowsTerminalProfile(settings.lastWindowsTerminalProfile ?? legacyLastTerminalProfile)
+        : undefined,
       agentThinking: settings.agentThinking ?? { type: 'adaptive' },
       // 缺省 true：老配置文件未写该字段时保持推广默认开启
       gitAttributionEnabled: settings.gitAttributionEnabled ?? true,
+      // 缺省全部开启：老配置文件不会因升级意外隐藏生产力工具。
+      productivityTools: normalizeProductivityToolsSettings(data.productivityTools),
       // 仅保留 macOS 原生 Island 开关；清理旧非原生 surface 的持久化残留字段。
       agentIsland: sanitizeAgentIslandSettings(data.agentIsland),
     }
@@ -79,7 +95,6 @@ export function getSettings(): AppSettings {
     console.error('[设置] 读取失败:', error)
     return {
       themeMode: DEFAULT_THEME_MODE,
-      interfaceVariant: DEFAULT_INTERFACE_VARIANT,
       onboardingCompleted: false,
       environmentCheckSkipped: false,
       notificationsEnabled: true,
@@ -87,10 +102,10 @@ export function getSettings(): AppSettings {
       richTextRenderingEnabled: false,
       feishuSessionMirror: { mode: 'off' },
       visionRelay: { enabled: false },
-      builtinMcpDisabledIds: [],
       windowsShellPreference: 'auto',
       agentThinking: { type: 'adaptive' },
       gitAttributionEnabled: true,
+      productivityTools: normalizeProductivityToolsSettings(undefined),
     }
   }
 }
@@ -109,6 +124,9 @@ export function updateSettings(updates: Partial<AppSettings>): AppSettings {
     agentIsland: updates.agentIsland === undefined
       ? sanitizeAgentIslandSettings(current.agentIsland)
       : sanitizeAgentIslandSettings({ ...current.agentIsland, ...updates.agentIsland }),
+    productivityTools: updates.productivityTools === undefined
+      ? normalizeProductivityToolsSettings(current.productivityTools)
+      : normalizeProductivityToolsSettings({ ...current.productivityTools, ...updates.productivityTools }),
   }
   const filePath = getSettingsPath()
 

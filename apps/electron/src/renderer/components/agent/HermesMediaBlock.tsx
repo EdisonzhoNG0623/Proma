@@ -9,7 +9,6 @@ import { useAtomValue } from 'jotai'
 import { Loader2, ImageOff } from 'lucide-react'
 import { extractHermesMedia, type HermesMediaRef } from '@/lib/hermes-media-extract'
 import { agentSessionsAtom } from '@/atoms/agent-atoms'
-import { useAgentSessionId } from '@/contexts/session-context'
 import { ImageLightbox } from '@/components/ui/image-lightbox'
 
 function HermesMediaImage({ mediaRef, targetId }: { mediaRef: HermesMediaRef; targetId?: string }): React.ReactElement | null {
@@ -87,9 +86,8 @@ function HermesMediaImage({ mediaRef, targetId }: { mediaRef: HermesMediaRef; ta
  * 需在 Hermes 会话（isHermesRemoteSession）的消息渲染处挂载。
  */
 export function HermesMediaBlock({ text, sessionId }: { text: string; sessionId?: string }): React.ReactElement | null {
-  const currentSessionId = useAgentSessionId()
   const sessions = useAtomValue(agentSessionsAtom)
-  const effectiveSessionId = sessionId ?? currentSessionId
+  const effectiveSessionId = sessionId
   const targetId = React.useMemo(() => {
     return sessions.find((s) => s.id === effectiveSessionId)?.hermesTargetId
   }, [sessions, effectiveSessionId])
